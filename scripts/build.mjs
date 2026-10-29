@@ -23,6 +23,9 @@ const APP_HTML = ${JSON.stringify(htmlContent)};
 ${workerContent}
 `;
 
+const rootIndexHtmlPath = path.join(rootDir, 'index.html');
+fs.writeFileSync(rootIndexHtmlPath, htmlContent, 'utf8');
+
 const publicWorkerPath = path.join(rootDir, 'public', 'worker.js');
 fs.writeFileSync(distWorkerPath, bundled, 'utf8');
 fs.writeFileSync(publicWorkerPath, bundled, 'utf8');

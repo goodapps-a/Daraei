@@ -359,12 +359,13 @@ body:has(.modal-backdrop.open) .bottom-nav {
   display: none !important;
 }
 
-/* Tab buttons: Frosted Glass discs with clear active indicator */
+/* Tab buttons (Left & Right: Dashboard and Markets) - NO separate background, purely clean transparent icons */
 .bottom-nav .nav-tab {
-  border: 1px solid rgba(255, 255, 255, 0.55) !important;
-  background: rgba(255, 255, 255, 0.38) !important;
-  backdrop-filter: blur(16px) !important;
-  -webkit-backdrop-filter: blur(16px) !important;
+  border: none !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
   color: var(--muted) !important;
   border-radius: 50% !important;
   display: grid !important;
@@ -373,17 +374,18 @@ body:has(.modal-backdrop.open) .bottom-nav {
   height: 42px !important;
   padding: 0 !important;
   cursor: pointer !important;
-  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+  transition: color 0.18s ease, transform 0.18s ease !important;
   position: relative !important;
   flex: none !important;
-  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05), inset 0 1px 1px rgba(255, 255, 255, 0.85) !important;
+  box-shadow: none !important;
   outline: none !important;
   -webkit-tap-highlight-color: transparent !important;
 }
 .bottom-nav .nav-tab:hover {
   color: var(--ink) !important;
-  background: rgba(255, 255, 255, 0.6) !important;
-  border-color: rgba(255, 255, 255, 0.9) !important;
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
   transform: translateY(-1px) !important;
 }
 .bottom-nav .nav-tab:active,
@@ -392,31 +394,34 @@ body:has(.modal-backdrop.open) .bottom-nav {
 }
 .bottom-nav .nav-tab.active {
   color: #0f172a !important;
-  background: rgba(255, 255, 255, 0.92) !important;
-  border-color: #ffffff !important;
-  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.12), inset 0 1px 1.5px #ffffff !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
   transform: none !important;
 }
 :root[data-theme=dark] .bottom-nav .nav-tab {
-  background: rgba(255, 255, 255, 0.07) !important;
-  border: 1px solid rgba(255, 255, 255, 0.14) !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
   color: #94a3b8 !important;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), inset 0 1px 1px rgba(255, 255, 255, 0.15) !important;
+  box-shadow: none !important;
 }
 :root[data-theme=dark] .bottom-nav .nav-tab:hover {
-  background: rgba(255, 255, 255, 0.14) !important;
+  background: transparent !important;
   color: #ffffff !important;
 }
 :root[data-theme=dark] .bottom-nav .nav-tab.active {
-  color: #ffffff !important;
-  background: rgba(255, 255, 255, 0.22) !important;
-  border-color: rgba(255, 255, 255, 0.35) !important;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5), inset 0 1px 1.5px rgba(255, 255, 255, 0.3) !important;
+  color: #38bdf8 !important;
+  background: transparent !important;
+  background-color: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
 }
 .bottom-nav .nav-tab.active::after {
   content: '';
   position: absolute;
-  bottom: 4px;
+  bottom: 2px;
   width: 4px;
   height: 4px;
   border-radius: 50%;
@@ -597,17 +602,17 @@ body:has(.modal-backdrop.open) .bottom-nav {
   box-sizing: border-box !important;
 }
 
-/* Minimalist 2D Isometric Coin Brand Logo Styles - Black (#0f172a / #f8fafc) & Compact 36px */
+/* Minimalist 2D Isometric Coin Brand Logo Styles - Black (#0f172a / #f8fafc) & Prominent 42px */
 .brand-mark {
   display: grid !important;
   place-items: center !important;
-  width: 36px !important;
-  height: 36px !important;
-  min-width: 36px !important;
-  max-width: 36px !important;
-  min-height: 36px !important;
-  max-height: 36px !important;
-  border-radius: 11px !important;
+  width: 42px !important;
+  height: 42px !important;
+  min-width: 42px !important;
+  max-width: 42px !important;
+  min-height: 42px !important;
+  max-height: 42px !important;
+  border-radius: 13px !important;
   background: var(--paper) !important;
   border: 1.5px solid var(--line) !important;
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05) !important;
@@ -631,8 +636,8 @@ body:has(.modal-backdrop.open) .bottom-nav {
   border-color: #f8fafc !important;
 }
 .brand-mark svg {
-  width: 20px !important;
-  height: 20px !important;
+  width: 28px !important;
+  height: 28px !important;
   display: block !important;
   stroke: currentColor !important;
 }
@@ -933,28 +938,31 @@ body:has(.modal-backdrop.open) .bottom-nav {
   cursor: not-allowed;
 }
 
-/* Chart Tooltip: Strict Fixed-Dimension Date Bubble (Never resizes on hover/drag) */
+/* Chart Tooltip: Strict Fixed-Dimension Date & Time Bubble (Reduced width, increased height, 2 rows) */
 .chart-tooltip {
   position: absolute !important;
-  top: 8px !important;
+  top: 6px !important;
   transform: translateX(-50%) !important;
-  width: 124px !important;
-  min-width: 124px !important;
-  max-width: 124px !important;
-  height: 26px !important;
-  min-height: 26px !important;
-  max-height: 26px !important;
+  width: 76px !important;
+  min-width: 76px !important;
+  max-width: 76px !important;
+  height: 40px !important;
+  min-height: 40px !important;
+  max-height: 40px !important;
   box-sizing: border-box !important;
   display: flex !important;
+  flex-direction: column !important;
   align-items: center !important;
   justify-content: center !important;
+  gap: 1px !important;
   text-align: center !important;
-  padding: 0 4px !important;
+  padding: 3px 5px !important;
   background: var(--paper) !important;
   border: 1px solid var(--line) !important;
-  border-radius: 99px !important;
+  border-radius: 11px !important;
   box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12) !important;
   pointer-events: none !important;
+  direction: rtl !important;
   z-index: 30 !important;
   overflow: hidden !important;
   white-space: nowrap !important;
@@ -963,12 +971,24 @@ body:has(.modal-backdrop.open) .bottom-nav {
 .chart-tooltip .tip-price {
   display: none !important;
 }
-.chart-tooltip .tip-date {
-  font-size: 10.5px !important;
-  font-weight: 700 !important;
+.chart-tooltip .tip-time {
+  font-size: 11.5px !important;
+  font-weight: 900 !important;
   color: var(--ink) !important;
+  direction: ltr !important;
+  display: block !important;
+  line-height: 1.15 !important;
+  margin: 0 !important;
+  white-space: nowrap !important;
+  text-align: center !important;
+}
+.chart-tooltip .tip-date {
+  font-size: 9.5px !important;
+  font-weight: 700 !important;
+  color: var(--muted) !important;
   direction: rtl !important;
-  line-height: 1 !important;
+  display: block !important;
+  line-height: 1.15 !important;
   margin: 0 !important;
   white-space: nowrap !important;
   text-align: center !important;
@@ -3751,9 +3771,14 @@ function authModal(initialTab = 'login', prefill = {}) {
 }
 
 function handleGoogleSignIn(prefillEmail = '') {
-  if (window.authConfig && window.authConfig.google) {
-    location.href = '/api/auth/google/start';
-    return;
+  if (window.authConfig && window.authConfig.google && window.self === window.top) {
+    try {
+      const popup = window.open('/api/auth/google/start', 'GoogleLogin', 'width=520,height=640,status=no,toolbar=no');
+      if (popup && !popup.closed) {
+        toast('پنجرهٔ ورود امن گوگل باز شد');
+        return;
+      }
+    } catch {}
   }
   openModal('ورود سریع با حساب گوگل', `
     <div class="auth-box">

