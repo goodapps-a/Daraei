@@ -1,0 +1,6 @@
+{
+  "name": "دارایی من (Darayi)",
+  "description": "سامانه هوشمند و PWA رصد لحظه‌ای قیمت طلا، ارز، سکه و رمزارز و مدیریت سبد دارایی",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
