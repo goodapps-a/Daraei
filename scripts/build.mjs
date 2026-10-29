@@ -23,5 +23,7 @@ const APP_HTML = ${JSON.stringify(htmlContent)};
 ${workerContent}
 `;
 
+const publicWorkerPath = path.join(rootDir, 'public', 'worker.js');
 fs.writeFileSync(distWorkerPath, bundled, 'utf8');
-console.log(`Successfully built ${distWorkerPath} (${(bundled.length / 1024).toFixed(1)} KB)`);
+fs.writeFileSync(publicWorkerPath, bundled, 'utf8');
+console.log(`Successfully built ${distWorkerPath} and ${publicWorkerPath} (${(bundled.length / 1024).toFixed(1)} KB)`);

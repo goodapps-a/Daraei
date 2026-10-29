@@ -202,7 +202,12 @@ async function resetFinish(req, env, url) {
   return json({ ok: true }, 200, { 'set-cookie': await sessionCookie(env, url, u.id) });
 }
 async function googleStart(env, url) {
-  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) throw new HttpError(503, 'ورود با گوگل پیکربندی نشده است.');
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+    return new Response(null, {
+      status: 302,
+      headers: { location: '/?auth_error=google_not_configured', 'cache-control': 'no-store' }
+    });
+  }
   const state = rand(24), verifier = rand(48);
   await env.DB.prepare('INSERT INTO oauth_states(state_hash,verifier,expires_at) VALUES(?,?,?)').bind(await sha256(state), verifier, nowS() + 600).run();
   const challenge = b64u(await crypto.subtle.digest('SHA-256', enc.encode(verifier)));
@@ -775,6 +780,15 @@ async function route(req, env, url, ctx) {
       } catch {}
     }
     return json(out, 200, { 'access-control-allow-origin': '*' });
+  }
+
+  if (p === '/api/health' && m === 'GET') {
+    return json({
+      ok: true,
+      google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
+      email: !!(env.MAIL_WEBHOOK_URL || env.RESEND_API_KEY || env.EMAIL),
+      db: !!env.DB
+    });
   }
 
   if (p === '/api/history' && m === 'GET') {
