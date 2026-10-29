@@ -16,7 +16,7 @@ if ('caches' in window) {
     for (var i = 0; i < keys.length; i++) caches.delete(keys[i]);
   });
 }
-</script><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' fill='none' stroke='%230f172a' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'><ellipse cx='16' cy='11.5' rx='12' ry='6' fill='%230f172a' fill-opacity='0.18'/><path d='M 4 11.5 v 7.5 c 0 3.3 5.4 6 12 6 s 12 -2.7 12 -6 v -7.5'/><ellipse cx='16' cy='11.5' rx='7.5' ry='3.75' stroke-dasharray='2 1.5' stroke-width='1.6'/><path d='M 16 9.5 L 18.8 11.5 L 16 13.5 L 13.2 11.5 Z' fill='%230f172a' stroke-width='0'/></svg>"><link rel="icon" href="/icons/icon-192.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="دارایی من"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f8fafc"><meta name="description" content="دارایی من؛ داشبورد تعاملی پیگیری طلا، ارز و رمزارز و مدیریت سبد سرمایه‌گذاری"><title>دارایی من (Darayi)</title>
+</script><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/png" href="/assets/aistudio/2_002c399a.png"><link rel="icon" href="/icons/icon-192.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="دارایی من"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f8fafc"><meta name="description" content="دارایی من؛ داشبورد تعاملی پیگیری طلا، ارز و رمزارز و مدیریت سبد سرمایه‌گذاری"><title>دارایی من (Darayi)</title>
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
 <style>
 :root{color-scheme:light;--bg:#f8fafc;--paper:#ffffff;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--lime:#10b981;--primary:#10b981;--green:#059669;--greenbg:#ecfdf5;--red:#e11d48;--redbg:#fff1f2;--purple:#7357ff;--orange:#ff9851;--blue:#56c5e8;--shadow:0 12px 35px rgba(15,23,42,0.06);--radius:20px}
@@ -519,6 +519,16 @@ body:has(.modal-backdrop.open) .bottom-nav {
   place-items: center;
   color: inherit !important;
 }
+.coin-isometric-btn img,
+.coin-isometric-btn .nav-coin-img {
+  width: 32px !important;
+  height: 32px !important;
+  max-width: 32px !important;
+  max-height: 32px !important;
+  object-fit: contain !important;
+  display: block !important;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.12));
+}
 .coin-isometric-btn svg {
   stroke: currentColor !important;
   width: 24px !important;
@@ -634,6 +644,15 @@ body:has(.modal-backdrop.open) .bottom-nav {
 }
 :root[data-theme=dark] .brand-mark:hover {
   border-color: #f8fafc !important;
+}
+.brand-mark img,
+.brand-mark .brand-logo-img {
+  width: 30px !important;
+  height: 30px !important;
+  max-width: 30px !important;
+  max-height: 30px !important;
+  object-fit: contain !important;
+  display: block !important;
 }
 .brand-mark svg {
   width: 28px !important;
@@ -2462,12 +2481,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">
-        <svg width="24" height="24" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="16" cy="11.5" rx="12" ry="6" fill="currentColor" fill-opacity="0.18"/>
-          <path d="M 4 11.5 v 7.5 c 0 3.3 5.4 6 12 6 s 12 -2.7 12 -6 v -7.5"/>
-          <ellipse cx="16" cy="11.5" rx="7.5" ry="3.75" stroke-dasharray="2 1.5" stroke-width="1.6"/>
-          <path d="M 16 9.5 L 18.8 11.5 L 16 13.5 L 13.2 11.5 Z" fill="currentColor" stroke-width="0"/>
-        </svg>
+        <img src="/assets/aistudio/2_002c399a.png" alt="دارایی" class="brand-logo-img" width="30" height="30">
       </span>
       <div>
         <div>دارایی من</div>
@@ -2516,12 +2530,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark">
-        <svg width="24" height="24" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="16" cy="11.5" rx="12" ry="6" fill="currentColor" fill-opacity="0.18"/>
-          <path d="M 4 11.5 v 7.5 c 0 3.3 5.4 6 12 6 s 12 -2.7 12 -6 v -7.5"/>
-          <ellipse cx="16" cy="11.5" rx="7.5" ry="3.75" stroke-dasharray="2 1.5" stroke-width="1.6"/>
-          <path d="M 16 9.5 L 18.8 11.5 L 16 13.5 L 13.2 11.5 Z" fill="currentColor" stroke-width="0"/>
-        </svg>
+        <img src="/assets/aistudio/2_002c399a.png" alt="دارایی" class="brand-logo-img" width="30" height="30">
       </span>
       <div>
         <div>بازارها</div>
@@ -2634,12 +2643,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark">
-        <svg width="24" height="24" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="16" cy="11.5" rx="12" ry="6" fill="currentColor" fill-opacity="0.18"/>
-          <path d="M 4 11.5 v 7.5 c 0 3.3 5.4 6 12 6 s 12 -2.7 12 -6 v -7.5"/>
-          <ellipse cx="16" cy="11.5" rx="7.5" ry="3.75" stroke-dasharray="2 1.5" stroke-width="1.6"/>
-          <path d="M 16 9.5 L 18.8 11.5 L 16 13.5 L 13.2 11.5 Z" fill="currentColor" stroke-width="0"/>
-        </svg>
+        <img src="/assets/aistudio/2_002c399a.png" alt="دارایی" class="brand-logo-img" width="30" height="30">
       </span>
       <div>
         <div>سبد دارایی</div>
@@ -2699,12 +2703,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark">
-        <svg width="24" height="24" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="16" cy="11.5" rx="12" ry="6" fill="currentColor" fill-opacity="0.18"/>
-          <path d="M 4 11.5 v 7.5 c 0 3.3 5.4 6 12 6 s 12 -2.7 12 -6 v -7.5"/>
-          <ellipse cx="16" cy="11.5" rx="7.5" ry="3.75" stroke-dasharray="2 1.5" stroke-width="1.6"/>
-          <path d="M 16 9.5 L 18.8 11.5 L 16 13.5 L 13.2 11.5 Z" fill="currentColor" stroke-width="0"/>
-        </svg>
+        <img src="/assets/aistudio/2_002c399a.png" alt="دارایی" class="brand-logo-img" width="30" height="30">
       </span>
       <div><div>تنظیمات</div><div class="greeting">شخصی‌سازی و داده‌ها</div></div>
     </div>
@@ -2733,12 +2732,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
   <header class="topbar">
     <div class="brand">
       <span class="brand-mark">
-        <svg width="24" height="24" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-          <ellipse cx="16" cy="11.5" rx="12" ry="6" fill="currentColor" fill-opacity="0.18"/>
-          <path d="M 4 11.5 v 7.5 c 0 3.3 5.4 6 12 6 s 12 -2.7 12 -6 v -7.5"/>
-          <ellipse cx="16" cy="11.5" rx="7.5" ry="3.75" stroke-dasharray="2 1.5" stroke-width="1.6"/>
-          <path d="M 16 9.5 L 18.8 11.5 L 16 13.5 L 13.2 11.5 Z" fill="currentColor" stroke-width="0"/>
-        </svg>
+        <img src="/assets/aistudio/2_002c399a.png" alt="دارایی" class="brand-logo-img" width="30" height="30">
       </span>
       <div>
         <div style="display:flex;align-items:center;gap:8px">
@@ -2798,12 +2792,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
   </button>
   <button class="nav-tab nav-tab-coin" data-page="portfolio" type="button" aria-label="دارایی" title="دارایی">
     <span class="coin-isometric-btn">
-      <svg width="26" height="26" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-        <ellipse cx="16" cy="11.5" rx="12" ry="6" fill="currentColor" fill-opacity="0.18"/>
-        <path d="M 4 11.5 v 7.5 c 0 3.3 5.4 6 12 6 s 12 -2.7 12 -6 v -7.5"/>
-        <ellipse cx="16" cy="11.5" rx="7.5" ry="3.75" stroke-dasharray="2 1.5" stroke-width="1.6"/>
-        <path d="M 16 9.5 L 18.8 11.5 L 16 13.5 L 13.2 11.5 Z" fill="currentColor" stroke-width="0"/>
-      </svg>
+      <img src="/assets/aistudio/2_002c399a.png" alt="دارایی" class="nav-coin-img" width="32" height="32">
     </span>
   </button>
   <button class="nav-tab" data-page="market" type="button" aria-label="بازار" title="بازار">

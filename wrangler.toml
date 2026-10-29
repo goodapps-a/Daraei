@@ -1,0 +1,22 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "darayi"
+main = "dist/worker.js"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "darayi-db"
+database_id = "d899a07a-a59f-4cf0-aa83-b14d67e02e8f"
+
+[triggers]
+crons = ["* * * * *"]
+
+[vars]
+APP_URL = "https://darayi.workers.dev"
+INLINE_REFRESH_S = "120"
