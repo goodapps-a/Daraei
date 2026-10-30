@@ -18,7 +18,7 @@ database_id = "d899a07a-a59f-4cf0-aa83-b14d67e02e8f"
 crons = ["* * * * *"]
 
 [vars]
-APP_URL = "https://darayi.workers.dev"
+APP_URL = "https://darayi.clearworks.workers.dev"
 GOOGLE_CLIENT_ID = "927651692028-q4rp0ir4lcgg94pc9r76rcu6t0veoele.apps.googleusercontent.com"
 INLINE_REFRESH_S = "120"
 MAIL_FROM = "a.h.sh.t1381@gmail.com"
