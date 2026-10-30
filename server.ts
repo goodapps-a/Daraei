@@ -839,6 +839,10 @@ app.post('/api/auth/reset/start', (req, res) => {
   const { email } = req.body || {};
   if (!email) return res.status(400).json({ error: 'ایمیل را وارد کنید.' });
   const normalizedEmail = email.trim().toLowerCase();
+  const exists = systemUsers.some(u => u.email.toLowerCase() === normalizedEmail) || !!userStore[normalizedEmail];
+  if (!exists) {
+    return res.status(404).json({ error: 'user_not_found', message: 'این ایمیل در سامانه ثبت نشده است.' });
+  }
   const code = Math.floor(100000 + Math.random() * 900000).toString();
   pendingOtps[normalizedEmail] = { code, expires: Date.now() + 10 * 60 * 1000 };
 

@@ -35,11 +35,13 @@ const faviconSvg = `
 fs.writeFileSync(path.join(publicDir, 'favicon.svg'), faviconSvg);
 
 // Generate PNG icons
-const svgBuffer = Buffer.from(coinSvg);
+const userUploadedIcon = path.join(publicDir, 'assets/aistudio/icon-512_099f2ce7.png');
+const iconSrc = fs.existsSync(userUploadedIcon) ? userUploadedIcon : Buffer.from(coinSvg);
 
-await sharp(svgBuffer).resize(512, 512).png().toFile(path.join(iconsDir, 'icon-512.png'));
-await sharp(svgBuffer).resize(192, 192).png().toFile(path.join(iconsDir, 'icon-192.png'));
-await sharp(svgBuffer).resize(180, 180).png().toFile(path.join(publicDir, 'apple-touch-icon.png'));
+await sharp(iconSrc).resize(512, 512).png().toFile(path.join(iconsDir, 'icon-512.png'));
+await sharp(iconSrc).resize(192, 192).png().toFile(path.join(iconsDir, 'icon-192.png'));
+await sharp(iconSrc).resize(180, 180).png().toFile(path.join(publicDir, 'apple-touch-icon.png'));
+await sharp(iconSrc).resize(512, 512).png().toFile(path.join(iconsDir, 'icon-maskable-512.png'));
 
 // Maskable icon with safe-zone margin
 const maskableSvg = `

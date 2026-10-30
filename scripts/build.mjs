@@ -23,6 +23,11 @@ const APP_HTML = ${JSON.stringify(htmlContent)};
 ${workerContent}
 `;
 
+const publicDir = path.join(rootDir, 'public');
+if (fs.existsSync(publicDir)) {
+  fs.cpSync(publicDir, distDir, { recursive: true, force: true });
+}
+
 const rootIndexHtmlPath = path.join(rootDir, 'index.html');
 fs.writeFileSync(rootIndexHtmlPath, htmlContent, 'utf8');
 
@@ -30,3 +35,4 @@ const publicWorkerPath = path.join(rootDir, 'public', 'worker.js');
 fs.writeFileSync(distWorkerPath, bundled, 'utf8');
 fs.writeFileSync(publicWorkerPath, bundled, 'utf8');
 console.log(`Successfully built ${distWorkerPath} and ${publicWorkerPath} (${(bundled.length / 1024).toFixed(1)} KB)`);
+
