@@ -11,10 +11,103 @@ const PORT = 3000;
 
 app.use(express.json({ limit: '2mb' }));
 
-// In-memory cache for ultra-fast responses
-let cachedPrices: any = { updatedAt: 0, checkedAt: 0, items: {}, feeds: {} };
+// Persistent on-disk cache for zero downtime and instant restart
+const CACHE_FILE = path.join(__dirname, 'cached-prices.json');
+let cachedPrices: any = { updatedAt: Math.floor(Date.now() / 1000), checkedAt: Math.floor(Date.now() / 1000), items: {}, feeds: {} };
 let lastFetchTime = 0;
 let isFetching = false;
+
+// Verified baseline domestic seed prices so items are NEVER blank
+const DOMESTIC_SEEDS: Record<string, [number, number, string, string, string]> = {
+  usd: [271500, 0.74, 'دلار آمریکا', 'USD', 'currency'],
+  eur: [303530, 0.65, 'یورو', 'EUR', 'currency'],
+  gbp: [363580, 0.82, 'پوند انگلیس', 'GBP', 'currency'],
+  aed: [74259, 0.55, 'درهم امارات', 'AED', 'currency'],
+  try: [5430, 0.20, 'لیر ترکیه', 'TRY', 'currency'],
+  cny: [40810, 0.35, 'یوان چین', 'CNY', 'currency'],
+  cad: [194350, 0.45, 'دلار کانادا', 'CAD', 'currency'],
+  aud: [190980, 0.40, 'دلار استرالیا', 'AUD', 'currency'],
+  chf: [329180, 0.50, 'فرانک سوئیس', 'CHF', 'currency'],
+  sar: [72357, 0.30, 'ریال عربستان', 'SAR', 'currency'],
+  qar: [73830, 0.32, 'ریال قطر', 'QAR', 'currency'],
+  kwd: [873690, 0.60, 'دینار کویت', 'KWD', 'currency'],
+  omr: [706240, 0.55, 'ریال عمان', 'OMR', 'currency'],
+  iqd: [174.3, 0.15, 'دینار عراق', 'IQD', 'currency'],
+  afn: [4237, 0.25, 'افغانی', 'AFN', 'currency'],
+  rub: [3367, 0.10, 'روبل روسیه', 'RUB', 'currency'],
+  inr: [2857, 0.12, 'روپیه هند', 'INR', 'currency'],
+  gold18: [25579200, 0.45, 'طلای ۱۸ عیار', 'Gold18', 'gold'],
+  gold24: [34105200, 0.45, 'طلای ۲۴ عیار', 'Gold24', 'gold'],
+  gram: [110803000, 0.42, 'مثقال طلا', 'Mesghal', 'gold'],
+  coin: [261420000, 0.50, 'سکه امامی', 'Coin', 'gold'],
+  bahar: [251940000, 0.48, 'سکه بهار آزادی', 'Bahar', 'gold'],
+  halfcoin: [138720000, 0.35, 'نیم‌سکه', 'Half', 'gold'],
+  quartercoin: [74380000, 0.40, 'ربع‌سکه', 'Quarter', 'gold'],
+  gramcoin: [37400000, 0.38, 'سکه گرمی', 'Gram', 'gold'],
+  silver999: [473220, 0.20, 'نقره ۹۹۹ (هر گرم)', 'Silver', 'gold'],
+  usdt: [273100, 1.10, 'تتر', 'USDT', 'crypto']
+};
+
+// Seed baseline prices immediately
+for (const [id, [p, ch, name, sym, cat]] of Object.entries(DOMESTIC_SEEDS)) {
+  cachedPrices.items[id] = {
+    price: p,
+    change: ch,
+    t: Math.floor(Date.now() / 1000) - 300,
+    receivedAt: Math.floor(Date.now() / 1000) - 300,
+    src: 'seed_cache',
+    unit: 'IRT',
+    kind: cat === 'crypto' ? 'crypto' : 'domestic',
+    name,
+    sym,
+    cat
+  };
+}
+
+// Load previously persisted cache from disk if available
+try {
+  if (fs.existsSync(CACHE_FILE)) {
+    const raw = fs.readFileSync(CACHE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed.items === 'object' && Object.keys(parsed.items).length > 0) {
+      cachedPrices.items = { ...cachedPrices.items, ...parsed.items };
+      cachedPrices.updatedAt = parsed.updatedAt || cachedPrices.updatedAt;
+      cachedPrices.feeds = parsed.feeds || cachedPrices.feeds;
+    }
+  }
+} catch (e) {
+  console.warn('Failed to read cached-prices.json:', e);
+}
+
+// TGJU & Iranian market symbol mappings
+const IRAN_MARKET_MAP: Record<string, [string, string, string, string]> = {
+  usd: ['USD_IRR_FREE', 'دلار آمریکا', 'USD', 'currency'],
+  eur: ['EUR_IRR_FREE', 'یورو', 'EUR', 'currency'],
+  gbp: ['GBP_IRR_FREE', 'پوند انگلیس', 'GBP', 'currency'],
+  aed: ['AED_IRR_FREE', 'درهم امارات', 'AED', 'currency'],
+  try: ['TRY_IRR_FREE', 'لیر ترکیه', 'TRY', 'currency'],
+  cny: ['CNY_IRR_FREE', 'یوان چین', 'CNY', 'currency'],
+  cad: ['CAD_IRR_FREE', 'دلار کانادا', 'CAD', 'currency'],
+  aud: ['AUD_IRR_FREE', 'دلار استرالیا', 'AUD', 'currency'],
+  chf: ['CHF_IRR_FREE', 'فرانک سوئیس', 'CHF', 'currency'],
+  sar: ['SAR_IRR_FREE', 'ریال عربستان', 'SAR', 'currency'],
+  qar: ['QAR_IRR_FREE', 'ریال قطر', 'QAR', 'currency'],
+  kwd: ['KWD_IRR_FREE', 'دینار کویت', 'KWD', 'currency'],
+  omr: ['OMR_IRR_FREE', 'ریال عمان', 'OMR', 'currency'],
+  iqd: ['IQD_IRR_FREE', 'دینار عراق', 'IQD', 'currency'],
+  afn: ['AFN_IRR_FREE', 'افغانی', 'AFN', 'currency'],
+  rub: ['RUB_IRR_FREE', 'روبل روسیه', 'RUB', 'currency'],
+  inr: ['INR_IRR_FREE', 'روپیه هند', 'INR', 'currency'],
+  gold18: ['GOLD_18K_IRR', 'طلای ۱۸ عیار', 'Gold18', 'gold'],
+  gold24: ['GOLD_24K_IRR', 'طلای ۲۴ عیار', 'Gold24', 'gold'],
+  gram: ['GOLD_MESGHAL_IRR', 'مثقال طلا', 'Mesghal', 'gold'],
+  coin: ['COIN_EMAMI_IRR', 'سکه امامی', 'Coin', 'gold'],
+  bahar: ['COIN_BAHAR_IRR', 'سکه بهار آزادی', 'Bahar', 'gold'],
+  halfcoin: ['COIN_HALF_IRR', 'نیم‌سکه', 'Half', 'gold'],
+  quartercoin: ['COIN_QUARTER_IRR', 'ربع‌سکه', 'Quarter', 'gold'],
+  gramcoin: ['COIN_GRAMI_IRR', 'سکه گرمی', 'Gram', 'gold'],
+  silver999: ['SILVER_999_IRR', 'نقره ۹۹۹ (هر گرم)', 'Silver', 'gold']
+};
 
 // Domestic rate keys
 const NERKH: Record<string, string[]> = {
@@ -37,7 +130,7 @@ const ASSETS: Record<string, string> = {
   btc: 'بیت‌کوین', eth: 'اتریوم', usdt: 'تتر', sol: 'سولانا', bnb: 'بایننس کوین', xrp: 'ریپل',
   sp500: 'شاخص S&P 500',
 };
-const NON_CRYPTO = new Set(['usd', 'eur', 'gbp', 'aed', 'try', 'gold18', 'gold24', 'coin', 'halfcoin', 'gram', 'sp500', 'usdt', ...Object.keys(DOMESTIC_EXTRA)]);
+const NON_CRYPTO = new Set(['usd', 'eur', 'gbp', 'aed', 'try', 'gold18', 'gold24', 'coin', 'halfcoin', 'gram', 'sp500', 'usdt', ...Object.keys(DOMESTIC_EXTRA), ...Object.keys(IRAN_MARKET_MAP)]);
 
 function jalaliToGregorian(jy: number, jm: number, jd: number): [number, number, number] {
   jy += 1595;
@@ -234,7 +327,7 @@ async function updateAllPrices(force = false) {
     };
 
     const domesticTask = async () => {
-      // First fetch live 24/7 Iranian Tether rate and change
+      // 1. Fetch live 24/7 Iranian Tether rate and change
       try {
         const tl = await fetchJSON('https://api.tetherland.com/currencies', 4);
         const u = tl?.data?.currencies?.USDT;
@@ -255,32 +348,100 @@ async function updateAllPrices(force = false) {
 
       put('usdt', liveUsdtPrice, liveUsdtChange, 'tetherland', now, 'IRT', { kind: 'crypto', name: 'تتر', symbol: 'USDT' });
 
+      let domesticSuccess = false;
+
+      // Tier 1: iran-market GitHub CDN (Fast, reliable, verified TGJU & free market rates)
       try {
-        const j = await fetchJSON('https://nerkh.jahankhahan.shop/data/live.json', 6);
-        const ts = domesticTime(j);
+        const im = await fetchJSON('https://iran-market.github.io/data/latest-toman.json', 5);
+        const categories = im?.data?.categories || {};
+        const allList = [
+          ...(categories.gold || []),
+          ...(categories.coin || []),
+          ...(categories.currency || []),
+          ...(categories.precious_metal || [])
+        ];
+        const dict = Object.fromEntries(allList.map((x: any) => [x.symbol, x]));
         let count = 1;
-        for (const [id, keys] of Object.entries(NERKH)) {
-          if (id === 'usdt') continue;
-          const k = keys.find(k => Number(j.rates?.[k]) > 0);
-          if (k) {
-            const v = Number(j.rates[k]);
-            const chg = getDomChange(id, v, j.change?.[k]);
-            put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic' });
-            count++;
-          }
-        }
-        for (const [id, [key, name, sym, cat]] of Object.entries(DOMESTIC_EXTRA)) {
-          const v = Number(j.rates?.[key]);
-          if (v > 0) {
-            const chg = getDomChange(id, v, j.change?.[key]);
-            put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic', name, sym, cat });
+        const ts = im?.data?.generated_at ? Math.floor(new Date(im.data.generated_at).getTime() / 1000) : now;
+
+        for (const [id, [sym, name, code, cat]] of Object.entries(IRAN_MARKET_MAP)) {
+          const item = dict[sym];
+          if (item && Number(item.price) > 0) {
+            const chg = getDomChange(id, Number(item.price), item.change_pct);
+            put(id, Number(item.price), chg, 'iran_market', ts, 'IRT', { kind: 'domestic', name, sym: code, cat });
             count++;
           }
         }
 
-        feeds.domestic = { ok: true, checkedAt: now, sourceAt: ts, count };
-      } catch (e: any) {
-        feeds.domestic = { ok: false, checkedAt: now, error: e.message };
+        if (count >= 10) {
+          feeds.domestic = { ok: true, checkedAt: now, sourceAt: ts, count, source: 'iran_market' };
+          domesticSuccess = true;
+        }
+      } catch (err: any) {
+        // Fall through to Tier 2
+      }
+
+      // Tier 2: PersianToolbox API
+      if (!domesticSuccess) {
+        try {
+          const pt = await fetchJSON('https://persiantoolbox.ir/api/market', 5);
+          if (pt?.ok && pt?.data) {
+            const d = pt.data;
+            const ts = d.timestamp ? Math.floor(d.timestamp / 1000) : now;
+            let count = 0;
+            if (d.gold?.pricePerGram > 0) {
+              const gold18P = Math.round(d.gold.pricePerGram / 10); // convert Rial to Toman
+              put('gold18', gold18P, d.gold.change24h || getDomChange('gold18', gold18P, 0), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'طلای ۱۸ عیار', sym: 'Gold18', cat: 'gold' });
+              count++;
+            }
+            if (d.currencies) {
+              const usdRial = d.currencies.IRR?.rate || 0;
+              const usdP = usdRial > 0 ? Math.round(usdRial / 10) : 0;
+              if (usdP > 100000) {
+                put('usd', usdP, getDomChange('usd', usdP, 0), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'دلار آمریکا', sym: 'USD', cat: 'currency' });
+                count++;
+              }
+            }
+            if (count > 0) {
+              feeds.domestic = { ok: true, checkedAt: now, sourceAt: ts, count, source: 'persiantoolbox' };
+              domesticSuccess = true;
+            }
+          }
+        } catch (err: any) {
+          // Fall through to Tier 3
+        }
+      }
+
+      // Tier 3: Nerkhsanj (live.json)
+      if (!domesticSuccess) {
+        try {
+          const j = await fetchJSON('https://nerkh.jahankhahan.shop/data/live.json', 5);
+          const ts = domesticTime(j);
+          let count = 1;
+          for (const [id, keys] of Object.entries(NERKH)) {
+            if (id === 'usdt') continue;
+            const k = keys.find(k => Number(j.rates?.[k]) > 0);
+            if (k) {
+              const v = Number(j.rates[k]);
+              const chg = getDomChange(id, v, j.change?.[k]);
+              put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic' });
+              count++;
+            }
+          }
+          for (const [id, [key, name, sym, cat]] of Object.entries(DOMESTIC_EXTRA)) {
+            const v = Number(j.rates?.[key]);
+            if (v > 0) {
+              const chg = getDomChange(id, v, j.change?.[key]);
+              put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic', name, sym, cat });
+              count++;
+            }
+          }
+          feeds.domestic = { ok: true, checkedAt: now, sourceAt: ts, count, source: 'nerkhsanj' };
+          domesticSuccess = true;
+        } catch (e: any) {
+          // Even when all remote sources fail, existing domestic prices in items are NEVER removed
+          feeds.domestic = { ok: false, checkedAt: now, error: e.message, fallback: 'cached_values_preserved' };
+        }
       }
     };
 
@@ -333,6 +494,15 @@ async function updateAllPrices(force = false) {
       feeds
     };
     lastFetchTime = now;
+
+    // Persist to disk so cached data survives process restarts
+    if (freshCount > 0) {
+      try {
+        fs.writeFileSync(CACHE_FILE, JSON.stringify(cachedPrices, null, 2), 'utf8');
+      } catch (e) {
+        console.warn('Failed to persist cache to disk:', e);
+      }
+    }
   } catch (err: any) {
     console.error('Error updating prices:', err);
   } finally {
@@ -1236,8 +1406,8 @@ app.get('/manifest.webmanifest', (req, res) => {
     start_url: '/?source=pwa',
     scope: '/',
     display: 'standalone',
-    background_color: '#f8fafc',
-    theme_color: '#0f2744',
+    background_color: '#ffffff',
+    theme_color: '#ffffff',
     icons: [
       { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
       { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },

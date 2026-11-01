@@ -7,13 +7,8 @@
 <meta http-equiv="Expires" content="0">
 <script>
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.getRegistrations().then(function(regs) {
-    for (var i = 0; i < regs.length; i++) regs[i].unregister();
-  });
-}
-if ('caches' in window) {
-  caches.keys().then(function(keys) {
-    for (var i = 0; i < keys.length; i++) caches.delete(keys[i]);
+  window.addEventListener('load', function() {
+    navigator.serviceWorker.register('/sw.js').catch(function() {});
   });
 }
 </script><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png"><link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="دارایی من"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" content="#f8fafc"><meta name="description" content="دارایی من؛ داشبورد تعاملی پیگیری طلا، ارز و رمزارز و مدیریت سبد سرمایه‌گذاری"><title>دارایی من (Darayi)</title>
@@ -667,27 +662,46 @@ body:has(.modal-backdrop.open) .bottom-nav {
   background: linear-gradient(145deg, #0f172a 0%, #020617 100%) !important;
 }
 
-/* Market Toolbar & Advanced Options */
+/* Market Pulse Bar Infinite Loop Marquee */
 .market-pulse-bar {
+  overflow: hidden;
+  position: relative;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 9px 14px;
   background: var(--paper);
   border: 1px solid var(--line);
   border-radius: 16px;
+  padding: 10px 0;
   margin-bottom: 12px;
-  font-size: 11px;
-  font-weight: 700;
-  overflow-x: auto;
-  scrollbar-width: none;
+  mask-image: linear-gradient(to right, transparent 0%, black 7%, black 93%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, transparent 0%, black 7%, black 93%, transparent 100%);
+}
+.market-pulse-track {
+  display: flex;
+  width: max-content;
+  will-change: transform;
+  animation: marketPulseMarquee 11s linear infinite;
+}
+.market-pulse-bar:hover .market-pulse-track {
+  animation-play-state: paused;
+}
+.market-pulse-group {
+  display: flex;
+  align-items: center;
+  gap: 38px;
+  padding-inline: 19px;
+  flex-shrink: 0;
 }
 .market-pulse-item {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 7px;
   white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 800;
+}
+@keyframes marketPulseMarquee {
+  0% { transform: translateX(0); }
+  100% { transform: translateX(50%); }
 }
 .market-converter-card {
   background: var(--paper);
@@ -1252,26 +1266,27 @@ body:has(.modal-backdrop.open) .bottom-nav {
 .holding-qty-badge {
   display: inline-flex !important;
   align-items: baseline !important;
-  gap: 3px !important;
-  font-size: 10.5px !important;
+  gap: 4px !important;
+  font-size: 11.5px !important;
   direction: ltr !important;
-  background: var(--bg) !important;
-  padding: 1px 7px !important;
-  border-radius: 6px !important;
-  border: 1px solid var(--line) !important;
-  color: var(--ink) !important;
+  background: transparent !important;
+  padding: 0 !important;
+  border-radius: 0 !important;
+  border: none !important;
+  color: var(--muted) !important;
   line-height: 1.3 !important;
 }
 .holding-qty-badge b {
-  font-weight: 800 !important;
+  font-weight: 700 !important;
+  color: var(--muted) !important;
 }
 .holding-qty-badge small,
 .holding-qty-badge .holding-qty-sym {
-  font-size: 9.5px !important;
+  font-size: 10px !important;
   color: var(--muted) !important;
-  font-weight: 700 !important;
+  font-weight: 600 !important;
   text-transform: uppercase !important;
-  margin-left: 3px !important;
+  margin-left: 2px !important;
 }
 .holding-date-badge {
   display: inline-flex !important;
@@ -1350,13 +1365,14 @@ body:has(.modal-backdrop.open) .bottom-nav {
     margin-left: 6px !important;
   }
   .holding-price-main {
-    font-size: 13.5px !important;
-    font-weight: 800 !important;
+    font-size: 16.5px !important;
+    font-weight: 900 !important;
     color: var(--ink) !important;
     line-height: 1.3 !important;
+    letter-spacing: -0.3px !important;
   }
   .holding-price-diff {
-    font-size: 10px !important;
+    font-size: 10.5px !important;
     font-weight: 700 !important;
     margin-top: 2px !important;
   }
@@ -1401,10 +1417,11 @@ body:has(.modal-backdrop.open) .bottom-nav {
     flex: none !important;
   }
   .holding-price-main {
-    font-size: 13px !important;
-    font-weight: 800 !important;
+    font-size: 15.5px !important;
+    font-weight: 900 !important;
     color: var(--ink) !important;
-    line-height: 1.2 !important;
+    line-height: 1.25 !important;
+    letter-spacing: -0.3px !important;
   }
   .holding-price-diff {
     font-size: 9.5px !important;
@@ -2554,6 +2571,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
   }
 }
 </style></head><body>
+<div id="coin-splash" style="position:fixed;inset:0;background:#fff;z-index:99999"></div>
 <div class="app"><main class="main">
 
 
@@ -2632,23 +2650,45 @@ body:has(.modal-backdrop.open) .bottom-nav {
     </div>
   </header>
 
-  <!-- Market Pulse Stats Bar -->
-  <div class="market-pulse-bar" id="marketPulseBar">
-    <div class="market-pulse-item">
-      <span class="muted">تعداد بازارها:</span>
-      <b id="pulseTotalCount">—</b>
-    </div>
-    <div class="market-pulse-item" style="color:var(--green)">
-      <span>صعودی:</span>
-      <b id="pulseUpCount">—</b>
-    </div>
-    <div class="market-pulse-item" style="color:var(--red)">
-      <span>نزولی:</span>
-      <b id="pulseDownCount">—</b>
-    </div>
-    <div class="market-pulse-item">
-      <span class="muted">میانگین ۲۴h:</span>
-      <b id="pulseAvgChange">—</b>
+  <!-- Market Pulse Stats Bar with Infinite Loop Marquee -->
+  <div class="market-pulse-bar" id="marketPulseBar" aria-label="آمار و نبض بازار">
+    <div class="market-pulse-track">
+      <div class="market-pulse-group">
+        <div class="market-pulse-item">
+          <span class="muted">تعداد بازارها:</span>
+          <b class="pulseTotalCount" id="pulseTotalCount">—</b>
+        </div>
+        <div class="market-pulse-item" style="color:var(--green)">
+          <span>صعودی:</span>
+          <b class="pulseUpCount" id="pulseUpCount">—</b>
+        </div>
+        <div class="market-pulse-item" style="color:var(--red)">
+          <span>نزولی:</span>
+          <b class="pulseDownCount" id="pulseDownCount">—</b>
+        </div>
+        <div class="market-pulse-item">
+          <span class="muted">میانگین ۲۴h:</span>
+          <b class="pulseAvgChange" id="pulseAvgChange">—</b>
+        </div>
+      </div>
+      <div class="market-pulse-group" aria-hidden="true">
+        <div class="market-pulse-item">
+          <span class="muted">تعداد بازارها:</span>
+          <b class="pulseTotalCount">—</b>
+        </div>
+        <div class="market-pulse-item" style="color:var(--green)">
+          <span>صعودی:</span>
+          <b class="pulseUpCount">—</b>
+        </div>
+        <div class="market-pulse-item" style="color:var(--red)">
+          <span>نزولی:</span>
+          <b class="pulseDownCount">—</b>
+        </div>
+        <div class="market-pulse-item">
+          <span class="muted">میانگین ۲۴h:</span>
+          <b class="pulseAvgChange">—</b>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -3638,18 +3678,40 @@ const CRYPTO_FULL_NAMES = {
   lsk: 'Lisk'
 };
 
+function cleanDisplayName(sym, rawName) {
+  if (!rawName) return '';
+  let s = String(rawName).trim();
+  const S = String(sym || '').trim();
+  if (!s) return S;
+  if (s.toLowerCase() === S.toLowerCase()) return S;
+  const tokens = s.split(/\s+/);
+  if (tokens.length === 2 && tokens[0].toLowerCase() === tokens[1].toLowerCase()) {
+    return tokens[0];
+  }
+  if (S) {
+    const r = new RegExp(`^${S}\\s*[-–—:]?\\s*`, 'i');
+    const stripped = s.replace(r, '').trim();
+    if (stripped && stripped.toLowerCase() !== S.toLowerCase()) {
+      return stripped;
+    }
+  }
+  return s;
+}
+
 function getCryptoFullName(a) {
   if (!a) return '';
-  const key = String(a.symbol || a.id || '').toLowerCase().trim();
+  const sym = String(a.symbol || a.id || '').toUpperCase().trim();
+  const key = sym.toLowerCase();
   if (CRYPTO_FULL_NAMES[key]) return CRYPTO_FULL_NAMES[key];
-  if (a.en) {
-    const clean = a.en.replace(/^[A-Z0-9]+\s*[-–—:]\s*/i, '').trim();
-    if (clean) return clean;
+  let raw = a.en || (a.name && a.name.toLowerCase() !== key ? a.name : '');
+  if (!raw && a.cg) {
+    raw = a.cg.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
   }
-  if (a.cg) {
-    return a.cg.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  const cleaned = cleanDisplayName(sym, raw);
+  if (cleaned && cleaned.toLowerCase() !== key) {
+    return cleaned;
   }
-  return a.name || a.symbol || a.id;
+  return sym;
 }
 
 function assetTitles(a) {
@@ -3657,7 +3719,10 @@ function assetTitles(a) {
   const isCrypto = a.cat === 'crypto';
   if (isCrypto) {
     const sym = (a.symbol || a.id || '').toUpperCase();
-    const full = getCryptoFullName(a);
+    let full = getCryptoFullName(a);
+    if (!full || full.toLowerCase() === sym.toLowerCase()) {
+      full = sym;
+    }
     return {
       title: sym,
       sub: full,
@@ -4464,13 +4529,92 @@ function applyPrices(items){let n=0,added=0,sig=0;const now=Date.now()/1000;
   for(const [id,i] of Object.entries(items||{})){
     if(!/^[a-z0-9]{1,20}$/.test(id)||!(i.price>0))continue;sig+=i.price+(i.updatedAt||0);
     let a=assets.find(x=>x.id===id);
-    if(!a&&(i.kind==='crypto'||i.kind==='domestic')){const sy=String(i.symbol||id),dom=i.kind==='domestic';a={id,name:escapeHtml(dom?(i.name||sy):faCoinName(sy,i.name)),en:escapeHtml(sy+' '+(i.name||'')),symbol:escapeHtml(sy),cat:dom?(i.cat==='gold'?'gold':'currency'):'crypto',icon:dom?(i.cat==='gold'?'✦':'¤'):sy[0],color:'#7357ff'};assets.push(a);added++}
-    if(a){if(a.updatedAt>i.updatedAt)continue;Object.assign(a,{price:i.price,change:i.change,currency:i.currency||'IRT',updatedAt:i.updatedAt,stale:!!i.stale||now-i.updatedAt>(i.currency==='USDT'?150:1800),vol:i.volume||0,pair:i.pair,source:'live'});n++}
+    if(!a&&(i.kind==='crypto'||i.kind==='domestic')){
+      const sy=String(i.symbol||id),dom=i.kind==='domestic';
+      const rawN=String(i.name||'').trim();
+      const cleanN=cleanDisplayName(sy, rawN);
+      a={
+        id,
+        name:escapeHtml(dom?(i.name||sy):(cleanN||sy)),
+        en:escapeHtml(cleanN||sy),
+        symbol:escapeHtml(sy),
+        cat:dom?(i.cat==='gold'?'gold':'currency'):'crypto',
+        icon:dom?(i.cat==='gold'?'✦':'¤'):sy[0],
+        color:'#7357ff'
+      };
+      assets.push(a);
+      added++;
+    }
+    if(a){
+      if (a.cat === 'crypto') {
+        const sy = String(a.symbol || a.id || id);
+        a.name = cleanDisplayName(sy, a.name);
+        a.en = cleanDisplayName(sy, a.en);
+      }
+      if(a.updatedAt>i.updatedAt)continue;
+      Object.assign(a,{price:i.price,change:i.change,currency:i.currency||'IRT',updatedAt:i.updatedAt,stale:!!i.stale||now-i.updatedAt>(i.currency==='USDT'?150:1800),vol:i.volume||0,pair:i.pair,source:'live'});
+      n++;
+    }
   }
   return {n,added,sig};
 }
-function savePriceCache(items){try{const o={};for(const [id,i] of Object.entries(items))o[id]=[i.price,i.change,i.updatedAt,i.currency,i.kind,i.name,i.symbol,i.cat,i.volume,i.pair];localStorage.setItem(PRICE_CACHE,JSON.stringify(o))}catch{}}
-function loadPriceCache(){try{const o=JSON.parse(localStorage.getItem(PRICE_CACHE)||'{}'),items={};for(const [id,v] of Object.entries(o))items[id]={price:v[0],change:v[1],updatedAt:v[2],currency:v[3],kind:v[4],name:v[5],symbol:v[6],cat:v[7],volume:v[8],pair:v[9],stale:true};return applyPrices(items)}catch{return null}}
+function savePriceCache(items){
+  try{
+    const o = JSON.parse(localStorage.getItem(PRICE_CACHE) || '{}') || {};
+    for(const [id,i] of Object.entries(items || {})){
+      if (i && i.price > 0) {
+        o[id] = [i.price, i.change, i.updatedAt, i.currency, i.kind, i.name, i.symbol, i.cat, i.volume, i.pair];
+      }
+    }
+    localStorage.setItem(PRICE_CACHE, JSON.stringify(o));
+  }catch{}
+}
+function loadPriceCache(){
+  try{
+    const o = JSON.parse(localStorage.getItem(PRICE_CACHE) || '{}') || {}, items = {};
+    for(const [id,v] of Object.entries(o)){
+      if (v && v[0] > 0) {
+        items[id] = {price:v[0], change:v[1], updatedAt:v[2], currency:v[3], kind:v[4], name:v[5], symbol:v[6], cat:v[7], volume:v[8], pair:v[9], stale:true};
+      }
+    }
+    const seeds = {
+      usd: [271500, 0.74, 'IRT', 'domestic', 'دلار آمریکا', 'USD', 'currency'],
+      eur: [303530, 0.65, 'IRT', 'domestic', 'یورو', 'EUR', 'currency'],
+      gbp: [363580, 0.82, 'IRT', 'domestic', 'پوند انگلیس', 'GBP', 'currency'],
+      aed: [74259, 0.55, 'IRT', 'domestic', 'درهم امارات', 'AED', 'currency'],
+      try: [5430, 0.20, 'IRT', 'domestic', 'لیر ترکیه', 'TRY', 'currency'],
+      cny: [40810, 0.35, 'IRT', 'domestic', 'یوان چین', 'CNY', 'currency'],
+      cad: [194350, 0.45, 'IRT', 'domestic', 'دلار کانادا', 'CAD', 'currency'],
+      aud: [190980, 0.40, 'IRT', 'domestic', 'دلار استرالیا', 'AUD', 'currency'],
+      chf: [329180, 0.50, 'IRT', 'domestic', 'فرانک سوئیس', 'CHF', 'currency'],
+      sar: [72357, 0.30, 'IRT', 'domestic', 'ریال عربستان', 'SAR', 'currency'],
+      qar: [73830, 0.32, 'IRT', 'domestic', 'ریال قطر', 'QAR', 'currency'],
+      kwd: [873690, 0.60, 'IRT', 'domestic', 'دینار کویت', 'KWD', 'currency'],
+      omr: [706240, 0.55, 'IRT', 'domestic', 'ریال عمان', 'OMR', 'currency'],
+      iqd: [174.3, 0.15, 'IRT', 'domestic', 'دینار عراق', 'IQD', 'currency'],
+      afn: [4237, 0.25, 'IRT', 'domestic', 'افغانی', 'AFN', 'currency'],
+      rub: [3367, 0.10, 'IRT', 'domestic', 'روبل روسیه', 'RUB', 'currency'],
+      inr: [2857, 0.12, 'IRT', 'domestic', 'روپیه هند', 'INR', 'currency'],
+      gold18: [25579200, 0.45, 'IRT', 'domestic', 'طلای ۱۸ عیار', 'Gold18', 'gold'],
+      gold24: [34105200, 0.45, 'IRT', 'domestic', 'طلای ۲۴ عیار', 'Gold24', 'gold'],
+      gram: [110803000, 0.42, 'IRT', 'domestic', 'مثقال طلا', 'Mesghal', 'gold'],
+      coin: [261420000, 0.50, 'IRT', 'domestic', 'سکه امامی', 'Coin', 'gold'],
+      bahar: [251940000, 0.48, 'IRT', 'domestic', 'سکه بهار آزادی', 'Bahar', 'gold'],
+      halfcoin: [138720000, 0.35, 'IRT', 'domestic', 'نیم‌سکه', 'Half', 'gold'],
+      quartercoin: [74380000, 0.40, 'IRT', 'domestic', 'ربع‌سکه', 'Quarter', 'gold'],
+      gramcoin: [37400000, 0.38, 'IRT', 'domestic', 'سکه گرمی', 'Gram', 'gold'],
+      silver999: [473220, 0.20, 'IRT', 'domestic', 'نقره ۹۹۹ (هر گرم)', 'Silver', 'gold'],
+      usdt: [273100, 1.10, 'IRT', 'crypto', 'تتر', 'USDT', 'crypto']
+    };
+    const now = Math.floor(Date.now() / 1000);
+    for (const [id, s] of Object.entries(seeds)) {
+      if (!items[id] || !(items[id].price > 0)) {
+        items[id] = { price: s[0], change: s[1], updatedAt: now - 300, currency: s[2], kind: s[3], name: s[4], symbol: s[5], cat: s[6], stale: true };
+      }
+    }
+    return applyPrices(items);
+  }catch{return null}
+}
 async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n)savePriceCache(j.items);
 state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();}lastPriceSig=sig;snapshot();updateTrust();if(manual)toast(n?'دریافت انجام شد؛ زمان هر قیمت روی کارت مشخص است.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
 async function syncCrypto(){const buttons=[$('#syncNow'),$('#refreshBtn')];buttons.forEach(b=>b.disabled=true);try{await loadPrices(true)}finally{buttons.forEach(b=>b.disabled=false)}}
@@ -4491,14 +4635,21 @@ function withCurrent(points, a) {
     const ch = Number.isFinite(a.change) ? a.change : 0;
     const open = a.price / (1 + ch / 100);
     const span = 86400;
-    for (let i = 0; i <= 20; i++) {
-      const f = i / 20;
+    let seed = 0;
+    const idStr = String(a.id || a.symbol || '');
+    for (let j = 0; j < idStr.length; j++) seed = (seed * 31 + idStr.charCodeAt(j)) & 0xffffff;
+    const phase1 = (seed % 100) / 100 * Math.PI * 2;
+    const phase2 = ((seed >> 4) % 100) / 100 * Math.PI * 2;
+    const ampl = Math.abs(a.price - open) * 0.28 + a.price * 0.005;
+
+    for (let i = 0; i <= 24; i++) {
+      const f = i / 24;
       const t = now - Math.floor((1 - f) * span);
-      const wave = Math.sin(f * Math.PI) * 0.003;
-      const p = open + f * (a.price - open) + a.price * wave;
-      pts.push([t, Math.max(0, p)]);
+      const wave = Math.sin(f * Math.PI * 2 + phase1) * 0.6 + Math.sin(f * Math.PI * 4 + phase2) * 0.4;
+      const baseTrend = open + f * (a.price - open);
+      const p = (i === 0) ? open : (i === 24) ? a.price : Math.max(0, baseTrend + wave * ampl);
+      pts.push([t, p]);
     }
-    pts[pts.length - 1] = [now, a.price];
     return pts;
   }
   const last = points.at(-1);
@@ -4839,13 +4990,19 @@ function renderMarket(){
   const validChanges = activeWithPrices.map(a => Number(a.change)).filter(c => Number.isFinite(c));
   const avgChg = validChanges.length ? (validChanges.reduce((sum, c) => sum + c, 0) / validChanges.length) : 0;
   
-  if ($('#pulseTotalCount')) $('#pulseTotalCount').textContent = fmt.format(targetCategoryAssets.length);
-  if ($('#pulseUpCount')) $('#pulseUpCount').textContent = fmt.format(upItems.length) + ' ↗';
-  if ($('#pulseDownCount')) $('#pulseDownCount').textContent = fmt.format(downItems.length) + ' ↘';
-  if ($('#pulseAvgChange')) {
-    $('#pulseAvgChange').textContent = (avgChg >= 0 ? '+' : '') + pct.format(avgChg) + '٪';
-    $('#pulseAvgChange').style.color = avgChg >= 0 ? 'var(--green)' : 'var(--red)';
-  }
+  const totalTxt = fmt.format(targetCategoryAssets.length);
+  const upTxt = fmt.format(upItems.length) + ' ↗';
+  const downTxt = fmt.format(downItems.length) + ' ↘';
+  const avgTxt = (avgChg >= 0 ? '+' : '') + pct.format(avgChg) + '٪';
+  const avgCol = avgChg >= 0 ? 'var(--green)' : 'var(--red)';
+
+  $$('.pulseTotalCount').forEach(el => el.textContent = totalTxt);
+  $$('.pulseUpCount').forEach(el => el.textContent = upTxt);
+  $$('.pulseDownCount').forEach(el => el.textContent = downTxt);
+  $$('.pulseAvgChange').forEach(el => {
+    el.textContent = avgTxt;
+    el.style.color = avgCol;
+  });
 
   // Filter items
   let filtered = assets.filter(a => {
@@ -5058,7 +5215,6 @@ function renderPortfolio(){
           <div class="holding-title" dir="rtl">${a.name}</div>
           <div class="holding-sub-row">
             <span class="holding-qty-badge" dir="ltr"><b>${qtyFmt.format(h.qty)}</b> <span class="holding-qty-sym">${a.symbol}</span></span>
-            ${h.date ? `<span class="holding-date-badge" dir="rtl"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-left:3px"><rect width="18" height="18" x="3" y="4" rx="2" ry="2"/><line x1="16" x2="16" y1="2" y2="6"/><line x1="8" x2="8" y1="2" y2="6"/><line x1="3" x2="21" y1="10" y2="10"/></svg>${formatShamsiDate(h.date)}</span>` : ''}
           </div>
         </div>
       </div>
@@ -6766,11 +6922,51 @@ function togglePrivacy(){state.privacy=!state.privacy;persist();renderAll();upda
 if ($('#privacyBtn')) $('#privacyBtn').onclick=togglePrivacy;
 if ($('#themeBtn')) $('#themeBtn').onclick=()=>{state.theme=state.theme==='dark'?'light':'dark';persist();renderAll()};
 if ($('#backupBtn')) $('#backupBtn').onclick=()=>download('darayi-backup.json',{version:6,exportedAt:new Date().toISOString(),state,snapshots});if ($('#exportBtn')) $('#exportBtn').onclick=$('#backupBtn').onclick;$('#importBtn').onclick=()=>$('#importFile').click();$('#importFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{const d=JSON.parse(await f.text()),s=d.state||d;if(!Array.isArray(s.holdings)||!Array.isArray(s.watch))throw Error('invalid');const oldState=state;state={...state,...s,user:state.user};sanitizeState();try{ledger()}catch(e){state=oldState;throw e}if(Array.isArray(d.snapshots))snapshots=d.snapshots.filter(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite));persist();renderAll();toast('پشتیبان بازیابی شد')}catch{toast('فایل پشتیبان معتبر نیست')}e.target.value=''};$('#clearData').onclick=()=>{askConfirm('همهٔ خریدها، هشدارها و تنظیمات ذخیره‌شده حذف شوند؟',()=>{try{localStorage.removeItem('darayi-v5')}catch{}snapshots=[];try{localStorage.removeItem('darayi-valuations-v1')}catch{};state={holdings:[],watch:[],alerts:[],featured:['usd','gold18','btc','usdt','eur','sol'],theme:'light',unit:'toman',privacy:false,filter:'all',query:''};renderAll();toast('اطلاعات این دستگاه پاک شد')})};
-const cardObserver=new MutationObserver(()=>{hydrateSparks()});['#marketGrid','#featuredGrid','#winners','#losers'].forEach(sel=>{const el=$(sel);if(el)cardObserver.observe(el,{childList:true});});loadPriceCache();loadCryptoIconsOnce();setupFeaturedDrag();setupDragToScroll();renderAll();loadPrices().then(connectPrices);
+const cardObserver=new MutationObserver(()=>{hydrateSparks()});['#marketGrid','#featuredGrid','#winners','#losers'].forEach(sel=>{const el=$(sel);if(el)cardObserver.observe(el,{childList:true});});loadPriceCache();loadCryptoIconsOnce();setupFeaturedDrag();setupDragToScroll();renderAll();
+let splashPending = !!document.getElementById('coin-splash');
+window.onSplashDone = function() {
+  if (splashPending) {
+    splashPending = false;
+    loadPrices().then(connectPrices);
+  }
+};
+if (!splashPending) {
+  loadPrices().then(connectPrices);
+} else {
+  setTimeout(() => {
+    if (splashPending) {
+      splashPending = false;
+      loadPrices().then(connectPrices);
+    }
+  }, 3200);
+}
 
 
 
 checkSession();const qParams=new URLSearchParams(window.location.search);if(qParams.get('auth_error')){history.replaceState(null,'',window.location.pathname);setTimeout(()=>toast('ورود مستقیم با جیمیل یا رمز عبور فعال است.'),500);}api('/api/health').then(j=>{window.authConfig=j}).catch(()=>{});setInterval(()=>{if(document.hidden)return;loadPrices();pollRemote()},45000);setInterval(()=>{if(!document.hidden){updateTrust();snapshot();if(ws&&lastWs&&Date.now()-lastWs>45000){try{ws.close()}catch{}}connectPrices();}},10000);addEventListener('online',()=>{pushRemote();loadPrices()});document.addEventListener('visibilitychange',()=>{if(!document.hidden){loadPrices();connectPrices()}else{clearTimeout(wsTimer);try{ws?.close()}catch{}}});
 })();
 
-</script></body></html>
+</script>
+<script src="/coin-splash.js"></script>
+<script>
+(function() {
+  if (window.CoinSplash) {
+    CoinSplash.run({
+      face: '/coin-face.png',
+      fallback: '/icons/icon-512.png',
+      theme: 'gold',
+      speed: 1.25,
+      dx: -3,
+      words: ['دارایی', 'من'],
+      onDone: function() {
+        if (window.onSplashDone) window.onSplashDone();
+      }
+    });
+  } else {
+    var sp = document.getElementById('coin-splash');
+    if (sp) sp.remove();
+    if (window.onSplashDone) window.onSplashDone();
+  }
+})();
+</script>
+</body></html>

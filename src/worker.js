@@ -167,13 +167,36 @@ const DOMESTIC_EXTRA = {
   bahar: ['bahar', 'سکه بهار آزادی', 'Bahar', 'gold'], quartercoin: ['quarter', 'ربع‌سکه', 'Quarter', 'gold'],
   gramcoin: ['gram', 'سکهٔ گرمی', 'Gram', 'gold'], silver999: ['silver', 'نقرهٔ ۹۹۹ (هر گرم)', 'Silver', 'gold'],
 };
-const EXCLUDED_STABLES = new Set([
-  'usdc','dai','fdusd','tusd','usdp','busd','pyusd','usdd','usds','usd1','usdg',
-  'paxg','eurc','ustc','xaut','frax','usde','rlusd','lusd','gusd','crvusd',
-  'fxusd','alusd','mim','bgt','usdn','usdx','ssv','susd','dola','deusd',
-  'btcst','steth','wsteth','weeth','reth','cbeth','eeth','eurt','usdt0'
-]);
+const IRAN_MARKET_MAP = {
+  usd: ['USD_IRR_FREE', 'دلار آمریکا', 'USD', 'currency'],
+  eur: ['EUR_IRR_FREE', 'یورو', 'EUR', 'currency'],
+  gbp: ['GBP_IRR_FREE', 'پوند انگلیس', 'GBP', 'currency'],
+  aed: ['AED_IRR_FREE', 'درهم امارات', 'AED', 'currency'],
+  try: ['TRY_IRR_FREE', 'لیر ترکیه', 'TRY', 'currency'],
+  cny: ['CNY_IRR_FREE', 'یوان چین', 'CNY', 'currency'],
+  cad: ['CAD_IRR_FREE', 'دلار کانادا', 'CAD', 'currency'],
+  aud: ['AUD_IRR_FREE', 'دلار استرالیا', 'AUD', 'currency'],
+  chf: ['CHF_IRR_FREE', 'فرانک سوئیس', 'CHF', 'currency'],
+  sar: ['SAR_IRR_FREE', 'ریال عربستان', 'SAR', 'currency'],
+  qar: ['QAR_IRR_FREE', 'ریال قطر', 'QAR', 'currency'],
+  kwd: ['KWD_IRR_FREE', 'دینار کویت', 'KWD', 'currency'],
+  omr: ['OMR_IRR_FREE', 'ریال عمان', 'OMR', 'currency'],
+  iqd: ['IQD_IRR_FREE', 'دینار عراق', 'IQD', 'currency'],
+  afn: ['AFN_IRR_FREE', 'افغانی', 'AFN', 'currency'],
+  rub: ['RUB_IRR_FREE', 'روبل روسیه', 'RUB', 'currency'],
+  inr: ['INR_IRR_FREE', 'روپیه هند', 'INR', 'currency'],
+  gold18: ['GOLD_18K_IRR', 'طلای ۱۸ عیار', 'Gold18', 'gold'],
+  gold24: ['GOLD_24K_IRR', 'طلای ۲۴ عیار', 'Gold24', 'gold'],
+  gram: ['GOLD_MESGHAL_IRR', 'مثقال طلا', 'Mesghal', 'gold'],
+  coin: ['COIN_EMAMI_IRR', 'سکه امامی', 'Coin', 'gold'],
+  bahar: ['COIN_BAHAR_IRR', 'سکه بهار آزادی', 'Bahar', 'gold'],
+  halfcoin: ['COIN_HALF_IRR', 'نیم‌سکه', 'Half', 'gold'],
+  quartercoin: ['COIN_QUARTER_IRR', 'ربع‌سکه', 'Quarter', 'gold'],
+  gramcoin: ['COIN_GRAMI_IRR', 'سکه گرمی', 'Gram', 'gold'],
+  silver999: ['SILVER_999_IRR', 'نقره ۹۹۹ (هر گرم)', 'Silver', 'gold']
+};
 for (const id of Object.keys(DOMESTIC_EXTRA)) NON_CRYPTO.add(id);
+for (const id of Object.keys(IRAN_MARKET_MAP)) NON_CRYPTO.add(id);
 
 const STALE_S = 12 * 3600; // نرخ‌های داخلی تا ۱۲ ساعت (به‌ویژه شب‌ها و تعطیلات بازار تهران) معتبر و استوار می‌مانند
 const CRYPTO_STALE_S = 180;
@@ -742,35 +765,95 @@ export async function refreshPrices(env, force = false) {
 
       put('usdt', liveUsdtPrice, liveUsdtChange, 'tetherland', t, 'IRT', { kind: 'crypto', name: 'تتر', symbol: 'USDT' });
 
+      let domesticSuccess = false;
+
+      // Tier 1: iran-market GitHub CDN (Fast, reliable, verified TGJU & free market rates)
       try {
-        const j = await fetchJSON('https://nerkh.jahankhahan.shop/data/live.json', 7);
-        const ts = domesticTime(j);
+        const im = await fetchJSON('https://iran-market.github.io/data/latest-toman.json', 5);
+        const categories = im?.data?.categories || {};
+        const allList = [
+          ...(categories.gold || []),
+          ...(categories.coin || []),
+          ...(categories.currency || []),
+          ...(categories.precious_metal || [])
+        ];
+        const dict = Object.fromEntries(allList.map(x => [x.symbol, x]));
         let count = 1;
-        for (const [id, keys] of Object.entries(NERKH)) {
-          if (id === 'usdt') continue;
-          const k = keys.find(k => Number(j.rates?.[k]) > 0);
-          if (k) {
-            const v = Number(j.rates[k]);
-            const chg = getDomChange(id, v, j.change?.[k]);
-            put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic' });
-            count++;
-          }
-        }
-        for (const [id, [key, name, sym, cat]] of Object.entries(DOMESTIC_EXTRA)) {
-          const v = Number(j.rates?.[key]);
-          if (v > 0) {
-            const chg = getDomChange(id, v, j.change?.[key]);
-            put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic', name, sym, cat });
+        const ts = im?.data?.generated_at ? Math.floor(new Date(im.data.generated_at).getTime() / 1000) : t;
+
+        for (const [id, [sym, name, code, cat]] of Object.entries(IRAN_MARKET_MAP)) {
+          const item = dict[sym];
+          if (item && Number(item.price) > 0) {
+            const chg = getDomChange(id, Number(item.price), item.change_pct);
+            put(id, Number(item.price), chg, 'iran_market', ts, 'IRT', { kind: 'domestic', name, sym: code, cat });
             count++;
           }
         }
 
-        if (Number(j.usd?.['silver-ounce']) > 0) {
-          put('silver', Number(j.usd['silver-ounce']), NaN, 'nerkhsanj', ts, 'USD', { kind: 'domestic', name: 'انس نقره', sym: 'XAG' });
+        if (count >= 10) {
+          feeds.domestic = { ok: true, checkedAt: t, sourceAt: ts, count, source: 'iran_market' };
+          domesticSuccess = true;
         }
-        feeds.domestic = { ok: true, checkedAt: t, sourceAt: ts, count };
-      } catch (e) {
-        feeds.domestic = { ...feeds.domestic, ok: false, checkedAt: t, error: String(e.message).slice(0, 100) };
+      } catch (err) {}
+
+      // Tier 2: PersianToolbox API
+      if (!domesticSuccess) {
+        try {
+          const pt = await fetchJSON('https://persiantoolbox.ir/api/market', 5);
+          if (pt?.ok && pt?.data) {
+            const d = pt.data;
+            const ts = d.timestamp ? Math.floor(d.timestamp / 1000) : t;
+            let count = 0;
+            if (d.gold?.pricePerGram > 0) {
+              const gold18P = Math.round(d.gold.pricePerGram / 10);
+              put('gold18', gold18P, d.gold.change24h || getDomChange('gold18', gold18P, 0), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'طلای ۱۸ عیار', sym: 'Gold18', cat: 'gold' });
+              count++;
+            }
+            if (d.currencies) {
+              const usdRial = d.currencies.IRR?.rate || 0;
+              const usdP = usdRial > 0 ? Math.round(usdRial / 10) : 0;
+              if (usdP > 100000) {
+                put('usd', usdP, getDomChange('usd', usdP, 0), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'دلار آمریکا', sym: 'USD', cat: 'currency' });
+                count++;
+              }
+            }
+            if (count > 0) {
+              feeds.domestic = { ok: true, checkedAt: t, sourceAt: ts, count, source: 'persiantoolbox' };
+              domesticSuccess = true;
+            }
+          }
+        } catch (err) {}
+      }
+
+      // Tier 3: Nerkhsanj (live.json)
+      if (!domesticSuccess) {
+        try {
+          const j = await fetchJSON('https://nerkh.jahankhahan.shop/data/live.json', 5);
+          const ts = domesticTime(j);
+          let count = 1;
+          for (const [id, keys] of Object.entries(NERKH)) {
+            if (id === 'usdt') continue;
+            const k = keys.find(k => Number(j.rates?.[k]) > 0);
+            if (k) {
+              const v = Number(j.rates[k]);
+              const chg = getDomChange(id, v, j.change?.[k]);
+              put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic' });
+              count++;
+            }
+          }
+          for (const [id, [key, name, sym, cat]] of Object.entries(DOMESTIC_EXTRA)) {
+            const v = Number(j.rates?.[key]);
+            if (v > 0) {
+              const chg = getDomChange(id, v, j.change?.[key]);
+              put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic', name, sym, cat });
+              count++;
+            }
+          }
+          feeds.domestic = { ok: true, checkedAt: t, sourceAt: ts, count, source: 'nerkhsanj' };
+          domesticSuccess = true;
+        } catch (e) {
+          feeds.domestic = { ok: false, checkedAt: t, error: String(e.message).slice(0, 100), fallback: 'cached_values_preserved' };
+        }
       }
     };
 
