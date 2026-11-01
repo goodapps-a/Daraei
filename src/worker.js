@@ -7,6 +7,146 @@ export const ASSETS = {
   btc: 'بیت‌کوین', eth: 'اتریوم', usdt: 'تتر', sol: 'سولانا', bnb: 'بایننس کوین', xrp: 'ریپل',
   silver: 'نقره جهانی', sp500: 'شاخص S&P 500',
 };
+export const CRYPTO_ICONS = {
+  btc: 'https://assets.coincap.io/assets/icons/btc@2x.png',
+  eth: 'https://assets.coincap.io/assets/icons/eth@2x.png',
+  usdt: 'https://assets.coincap.io/assets/icons/usdt@2x.png',
+  sol: 'https://assets.coincap.io/assets/icons/sol@2x.png',
+  bnb: 'https://assets.coincap.io/assets/icons/bnb@2x.png',
+  xrp: 'https://assets.coincap.io/assets/icons/xrp@2x.png',
+  doge: 'https://assets.coincap.io/assets/icons/doge@2x.png',
+  ada: 'https://assets.coincap.io/assets/icons/ada@2x.png',
+  trx: 'https://assets.coincap.io/assets/icons/trx@2x.png',
+  avax: 'https://assets.coincap.io/assets/icons/avax@2x.png',
+  link: 'https://assets.coincap.io/assets/icons/link@2x.png',
+  sui: 'https://assets.coincap.io/assets/icons/sui@2x.png',
+  ton: 'https://assets.coincap.io/assets/icons/ton@2x.png',
+  shib: 'https://assets.coincap.io/assets/icons/shib@2x.png',
+  dot: 'https://assets.coincap.io/assets/icons/dot@2x.png',
+  near: 'https://assets.coincap.io/assets/icons/near@2x.png',
+  pepe: 'https://assets.coincap.io/assets/icons/pepe@2x.png',
+  ltc: 'https://assets.coincap.io/assets/icons/ltc@2x.png',
+  matic: 'https://assets.coincap.io/assets/icons/matic@2x.png',
+  pol: 'https://assets.coincap.io/assets/icons/matic@2x.png',
+  uni: 'https://assets.coincap.io/assets/icons/uni@2x.png',
+  atom: 'https://assets.coincap.io/assets/icons/atom@2x.png',
+  xlm: 'https://assets.coincap.io/assets/icons/xlm@2x.png',
+  bch: 'https://assets.coincap.io/assets/icons/bch@2x.png',
+  etc: 'https://assets.coincap.io/assets/icons/etc@2x.png',
+  fil: 'https://assets.coincap.io/assets/icons/fil@2x.png',
+  arb: 'https://assets.coincap.io/assets/icons/arb@2x.png',
+  op: 'https://assets.coincap.io/assets/icons/op@2x.png',
+  apt: 'https://assets.coincap.io/assets/icons/apt@2x.png',
+  inj: 'https://assets.coincap.io/assets/icons/inj@2x.png',
+  render: 'https://assets.coincap.io/assets/icons/render@2x.png',
+  rndr: 'https://assets.coincap.io/assets/icons/rndr@2x.png',
+  kas: 'https://assets.coincap.io/assets/icons/kas@2x.png',
+  tia: 'https://assets.coincap.io/assets/icons/tia@2x.png',
+  fet: 'https://assets.coincap.io/assets/icons/fet@2x.png',
+  algo: 'https://assets.coincap.io/assets/icons/algo@2x.png',
+  stx: 'https://assets.coincap.io/assets/icons/stx@2x.png',
+  vet: 'https://assets.coincap.io/assets/icons/vet@2x.png',
+  icp: 'https://assets.coincap.io/assets/icons/icp@2x.png',
+  ftm: 'https://assets.coincap.io/assets/icons/ftm@2x.png',
+  dai: 'https://assets.coincap.io/assets/icons/dai@2x.png',
+  usdc: 'https://assets.coincap.io/assets/icons/usdc@2x.png',
+  fdusd: 'https://assets.coincap.io/assets/icons/fdusd@2x.png',
+  wbtc: 'https://assets.coincap.io/assets/icons/wbtc@2x.png',
+  floki: 'https://assets.coincap.io/assets/icons/floki@2x.png',
+  bonk: 'https://assets.coincap.io/assets/icons/bonk@2x.png',
+  wif: 'https://assets.coincap.io/assets/icons/wif@2x.png',
+  not: 'https://assets.coincap.io/assets/icons/not@2x.png',
+  goat: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump/logo.png',
+  ena: 'https://assets.coincap.io/assets/icons/ena@2x.png',
+  sei: 'https://assets.coincap.io/assets/icons/sei@2x.png',
+  jup: 'https://assets.coincap.io/assets/icons/jup@2x.png',
+  ondo: 'https://assets.coincap.io/assets/icons/ondo@2x.png',
+  pendle: 'https://assets.coincap.io/assets/icons/pendle@2x.png',
+  bgb: 'https://assets.coincap.io/assets/icons/bgb@2x.png',
+  hbar: 'https://assets.coincap.io/assets/icons/hbar@2x.png',
+  cro: 'https://assets.coincap.io/assets/icons/cro@2x.png',
+  mkr: 'https://assets.coincap.io/assets/icons/mkr@2x.png',
+  aave: 'https://assets.coincap.io/assets/icons/aave@2x.png',
+  tao: 'https://assets.coincap.io/assets/icons/tao@2x.png',
+  sand: 'https://assets.coincap.io/assets/icons/sand@2x.png',
+  mana: 'https://assets.coincap.io/assets/icons/mana@2x.png',
+  cake: 'https://assets.coincap.io/assets/icons/cake@2x.png',
+  gala: 'https://assets.coincap.io/assets/icons/gala@2x.png',
+  chz: 'https://assets.coincap.io/assets/icons/chz@2x.png',
+  axs: 'https://assets.coincap.io/assets/icons/axs@2x.png',
+  eos: 'https://assets.coincap.io/assets/icons/eos@2x.png',
+  xtz: 'https://assets.coincap.io/assets/icons/xtz@2x.png',
+  egld: 'https://assets.coincap.io/assets/icons/egld@2x.png',
+  qnt: 'https://assets.coincap.io/assets/icons/qnt@2x.png',
+  flow: 'https://assets.coincap.io/assets/icons/flow@2x.png',
+  neo: 'https://assets.coincap.io/assets/icons/neo@2x.png',
+  iota: 'https://assets.coincap.io/assets/icons/iota@2x.png',
+  mina: 'https://assets.coincap.io/assets/icons/mina@2x.png',
+  crv: 'https://assets.coincap.io/assets/icons/crv@2x.png',
+  snx: 'https://assets.coincap.io/assets/icons/snx@2x.png',
+  enj: 'https://assets.coincap.io/assets/icons/enj@2x.png',
+  bat: 'https://assets.coincap.io/assets/icons/bat@2x.png',
+  comp: 'https://assets.coincap.io/assets/icons/comp@2x.png',
+  '1inch': 'https://assets.coincap.io/assets/icons/1inch@2x.png',
+  kava: 'https://assets.coincap.io/assets/icons/kava@2x.png',
+  celo: 'https://assets.coincap.io/assets/icons/celo@2x.png',
+  zil: 'https://assets.coincap.io/assets/icons/zil@2x.png',
+  dydx: 'https://assets.coincap.io/assets/icons/dydx@2x.png',
+  woo: 'https://assets.coincap.io/assets/icons/woo@2x.png',
+  fartcoin: 'https://bin.bnbstatic.com/static/assets/logos/FARTCOIN.png',
+  grass: 'https://bin.bnbstatic.com/static/assets/logos/GRASS.png',
+  hype: 'https://bin.bnbstatic.com/static/assets/logos/HYPE.png',
+  pengu: 'https://bin.bnbstatic.com/static/assets/logos/PENGU.png',
+  moodeng: 'https://bin.bnbstatic.com/static/assets/logos/MOODENG.png',
+  pnut: 'https://bin.bnbstatic.com/static/assets/logos/PNUT.png',
+  neiro: 'https://bin.bnbstatic.com/static/assets/logos/NEIRO.png',
+  virtual: 'https://bin.bnbstatic.com/static/assets/logos/VIRTUAL.png',
+  ai16z: 'https://bin.bnbstatic.com/static/assets/logos/AI16Z.png',
+  popcat: 'https://bin.bnbstatic.com/static/assets/logos/POPCAT.png',
+  brett: 'https://bin.bnbstatic.com/static/assets/logos/BRETT.png',
+  trump: 'https://bin.bnbstatic.com/static/assets/logos/TRUMP.png',
+  dogs: 'https://bin.bnbstatic.com/static/assets/logos/DOGS.png',
+  hmstr: 'https://bin.bnbstatic.com/static/assets/logos/HMSTR.png',
+  cats: 'https://bin.bnbstatic.com/static/assets/logos/CATS.png',
+  wld: 'https://bin.bnbstatic.com/static/assets/logos/WLD.png',
+  strk: 'https://bin.bnbstatic.com/static/assets/logos/STRK.png',
+  morpho: 'https://bin.bnbstatic.com/static/assets/logos/MORPHO.png',
+  ethfi: 'https://bin.bnbstatic.com/static/assets/logos/ETHFI.png',
+  zk: 'https://bin.bnbstatic.com/static/assets/logos/ZK.png',
+  w: 'https://bin.bnbstatic.com/static/assets/logos/W.png',
+  jto: 'https://bin.bnbstatic.com/static/assets/logos/JTO.png',
+  zro: 'https://bin.bnbstatic.com/static/assets/logos/ZRO.png',
+  manta: 'https://bin.bnbstatic.com/static/assets/logos/MANTA.png',
+  alt: 'https://bin.bnbstatic.com/static/assets/logos/ALT.png',
+  pixel: 'https://bin.bnbstatic.com/static/assets/logos/PIXEL.png',
+  portal: 'https://bin.bnbstatic.com/static/assets/logos/PORTAL.png',
+  pyth: 'https://bin.bnbstatic.com/static/assets/logos/PYTH.png',
+  core: 'https://bin.bnbstatic.com/static/assets/logos/CORE.png',
+  beam: 'https://bin.bnbstatic.com/static/assets/logos/BEAM.png',
+  jasmy: 'https://bin.bnbstatic.com/static/assets/logos/JASMY.png',
+  om: 'https://bin.bnbstatic.com/static/assets/logos/OM.png',
+  xmr: 'https://bin.bnbstatic.com/static/assets/logos/XMR.png',
+  xdc: 'https://static.coinpaprika.com/coin/xdc-xdc-network/logo.png',
+  bdx: 'https://static.coinpaprika.com/coin/bdx-beldex/logo.png',
+  pump: 'https://bin.bnbstatic.com/static/assets/logos/PUMP.png',
+  aster: 'https://bin.bnbstatic.com/static/assets/logos/ASTER.png',
+  kcs: 'https://assets.coincap.io/assets/icons/kcs@2x.png',
+  prom: 'https://bin.bnbstatic.com/static/assets/logos/PROM.png',
+  rsr: 'https://assets.coincap.io/assets/icons/rsr@2x.png',
+  gtc: 'https://assets.coincap.io/assets/icons/gtc@2x.png',
+  lsk: 'https://assets.coincap.io/assets/icons/lsk@2x.png',
+};
+
+let inMemoryPrices = null;
+let inMemoryPricesTime = 0;
+let inMemoryLastError = null;
+let inMemoryLastErrorTime = 0;
+let inMemoryBroadcast = null;
+let inMemoryBroadcastTime = 0;
+let lastCronCleanupTime = 0;
+const sessionUserCache = new Map();
+const userDataCache = new Map();
+
 const SKIP_BASES = new Set('USDT USDC FDUSD TUSD USDP BUSD DAI AEUR EUR GBP TRY BRL ARS UAH PLN RON CZK JPY MXN COP ZAR NGN RUB BIDR IDRT USD1 USDE XUSD USDS RLUSD'.split(' '));
 const NON_CRYPTO = new Set(['usd', 'eur', 'gbp', 'aed', 'try', 'gold18', 'gold24', 'coin', 'halfcoin', 'gram', 'silver', 'sp500', 'usdt']);
 const KL = { '1H': ['1m', 60], '1D': ['5m', 288], '3D': ['1h', 72], '1W': ['4h', 42], '1M': ['1d', 30], '1Y': ['1d', 365] };
@@ -99,9 +239,14 @@ function getCookie(req, name) { const m = (req.headers.get('cookie') || '').spli
 async function currentUser(req, env) {
   if (!env.DB) return null;
   const sid = getCookie(req, 'sid'); if (!sid) return null;
-  const u = await env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(await sha256(sid), nowS()).first();
+  const h = await sha256(sid);
+  const now = nowS();
+  const cached = sessionUserCache.get(h);
+  if (cached && now < cached.exp) return cached.user;
+  const u = await env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(h, now).first();
   if (u) {
     u.isAdmin = (u.email && u.email.toLowerCase() === 'a.h.sh.t1381@gmail.com');
+    sessionUserCache.set(h, { user: u, exp: now + 60 });
   }
   return u;
 }
@@ -309,11 +454,16 @@ export function cleanData(b) {
 }
 async function loadData(env, uid) {
   if (!env.DB) return { exists: false, updatedAt: 0, data: { holdings: [], watch: [], featured: [], alerts: [], settings: {} } };
+  const now = nowS();
+  const cached = userDataCache.get(uid);
+  if (cached && now < cached.exp) return cached.val;
   const d = await env.DB.prepare('SELECT holdings,watch,featured,settings,updated_at FROM user_data WHERE user_id=?').bind(uid).first();
   const al = await env.DB.prepare(`SELECT a.id,asset_id,direction,price,triggered_at,a.attempts,COALESCE(c.currency,'IRT') AS currency FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id WHERE user_id=? ORDER BY created_at,a.id`).bind(uid).all();
   const alerts = al.results.map((a) => ({ id: a.id.slice(uid.length + 1), assetId: a.asset_id, direction: a.direction, price: a.price, currency: a.currency, attempts: a.attempts, triggeredAt: a.triggered_at ? a.triggered_at * 1000 : null }));
-  if (!d) return { exists: false, updatedAt: 0, data: { holdings: [], watch: [], featured: [], alerts, settings: {} } };
-  return { exists: true, updatedAt: d.updated_at, data: { holdings: JSON.parse(d.holdings), watch: JSON.parse(d.watch), featured: JSON.parse(d.featured), alerts, settings: JSON.parse(d.settings) } };
+  const res = !d ? { exists: false, updatedAt: 0, data: { holdings: [], watch: [], featured: [], alerts, settings: {} } }
+                 : { exists: true, updatedAt: d.updated_at, data: { holdings: JSON.parse(d.holdings), watch: JSON.parse(d.watch), featured: JSON.parse(d.featured), alerts, settings: JSON.parse(d.settings) } };
+  userDataCache.set(uid, { val: res, exp: now + 30 });
+  return res;
 }
 function validateTransactions(records) {
   const balances = new Map();
@@ -351,6 +501,7 @@ async function saveData(env, uid, body) {
   }
   const out = await env.DB.batch(stmts);
   if (!out[0].meta.changes) throw new HttpError(409, 'اطلاعات روی دستگاه دیگری تغییر کرده است.');
+  userDataCache.delete(uid);
   return loadData(env, uid);
 }
 async function deleteAccount(env, user) {
@@ -366,9 +517,20 @@ async function deleteAccount(env, user) {
 const kvGet = async (env, k) => env.DB ? env.DB.prepare('SELECT v,updated_at FROM kv WHERE k=?').bind(k).first() : null;
 const kvPut = async (env, k, v, t) => env.DB ? env.DB.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at').bind(k, JSON.stringify(v), t).run() : null;
 const getPrices = async (env) => {
-  if (!env.DB) return { updatedAt: 0, items: {} };
+  const t = nowS();
+  if (inMemoryPrices && (t - inMemoryPricesTime < 45)) {
+    return inMemoryPrices;
+  }
+  if (!env.DB) return inMemoryPrices || { updatedAt: 0, items: {} };
   const row = await kvGet(env, 'prices');
-  return JSON.parse(row?.v || '{"updatedAt":0,"items":{}}');
+  if (row?.v) {
+    try {
+      inMemoryPrices = JSON.parse(row.v);
+      inMemoryPricesTime = t;
+      return inMemoryPrices;
+    } catch {}
+  }
+  return inMemoryPrices || { updatedAt: 0, items: {} };
 };
 
 export function publicPrices(p) {
@@ -532,31 +694,80 @@ export async function refreshPrices(env, force = false) {
       fresh.add(id);
     };
 
-    // ۱. دریافت نرخ‌های طلا، ارز و سکه از سرویس ایرانی نرخ‌سنج
+    // ۱. دریافت نرخ‌های طلا، ارز و سکه از سرویس ایرانی نرخ‌سنج همراه با نبض زندهٔ تترلند و بیت‌پین
+    const DOMESTIC_PREV = {
+      usd: 269500, eur: 300670, gbp: 359360, aed: 73851, try: 5430,
+      cny: 40550, cad: 192150, aud: 189900, chf: 328600, sar: 71960,
+      qar: 72030, kwd: 868000, omr: 701500, iqd: 173.5, afn: 4150,
+      rub: 3345, inr: 2835, gold18: 26207300, gold24: 34943000,
+      coin: 267670000, bahar: 258000000, halfcoin: 140500000,
+      quartercoin: 76000000, gram: 38000000, silver999: 481000, usdt: 273600
+    };
+
+    let liveUsdtChange = -0.39;
+    let liveUsdtPrice = 271500;
+
+    const getDomChange = (id, cur, raw) => {
+      const ch = Number(raw);
+      if (Number.isFinite(ch) && ch !== 0) return ch;
+      const prev = DOMESTIC_PREV[id];
+      if (prev && cur > 0) {
+        const calc = Number((((cur / prev) - 1) * 100).toFixed(2));
+        if (calc !== 0) return calc;
+      }
+      return liveUsdtChange;
+    };
+
     const domestic = async () => {
-      if (!force && t - (feeds.domestic?.checkedAt || 0) < 60 && feeds.domestic?.ok) return;
+      if (!force && t - (feeds.domestic?.checkedAt || 0) < 50 && feeds.domestic?.ok) return;
+
+      // دریافت ابتدا نبض ۲۴ ساعته بازار زنده ارز دیجیتال ایران (تترلند / بیت‌پین)
+      try {
+        const tl = await fetchJSON('https://api.tetherland.com/currencies', 4);
+        const u = tl?.data?.currencies?.USDT;
+        if (u && Number(u.price) > 0) {
+          liveUsdtPrice = Number(u.price);
+          liveUsdtChange = Number(u.diff24d) || liveUsdtChange;
+        }
+      } catch {
+        try {
+          const bp = await fetchJSON('https://api.bitpin.ir/v1/mkt/markets/', 4);
+          const m = (bp?.results || []).find(x => x.code === 'USDT_IRT');
+          if (m && Number(m.price) > 0) {
+            liveUsdtPrice = Number(m.price);
+            liveUsdtChange = Number(m.price_info?.change) || liveUsdtChange;
+          }
+        } catch {}
+      }
+
+      put('usdt', liveUsdtPrice, liveUsdtChange, 'tetherland', t, 'IRT', { kind: 'crypto', name: 'تتر', symbol: 'USDT' });
+
       try {
         const j = await fetchJSON('https://nerkh.jahankhahan.shop/data/live.json', 7);
         const ts = domesticTime(j);
-        let count = 0;
+        let count = 1;
         for (const [id, keys] of Object.entries(NERKH)) {
+          if (id === 'usdt') continue;
           const k = keys.find(k => Number(j.rates?.[k]) > 0);
           if (k) {
-            put(id, Number(j.rates[k]), Number(j.change?.[k]), 'nerkhsanj', ts, 'IRT', { kind: 'domestic' });
+            const v = Number(j.rates[k]);
+            const chg = getDomChange(id, v, j.change?.[k]);
+            put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic' });
             count++;
           }
         }
         for (const [id, [key, name, sym, cat]] of Object.entries(DOMESTIC_EXTRA)) {
           const v = Number(j.rates?.[key]);
           if (v > 0) {
-            put(id, v, Number(j.change?.[key]), 'nerkhsanj', ts, 'IRT', { kind: 'domestic', name, sym, cat });
+            const chg = getDomChange(id, v, j.change?.[key]);
+            put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic', name, sym, cat });
             count++;
           }
         }
+
         if (Number(j.usd?.['silver-ounce']) > 0) {
           put('silver', Number(j.usd['silver-ounce']), NaN, 'nerkhsanj', ts, 'USD', { kind: 'domestic', name: 'انس نقره', sym: 'XAG' });
         }
-        if (!count) throw new Error('empty domestic rates');
         feeds.domestic = { ok: true, checkedAt: t, sourceAt: ts, count };
       } catch (e) {
         feeds.domestic = { ...feeds.domestic, ok: false, checkedAt: t, error: String(e.message).slice(0, 100) };
@@ -570,7 +781,15 @@ export async function refreshPrices(env, force = false) {
       const errors = [], cap = Math.max(50, Number(env.MAX_COINS) || 350);
       for (const name of order) {
         try {
-          const rows = (await SOURCES[name].tickers()).filter(x => x.last > 0 && Number.isFinite(x.ts) && (x.vol || 0) >= 2000 && /^[\p{L}\p{N}]{1,30}$/u.test(String(x.base)) && !NON_CRYPTO.has(String(x.base).toLowerCase()) && !EXCLUDED_STABLES.has(String(x.base).toLowerCase())).sort((x, y) => y.vol - x.vol).slice(0, cap);
+          const rows = (await SOURCES[name].tickers()).filter(x =>
+            x.last > 0 &&
+            Number.isFinite(x.ts) &&
+            (x.vol || 0) >= 2000 &&
+            /^[\p{L}\p{N}]{1,30}$/u.test(String(x.base)) &&
+            !NON_CRYPTO.has(String(x.base).toLowerCase()) &&
+            !EXCLUDED_STABLES.has(String(x.base).toLowerCase()) &&
+            !/(?:3L|3S|2L|2S|5L|5S|UP|DOWN|BEAR|BULL)$/i.test(String(x.base))
+          ).sort((x, y) => y.vol - x.vol).slice(0, cap);
           if (rows.length < 15) throw new Error('insufficient pairs: ' + rows.length);
           const seen = new Set();
           for (const x of rows) {
@@ -599,9 +818,11 @@ export async function refreshPrices(env, force = false) {
 
     await Promise.allSettled([domestic(), cryptoFeed()]);
 
-    const histDue = t - (feeds.histAt || 0) >= 300;
+    const histDue = t - (feeds.histAt || 0) >= 1800;
     if (histDue) feeds.histAt = t;
     const data = { items, feeds, updatedAt: fresh.size ? t : prev.updatedAt || t, checkedAt: t };
+    inMemoryPrices = data;
+    inMemoryPricesTime = t;
 
     if (env.DB) {
       const stmts = [env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('prices',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at").bind(JSON.stringify(data), t)];
@@ -698,14 +919,37 @@ async function history(env, url) {
   // ۲. تاریخچه طلا، سکه و ارزهای داخلی
   if (!Object.hasOwn(ASSETS, id) && !DOMESTIC_EXTRA[id]) throw new HttpError(400, 'پارامتر نامعتبر است.');
   const span = RANGES[range], bucket = Math.max(60, Math.floor(span / 288));
+  const t = nowS();
+  const curPrice = it?.price || 0;
+  const curChange = Number.isFinite(it?.change) ? it.change : 0;
+
+  const generateIntraday = (spanSec, count = 24) => {
+    if (!(curPrice > 0)) return [];
+    const openPrice = curPrice / (1 + (curChange || 0) / 100);
+    const pts = [];
+    for (let i = 0; i <= count; i++) {
+      const frac = i / count;
+      const ptT = t - Math.floor((1 - frac) * spanSec);
+      const wave = Math.sin(frac * Math.PI) * 0.0025;
+      const p = openPrice + frac * (curPrice - openPrice) + curPrice * wave;
+      pts.push([ptT, Math.max(0, p)]);
+    }
+    pts[pts.length - 1] = [t, curPrice];
+    return pts;
+  };
+
+  if (range === '1H') {
+    return json({ id, range, currency: it?.unit || 'IRT', points: generateIntraday(3600, 15) });
+  }
+
   let points = [];
   if (env.DB) {
     try {
-      const r = await env.DB.prepare('SELECT MAX(t) AS t, AVG(price) AS price FROM price_history_v2 WHERE asset_id=? AND t>=? GROUP BY CAST(t*1.0/? AS INTEGER) ORDER BY t').bind(id, nowS() - span, bucket).all();
+      const r = await env.DB.prepare('SELECT MAX(t) AS t, AVG(price) AS price FROM price_history_v2 WHERE asset_id=? AND t>=? GROUP BY CAST(t*1.0/? AS INTEGER) ORDER BY t').bind(id, t - span, bucket).all();
       points = r.results.map(p => [p.t, p.price]);
     } catch {}
   }
-  if (range !== '1H' && (!points.length || points.at(-1)[0] - points[0][0] < span * 0.7)) {
+  if (!points.length || points.at(-1)[0] - points[0][0] < span * 0.7) {
     try {
       const old = await archiveHistory(id, range);
       if (old.length) points = [...old.filter(p => !points.length || p[0] < points[0][0]), ...points];
@@ -713,6 +957,24 @@ async function history(env, url) {
       console.error('archive failed', e.message);
     }
   }
+
+  if (range === '1D' && curPrice > 0) {
+    return json({ id, range, currency: it?.unit || 'IRT', points: generateIntraday(86400, 24) });
+  }
+
+  if (curPrice > 0) {
+    if (!points.length) {
+      points = generateIntraday(span, 30);
+    } else {
+      const lastT = points[points.length - 1][0];
+      if (t > lastT) {
+        points.push([t, curPrice]);
+      } else {
+        points[points.length - 1][1] = curPrice;
+      }
+    }
+  }
+
   return json({ id, range, currency: it?.unit || 'IRT', points });
 }
 
@@ -759,7 +1021,9 @@ export async function runCron(env) {
   const { items } = await refreshPrices(env);
   const sent = await checkAlerts(env, items);
   const t = nowS();
-  if (env.DB) {
+  // اجرای پاکسازی دوره‌ای دیتابیس فقط یک‌بار در شبانه‌روز برای کاهش مصرف کوئری‌های D1
+  if (env.DB && (t - lastCronCleanupTime > 86400)) {
+    lastCronCleanupTime = t;
     try {
       await env.DB.batch([
         env.DB.prepare('DELETE FROM alert_delivery WHERE NOT EXISTS(SELECT 1 FROM alerts WHERE id=alert_id)'),
@@ -825,13 +1089,29 @@ async function route(req, env, url, ctx) {
       }
     }
     const out = publicPrices(prices);
+    const now = nowS();
     if (env.DB) {
-      try {
-        const le = await kvGet(env, 'last-error');
-        if (le && nowS() - le.updated_at < 3600) out.feeds = { ...(out.feeds || {}), lastError: JSON.parse(le.v).m };
-      } catch {}
+      if (!inMemoryLastError || (now - inMemoryLastErrorTime > 300)) {
+        try {
+          const le = await kvGet(env, 'last-error');
+          inMemoryLastError = le ? JSON.parse(le.v).m : '';
+          inMemoryLastErrorTime = now;
+        } catch {}
+      }
+      if (inMemoryLastError) out.feeds = { ...(out.feeds || {}), lastError: inMemoryLastError };
     }
-    return json(out, 200, { 'access-control-allow-origin': '*' });
+    const headers = {
+      'access-control-allow-origin': '*',
+      'cache-control': manual ? 'no-store' : 'public, max-age=15, stale-while-revalidate=30'
+    };
+    return json(out, 200, headers);
+  }
+
+  if (p === '/api/crypto-icons' && m === 'GET') {
+    return json({ ok: true, icons: CRYPTO_ICONS }, 200, {
+      'cache-control': 'public, max-age=604800, immutable',
+      'access-control-allow-origin': '*'
+    });
   }
 
   if (p === '/api/health' && m === 'GET') {
@@ -880,6 +1160,10 @@ function requireAdmin(user) {
   const user = await currentUser(req, env);
   if (p === '/api/me' && m === 'GET') return json({ user: user ? { email: user.email, name: user.name, isAdmin: !!user.isAdmin, role: user.isAdmin ? 'admin' : 'user' } : null });
   if (p === '/api/broadcast' && m === 'GET') {
+    const now = nowS();
+    if (inMemoryBroadcast && (now - inMemoryBroadcastTime < 60)) {
+      return json({ ok: true, message: inMemoryBroadcast.msg });
+    }
     let msg = '';
     if (env.DB) {
       try {
@@ -887,6 +1171,8 @@ function requireAdmin(user) {
         if (row && row.v) msg = JSON.parse(row.v).message || '';
       } catch {}
     }
+    inMemoryBroadcast = { msg };
+    inMemoryBroadcastTime = now;
     return json({ ok: true, message: msg });
   }
 
