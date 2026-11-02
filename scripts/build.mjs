@@ -14,11 +14,17 @@ if (!fs.existsSync(distDir)) {
 console.log('Reading src/index.html and src/worker.js...');
 const htmlContent = fs.readFileSync(indexHtmlPath, 'utf8');
 const workerContent = fs.readFileSync(workerJsPath, 'utf8');
+const splashJsPath = path.join(rootDir, 'public', 'coin-splash.js');
+const facePngPath = path.join(rootDir, 'public', 'coin-face.png');
+const splashJsContent = fs.existsSync(splashJsPath) ? fs.readFileSync(splashJsPath, 'utf8') : '';
+const facePngBase64 = fs.existsSync(facePngPath) ? fs.readFileSync(facePngPath).toString('base64') : '';
 
-// The single-file Cloudflare bundle prepends const APP_HTML = "...";
+// The single-file Cloudflare bundle prepends const APP_HTML, COIN_SPLASH_JS, COIN_FACE_PNG
 const bundled = `// دارایی من (Darayi) — Cloudflare Worker Full Single-File Bundle
 // Build generated: ${new Date().toISOString()}
 const APP_HTML = ${JSON.stringify(htmlContent)};
+const COIN_SPLASH_JS = ${JSON.stringify(splashJsContent)};
+const COIN_FACE_PNG = ${JSON.stringify(facePngBase64)};
 
 ${workerContent}
 `;

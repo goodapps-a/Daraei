@@ -485,7 +485,7 @@ async function loadData(env, uid) {
   const alerts = al.results.map((a) => ({ id: a.id.slice(uid.length + 1), assetId: a.asset_id, direction: a.direction, price: a.price, currency: a.currency, attempts: a.attempts, triggeredAt: a.triggered_at ? a.triggered_at * 1000 : null }));
   const res = !d ? { exists: false, updatedAt: 0, data: { holdings: [], watch: [], featured: [], alerts, settings: {} } }
                  : { exists: true, updatedAt: d.updated_at, data: { holdings: JSON.parse(d.holdings), watch: JSON.parse(d.watch), featured: JSON.parse(d.featured), alerts, settings: JSON.parse(d.settings) } };
-  userDataCache.set(uid, { val: res, exp: now + 30 });
+  userDataCache.set(uid, { val: res, exp: now + 120 });
   return res;
 }
 function validateTransactions(records) {
@@ -541,7 +541,7 @@ const kvGet = async (env, k) => env.DB ? env.DB.prepare('SELECT v,updated_at FRO
 const kvPut = async (env, k, v, t) => env.DB ? env.DB.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at').bind(k, JSON.stringify(v), t).run() : null;
 const getPrices = async (env) => {
   const t = nowS();
-  if (inMemoryPrices && (t - inMemoryPricesTime < 45)) {
+  if (inMemoryPrices && (t - inMemoryPricesTime < 180)) {
     return inMemoryPrices;
   }
   if (!env.DB) return inMemoryPrices || { updatedAt: 0, items: {} };
@@ -695,18 +695,14 @@ const SOURCES = {
   }
 };
 
+let inMemoryRefreshLock = 0;
+
 export async function refreshPrices(env, force = false) {
-  const t = nowS(), owner = rand(16);
-  let hasLock = false;
-  if (env.DB) {
-    try {
-      const lease = await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('refresh-lock',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at WHERE kv.updated_at<? RETURNING k").bind(owner, t, t - 60).first();
-      hasLock = !!lease;
-      if (!hasLock && !force) {
-        return { items: (await getPrices(env)).items || {}, updated: [], busy: true };
-      }
-    } catch {}
+  const t = nowS();
+  if (!force && (t - inMemoryRefreshLock < 45)) {
+    return { items: (await getPrices(env)).items || {}, updated: [], busy: true };
   }
+  inMemoryRefreshLock = t;
 
   try {
     const prev = await getPrices(env);
@@ -901,13 +897,15 @@ export async function refreshPrices(env, force = false) {
 
     await Promise.allSettled([domestic(), cryptoFeed()]);
 
-    const histDue = t - (feeds.histAt || 0) >= 1800;
+    const histDue = t - (feeds.histAt || 0) >= 7200;
     if (histDue) feeds.histAt = t;
+    const shouldSaveD1 = force || !feeds.lastD1Save || (t - (feeds.lastD1Save || 0) >= 600);
+    if (shouldSaveD1) feeds.lastD1Save = t;
     const data = { items, feeds, updatedAt: fresh.size ? t : prev.updatedAt || t, checkedAt: t };
     inMemoryPrices = data;
     inMemoryPricesTime = t;
 
-    if (env.DB) {
+    if (env.DB && shouldSaveD1) {
       const stmts = [env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('prices',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at").bind(JSON.stringify(data), t)];
       if (histDue) {
         const ids = [...fresh].filter(id => !items[id].crypto && items[id].t);
@@ -929,10 +927,9 @@ export async function refreshPrices(env, force = false) {
       }
     }
     return { items, updated: [...fresh] };
-  } finally {
-    if (env.DB && hasLock) {
-      try { await env.DB.prepare("DELETE FROM kv WHERE k='refresh-lock' AND v=?").bind(owner).run(); } catch {}
-    }
+  } catch (err) {
+    console.error('refreshPrices failed:', err?.message);
+    return { items: inMemoryPrices?.items || {}, updated: [], error: err?.message };
   }
 }
 
@@ -1061,11 +1058,18 @@ async function history(env, url) {
   return json({ id, range, currency: it?.unit || 'IRT', points });
 }
 
-// ---------- سیستم ارسال هشدارها ----------
+let lastAlertCheckTime = 0;
 export async function checkAlerts(env, items) {
   if (!env.DB) return 0;
   if (!(env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET || env.RESEND_API_KEY && env.MAIL_FROM || env.EMAIL && env.MAIL_FROM)) return 0;
-  const t = nowS(); let sent = 0;
+  const t = nowS();
+  if (t - lastAlertCheckTime < 300) return 0;
+  lastAlertCheckTime = t;
+  try {
+    const alertCount = await env.DB.prepare('SELECT count(*) AS c FROM alerts WHERE triggered_at IS NULL').first();
+    if (!alertCount || !alertCount.c) return 0;
+  } catch { return 0; }
+  let sent = 0;
   const rows = (await env.DB.prepare(`SELECT a.id,a.asset_id,a.direction,a.price,a.attempts,COALESCE(c.currency,'IRT') AS currency,COALESCE(g.version,'legacy') AS version,u.email,u.name FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id LEFT JOIN alert_state g ON g.alert_id=a.id JOIN users u ON u.id=a.user_id LEFT JOIN alert_delivery d ON d.alert_id=a.id WHERE a.triggered_at IS NULL AND a.attempts<5 AND COALESCE(d.retry_at,0)<=unixepoch() AND COALESCE(d.lease_until,0)<=unixepoch()`).all()).results;
   for (const a of rows) {
     let cur = items[a.asset_id];
@@ -1505,16 +1509,16 @@ const MANIFEST = {
   start_url: '/?source=pwa',
   scope: '/',
   display: 'standalone',
-  background_color: '#f5f5f0',
-  theme_color: '#172b22',
+  background_color: '#ffffff',
+  theme_color: '#ffffff',
   icons: [
     { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
     { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
     { src: '/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
   ]
 };
-const SW_JS = `const V='darayi-v2';
-self.addEventListener('install',e=>{e.waitUntil(caches.open(V).then(c=>c.addAll(['/','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png'])).then(()=>self.skipWaiting()))});
+const SW_JS = `const V='darayi-v3';
+self.addEventListener('install',e=>{e.waitUntil(caches.open(V).then(c=>c.addAll(['/','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png','/coin-face.png','/coin-splash.js'])).then(()=>self.skipWaiting()))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==V).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
 self.addEventListener('fetch',e=>{
   const r=e.request,u=new URL(r.url);
@@ -1530,8 +1534,17 @@ const b64bytes = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 function staticResponse(path) {
   if (path === '/manifest.webmanifest') return new Response(JSON.stringify(MANIFEST), { headers: { 'content-type': 'application/manifest+json; charset=utf-8', 'cache-control': 'public, max-age=3600' } });
   if (path === '/sw.js') return new Response(SW_JS, { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'no-cache', 'service-worker-allowed': '/' } });
-  const icon = { '/icons/icon-192.png': ICON192, '/icons/icon-512.png': ICON512, '/icons/maskable-512.png': ICONM, '/apple-touch-icon.png': ICON180, '/favicon.ico': ICON192 }[path];
-  return icon ? new Response(b64bytes(icon), { headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' } }) : null;
+  if (path === '/coin-splash.js' && typeof COIN_SPLASH_JS === 'string') return new Response(COIN_SPLASH_JS, { headers: { 'content-type': 'text/javascript; charset=utf-8', 'cache-control': 'public, max-age=604800, immutable' } });
+  const iconMap = {
+    '/icons/icon-192.png': ICON192,
+    '/icons/icon-512.png': ICON512,
+    '/icons/maskable-512.png': ICONM,
+    '/apple-touch-icon.png': ICON180,
+    '/favicon.ico': ICON192,
+    '/coin-face.png': typeof COIN_FACE_PNG === 'string' ? COIN_FACE_PNG : null
+  };
+  const icon = iconMap[path];
+  return icon ? new Response(b64bytes(icon), { headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=604800, immutable' } }) : null;
 }
 
 export default {
