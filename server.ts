@@ -10,69 +10,48 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json({ limit: '2mb' }));
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  next();
+});
 
-// Persistent on-disk cache for zero downtime and instant restart
+function isSafePublicUrl(rawUrl: string): boolean {
+  try {
+    const u = new URL(String(rawUrl || '').trim());
+    if (u.protocol !== 'https:' && u.protocol !== 'wss:') return false;
+    const h = u.hostname.toLowerCase();
+    if (!h || h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') || h.includes(':')) return false;
+    if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// Persistent on-disk cache for genuine fetched prices (never seeded with fake data)
 const CACHE_FILE = path.join(__dirname, 'cached-prices.json');
-let cachedPrices: any = { updatedAt: Math.floor(Date.now() / 1000), checkedAt: Math.floor(Date.now() / 1000), items: {}, feeds: {} };
+let cachedPrices: any = { updatedAt: 0, checkedAt: 0, items: {}, feeds: {} };
 let lastFetchTime = 0;
 let isFetching = false;
 
-// Verified baseline domestic seed prices so items are NEVER blank
-const DOMESTIC_SEEDS: Record<string, [number, number, string, string, string]> = {
-  usd: [271500, 0.74, 'دلار آمریکا', 'USD', 'currency'],
-  eur: [303530, 0.65, 'یورو', 'EUR', 'currency'],
-  gbp: [363580, 0.82, 'پوند انگلیس', 'GBP', 'currency'],
-  aed: [74259, 0.55, 'درهم امارات', 'AED', 'currency'],
-  try: [5430, 0.20, 'لیر ترکیه', 'TRY', 'currency'],
-  cny: [40810, 0.35, 'یوان چین', 'CNY', 'currency'],
-  cad: [194350, 0.45, 'دلار کانادا', 'CAD', 'currency'],
-  aud: [190980, 0.40, 'دلار استرالیا', 'AUD', 'currency'],
-  chf: [329180, 0.50, 'فرانک سوئیس', 'CHF', 'currency'],
-  sar: [72357, 0.30, 'ریال عربستان', 'SAR', 'currency'],
-  qar: [73830, 0.32, 'ریال قطر', 'QAR', 'currency'],
-  kwd: [873690, 0.60, 'دینار کویت', 'KWD', 'currency'],
-  omr: [706240, 0.55, 'ریال عمان', 'OMR', 'currency'],
-  iqd: [174.3, 0.15, 'دینار عراق', 'IQD', 'currency'],
-  afn: [4237, 0.25, 'افغانی', 'AFN', 'currency'],
-  rub: [3367, 0.10, 'روبل روسیه', 'RUB', 'currency'],
-  inr: [2857, 0.12, 'روپیه هند', 'INR', 'currency'],
-  gold18: [25579200, 0.45, 'طلای ۱۸ عیار', 'Gold18', 'gold'],
-  gold24: [34105200, 0.45, 'طلای ۲۴ عیار', 'Gold24', 'gold'],
-  gram: [110803000, 0.42, 'مثقال طلا', 'Mesghal', 'gold'],
-  coin: [261420000, 0.50, 'سکه امامی', 'Coin', 'gold'],
-  bahar: [251940000, 0.48, 'سکه بهار آزادی', 'Bahar', 'gold'],
-  halfcoin: [138720000, 0.35, 'نیم‌سکه', 'Half', 'gold'],
-  quartercoin: [74380000, 0.40, 'ربع‌سکه', 'Quarter', 'gold'],
-  gramcoin: [37400000, 0.38, 'سکه گرمی', 'Gram', 'gold'],
-  silver999: [473220, 0.20, 'نقره ۹۹۹ (هر گرم)', 'Silver', 'gold'],
-  usdt: [273100, 1.10, 'تتر', 'USDT', 'crypto']
-};
-
-// Seed baseline prices immediately
-for (const [id, [p, ch, name, sym, cat]] of Object.entries(DOMESTIC_SEEDS)) {
-  cachedPrices.items[id] = {
-    price: p,
-    change: ch,
-    t: Math.floor(Date.now() / 1000) - 300,
-    receivedAt: Math.floor(Date.now() / 1000) - 300,
-    src: 'seed_cache',
-    unit: 'IRT',
-    kind: cat === 'crypto' ? 'crypto' : 'domestic',
-    name,
-    sym,
-    cat
-  };
-}
-
-// Load previously persisted cache from disk if available
+// Load previously persisted real cache from disk if available (filtering out any legacy seed_cache entries)
 try {
   if (fs.existsSync(CACHE_FILE)) {
     const raw = fs.readFileSync(CACHE_FILE, 'utf8');
     const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed.items === 'object' && Object.keys(parsed.items).length > 0) {
-      cachedPrices.items = { ...cachedPrices.items, ...parsed.items };
-      cachedPrices.updatedAt = parsed.updatedAt || cachedPrices.updatedAt;
-      cachedPrices.feeds = parsed.feeds || cachedPrices.feeds;
+    if (parsed && typeof parsed.items === 'object') {
+      const cleanItems: Record<string, any> = {};
+      for (const [id, item] of Object.entries(parsed.items)) {
+        const it: any = item;
+        if (it && it.price > 0 && it.src && it.src !== 'seed_cache') {
+          cleanItems[id] = it;
+        }
+      }
+      cachedPrices.items = cleanItems;
+      cachedPrices.updatedAt = parsed.updatedAt || 0;
+      cachedPrices.feeds = parsed.feeds || {};
     }
   }
 } catch (e) {
@@ -256,6 +235,7 @@ const EXCLUDED_STABLES = new Set([
   'fxusd','alusd','mim','bgt','usdn','usdx','ssv','susd','dola','deusd',
   'btcst','steth','wsteth','weeth','reth','cbeth','eeth','eurt','usdt0'
 ]);
+const SKIP_BASES = new Set('USDT USDC FDUSD TUSD USDP BUSD DAI AEUR EUR GBP TRY BRL ARS UAH PLN RON CZK JPY MXN COP ZAR NGN RUB BIDR IDRT USD1 USDE XUSD USDS RLUSD CAD AUD CHF SAR QAR KWD OMR IQD AFN INR CNY'.split(' '));
 
 export interface SystemFeed {
   id: string;
@@ -302,28 +282,14 @@ async function updateAllPrices(force = false) {
       freshCount++;
     };
 
-    // 1. Domestic Rates (Nerkhsanj + Tetherland & Bitpin live)
-    const DOMESTIC_PREV: Record<string, number> = {
-      usd: 269500, eur: 300670, gbp: 359360, aed: 73851, try: 5430,
-      cny: 40550, cad: 192150, aud: 189900, chf: 328600, sar: 71960,
-      qar: 72030, kwd: 868000, omr: 701500, iqd: 173.5, afn: 4150,
-      rub: 3345, inr: 2835, gold18: 26207300, gold24: 34943000,
-      coin: 267670000, bahar: 258000000, halfcoin: 140500000,
-      quartercoin: 76000000, gram: 38000000, silver999: 481000, usdt: 273600
-    };
+    // 1. Domestic Rates (Real verified sources only — never fallback to hardcoded prices)
+    let liveUsdtChange: number | null = null;
+    let liveUsdtPrice = 0;
+    let liveUsdtSource = 'tetherland';
 
-    let liveUsdtChange = -0.39;
-    let liveUsdtPrice = 271500;
-
-    const getDomChange = (id: string, cur: number, raw: any) => {
+    const getDomChange = (raw: any): number | null => {
       const ch = Number(raw);
-      if (Number.isFinite(ch) && ch !== 0) return ch;
-      const prev = DOMESTIC_PREV[id];
-      if (prev && cur > 0) {
-        const calc = Number((((cur / prev) - 1) * 100).toFixed(2));
-        if (calc !== 0) return calc;
-      }
-      return liveUsdtChange;
+      return Number.isFinite(ch) ? ch : null;
     };
 
     const domesticTask = async () => {
@@ -333,7 +299,8 @@ async function updateAllPrices(force = false) {
         const u = tl?.data?.currencies?.USDT;
         if (u && Number(u.price) > 0) {
           liveUsdtPrice = Number(u.price);
-          liveUsdtChange = Number(u.diff24d) || liveUsdtChange;
+          liveUsdtChange = Number.isFinite(Number(u.diff24d)) ? Number(u.diff24d) : null;
+          liveUsdtSource = 'tetherland';
         }
       } catch {
         try {
@@ -341,12 +308,15 @@ async function updateAllPrices(force = false) {
           const m = (bp?.results || []).find((x: any) => x.code === 'USDT_IRT');
           if (m && Number(m.price) > 0) {
             liveUsdtPrice = Number(m.price);
-            liveUsdtChange = Number(m.price_info?.change) || liveUsdtChange;
+            liveUsdtChange = Number.isFinite(Number(m.price_info?.change)) ? Number(m.price_info?.change) : null;
+            liveUsdtSource = 'bitpin';
           }
         } catch {}
       }
 
-      put('usdt', liveUsdtPrice, liveUsdtChange, 'tetherland', now, 'IRT', { kind: 'crypto', name: 'تتر', symbol: 'USDT' });
+      if (liveUsdtPrice > 0) {
+        put('usdt', liveUsdtPrice, liveUsdtChange, liveUsdtSource, now, 'IRT', { kind: 'crypto', name: 'تتر', symbol: 'USDT' });
+      }
 
       let domesticSuccess = false;
 
@@ -361,13 +331,14 @@ async function updateAllPrices(force = false) {
           ...(categories.precious_metal || [])
         ];
         const dict = Object.fromEntries(allList.map((x: any) => [x.symbol, x]));
-        let count = 1;
-        const ts = im?.data?.generated_at ? Math.floor(new Date(im.data.generated_at).getTime() / 1000) : now;
+        let count = 0;
+        const rawTs = im?.data?.generated_at ? Math.floor(new Date(im.data.generated_at).getTime() / 1000) : 0;
+        const ts = (rawTs > 0 && rawTs <= now + 300) ? rawTs : now;
 
         for (const [id, [sym, name, code, cat]] of Object.entries(IRAN_MARKET_MAP)) {
           const item = dict[sym];
           if (item && Number(item.price) > 0) {
-            const chg = getDomChange(id, Number(item.price), item.change_pct);
+            const chg = getDomChange(item.change_pct);
             put(id, Number(item.price), chg, 'iran_market', ts, 'IRT', { kind: 'domestic', name, sym: code, cat });
             count++;
           }
@@ -387,18 +358,19 @@ async function updateAllPrices(force = false) {
           const pt = await fetchJSON('https://persiantoolbox.ir/api/market', 5);
           if (pt?.ok && pt?.data) {
             const d = pt.data;
-            const ts = d.timestamp ? Math.floor(d.timestamp / 1000) : now;
+            const rawTs = d.timestamp ? Math.floor(Number(d.timestamp) / 1000) : 0;
+            const ts = (rawTs > 0 && rawTs <= now + 300) ? rawTs : now;
             let count = 0;
             if (d.gold?.pricePerGram > 0) {
-              const gold18P = Math.round(d.gold.pricePerGram / 10); // convert Rial to Toman
-              put('gold18', gold18P, d.gold.change24h || getDomChange('gold18', gold18P, 0), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'طلای ۱۸ عیار', sym: 'Gold18', cat: 'gold' });
+              const gold18P = Math.round(d.gold.pricePerGram / 10);
+              put('gold18', gold18P, getDomChange(d.gold.change24h), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'طلای ۱۸ عیار', sym: 'Gold18', cat: 'gold' });
               count++;
             }
             if (d.currencies) {
               const usdRial = d.currencies.IRR?.rate || 0;
               const usdP = usdRial > 0 ? Math.round(usdRial / 10) : 0;
               if (usdP > 100000) {
-                put('usd', usdP, getDomChange('usd', usdP, 0), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'دلار آمریکا', sym: 'USD', cat: 'currency' });
+                put('usd', usdP, getDomChange(d.currencies.IRR?.change24h), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'دلار آمریکا', sym: 'USD', cat: 'currency' });
                 count++;
               }
             }
@@ -417,13 +389,13 @@ async function updateAllPrices(force = false) {
         try {
           const j = await fetchJSON('https://nerkh.jahankhahan.shop/data/live.json', 5);
           const ts = domesticTime(j);
-          let count = 1;
+          let count = 0;
           for (const [id, keys] of Object.entries(NERKH)) {
             if (id === 'usdt') continue;
             const k = keys.find(k => Number(j.rates?.[k]) > 0);
             if (k) {
               const v = Number(j.rates[k]);
-              const chg = getDomChange(id, v, j.change?.[k]);
+              const chg = getDomChange(j.change?.[k]);
               put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic' });
               count++;
             }
@@ -431,15 +403,16 @@ async function updateAllPrices(force = false) {
           for (const [id, [key, name, sym, cat]] of Object.entries(DOMESTIC_EXTRA)) {
             const v = Number(j.rates?.[key]);
             if (v > 0) {
-              const chg = getDomChange(id, v, j.change?.[key]);
+              const chg = getDomChange(j.change?.[key]);
               put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic', name, sym, cat });
               count++;
             }
           }
-          feeds.domestic = { ok: true, checkedAt: now, sourceAt: ts, count, source: 'nerkhsanj' };
-          domesticSuccess = true;
+          if (count > 0) {
+            feeds.domestic = { ok: true, checkedAt: now, sourceAt: ts, count, source: 'nerkhsanj' };
+            domesticSuccess = true;
+          }
         } catch (e: any) {
-          // Even when all remote sources fail, existing domestic prices in items are NEVER removed
           feeds.domestic = { ok: false, checkedAt: now, error: e.message, fallback: 'cached_values_preserved' };
         }
       }
@@ -457,7 +430,15 @@ async function updateAllPrices(force = false) {
       for (const name of order) {
         try {
           const rows = (await EXCHANGE_SOURCES[name].tickers())
-            .filter((x: any) => x.last > 0 && Number.isFinite(x.ts) && (x.vol || 0) >= 2000 && !NON_CRYPTO.has(String(x.base).toLowerCase()) && !EXCLUDED_STABLES.has(String(x.base).toLowerCase()))
+            .filter((x: any) =>
+              x.last > 0 &&
+              Number.isFinite(x.ts) &&
+              (x.vol || 0) >= 2000 &&
+              !SKIP_BASES.has(String(x.base).toUpperCase()) &&
+              !NON_CRYPTO.has(String(x.base).toLowerCase()) &&
+              !EXCLUDED_STABLES.has(String(x.base).toLowerCase()) &&
+              !/(?:3L|3S|2L|2S|5L|5S|UP|DOWN|BEAR|BULL)$/i.test(String(x.base))
+            )
             .sort((a: any, b: any) => (b.vol || 0) - (a.vol || 0))
             .slice(0, 450);
 
@@ -467,7 +448,8 @@ async function updateAllPrices(force = false) {
           for (const x of rows) {
             const base = String(x.base);
             const id = base.toLowerCase();
-            put(id, x.last, x.open > 0 ? (x.last / x.open - 1) * 100 : null, name, Math.min(x.ts, now), 'USDT', {
+            const itemTs = (Number.isFinite(x.ts) && x.ts > 0 && x.ts <= now + 300) ? Math.floor(x.ts) : now;
+            put(id, x.last, x.open > 0 ? (x.last / x.open - 1) * 100 : null, name, itemTs, 'USDT', {
               crypto: 1,
               name: ASSETS[id] || base,
               sym: base,
@@ -488,7 +470,7 @@ async function updateAllPrices(force = false) {
     await Promise.allSettled([domesticTask(), cryptoTask()]);
 
     cachedPrices = {
-      updatedAt: freshCount > 0 ? now : cachedPrices.updatedAt || now,
+      updatedAt: freshCount > 0 ? now : cachedPrices.updatedAt || 0,
       checkedAt: now,
       items,
       feeds
@@ -606,10 +588,157 @@ async function getRatesArchiveText(): Promise<string> {
   return archiveFetchPromise;
 }
 
-// Fast klines & historical archive
+const RANGES_MAP: Record<string, number> = {
+  '1H': 3600,
+  '1D': 86400,
+  '3D': 259200,
+  '1W': 604800,
+  '1M': 2592000,
+  '1Y': 31536000
+};
+
+function validateHistoryPoints(
+  rawPoints: any[],
+  range: string,
+  now: number,
+  isDomestic: boolean,
+  refPrice = 0
+): [number, number][] {
+  const span = RANGES_MAP[range];
+  if (!span || !Array.isArray(rawPoints) || rawPoints.length < 2) return [];
+
+  const cleaned: [number, number][] = [];
+  for (const p of rawPoints) {
+    if (!Array.isArray(p) || p.length < 2) continue;
+    const ts = Math.floor(Number(p[0]));
+    const val = Number(p[1]);
+    if (Number.isFinite(ts) && ts > 1600000000 && ts <= now + 600 && Number.isFinite(val) && val > 0) {
+      cleaned.push([ts, val]);
+    }
+  }
+  if (cleaned.length < 2) return [];
+  cleaned.sort((a, b) => a[0] - b[0]);
+
+  const deduped: [number, number][] = [];
+  for (const pt of cleaned) {
+    if (deduped.length && deduped[deduped.length - 1][0] === pt[0]) {
+      deduped[deduped.length - 1][1] = pt[1];
+    } else {
+      deduped.push(pt);
+    }
+  }
+  if (deduped.length < 2) return [];
+
+  if (isDomestic) {
+    if (range !== '1W' && range !== '1M' && range !== '1Y') return [];
+
+    const minTs = now - span - 43200;
+    const pts = deduped.filter((p) => p[0] >= minTs && p[0] <= now + 600);
+    const minReq = range === '1W' ? 4 : range === '1M' ? 15 : 200;
+    if (pts.length < minReq) return [];
+
+    const firstTs = pts[0][0];
+    const lastTs = pts[pts.length - 1][0];
+    const maxStartLag = range === '1W' ? 3 * 86400 : range === '1M' ? 5 * 86400 : 12 * 86400;
+    const maxGap = range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
+
+    if (firstTs > now - span + maxStartLag) return [];
+    if (now - lastTs > 4 * 86400) return [];
+
+    for (let i = 1; i < pts.length; i++) {
+      const gap = pts[i][0] - pts[i - 1][0];
+      if (gap > maxGap) return [];
+      const ratio = pts[i][1] / pts[i - 1][1];
+      if (ratio > 1.35 || ratio < 0.65) return [];
+    }
+
+    if (refPrice > 0) {
+      const lastVal = pts[pts.length - 1][1];
+      if (Math.abs(lastVal - refPrice) / refPrice > 0.12) return [];
+    }
+    return pts;
+  }
+
+  const cfgMap: Record<
+    string,
+    { step: number; minPts: number; maxStale: number; maxGap: number; minCov: number }
+  > = {
+    '1H': { step: 60, minPts: 45, maxStale: 900, maxGap: 600, minCov: 0.82 },
+    '1D': { step: 300, minPts: 20, maxStale: 7200, maxGap: 10800, minCov: 0.85 },
+    '3D': { step: 3600, minPts: 55, maxStale: 14400, maxGap: 21600, minCov: 0.85 },
+    '1W': { step: 14400, minPts: 35, maxStale: 28800, maxGap: 43200, minCov: 0.85 },
+    '1M': { step: 86400, minPts: 26, maxStale: 129600, maxGap: 172800, minCov: 0.85 },
+    '1Y': { step: 86400, minPts: 330, maxStale: 172800, maxGap: 259200, minCov: 0.88 }
+  };
+  const cfg = cfgMap[range];
+  if (!cfg) return [];
+
+  const minTs = now - span - cfg.step * 2;
+  const pts = deduped.filter((p) => p[0] >= minTs && p[0] <= now + 600);
+  if (pts.length < cfg.minPts) return [];
+
+  const firstTs = pts[0][0];
+  const lastTs = pts[pts.length - 1][0];
+  const actualSpan = lastTs - firstTs;
+
+  if (actualSpan < span * cfg.minCov || actualSpan > span * 1.08) return [];
+  if (now - lastTs > cfg.maxStale) return [];
+
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i][0] - pts[i - 1][0] > cfg.maxGap) return [];
+  }
+
+  if (refPrice > 0) {
+    const lastVal = pts[pts.length - 1][1];
+    if (Math.abs(lastVal - refPrice) / refPrice > 0.05) return [];
+  }
+
+  return pts;
+}
+
+const historyMemCache = new Map<string, { at: number; data: any }>();
+
+async function wallexHistory(symbol: string, range: string, refPrice = 0): Promise<[number, number][]> {
+  const now = Math.floor(Date.now() / 1000);
+  const cfg: Record<string, [string, number]> = {
+    '1H': ['1', 3600],
+    '1D': ['60', 86400],
+    '3D': ['60', 259200],
+    '1W': ['240', 604800],
+    '1M': ['1D', 2592000],
+    '1Y': ['1D', 31536000]
+  };
+  const [res, span] = cfg[range] || ['60', 86400];
+  try {
+    const j = await fetchJSON(`https://api.wallex.ir/v1/udf/history?symbol=${symbol}&resolution=${res}&from=${now - span}&to=${now}`, 5);
+    if (j?.s === 'ok' && Array.isArray(j.t) && Array.isArray(j.c) && j.t.length >= 2) {
+      const pts: [number, number][] = [];
+      for (let i = 0; i < j.t.length; i++) {
+        const ts = Number(j.t[i]), c = Number(j.c[i]);
+        if (Number.isFinite(ts) && c > 0) {
+          pts.push([ts, Math.round(c)]);
+        }
+      }
+      return validateHistoryPoints(pts, range, now, false, refPrice);
+    }
+  } catch {}
+  return [];
+}
+
+// Fast klines & historical archive (Real verified data only — zero synthetic charts)
 app.get('/api/history', async (req, res) => {
   const id = String(req.query.id || '');
   const range = String(req.query.range || '1D');
+  if (!/^[a-z0-9]{1,20}$/.test(id) || !Object.prototype.hasOwnProperty.call(RANGES_MAP, range)) {
+    return res.status(400).json({ error: 'پارامتر نامعتبر است.' });
+  }
+  const cacheKey = `${id}:${range}`;
+  const now = Math.floor(Date.now() / 1000);
+  const mem = historyMemCache.get(cacheKey);
+  if (mem && (now - mem.at < 120) && mem.data?.points?.length >= 2) {
+    return res.json(mem.data);
+  }
+
   const KL: Record<string, [string, number]> = {
     '1H': ['1m', 60],
     '1D': ['5m', 288],
@@ -619,99 +748,100 @@ app.get('/api/history', async (req, res) => {
     '1Y': ['1d', 365]
   };
 
-  const item = cachedPrices.items?.[id];
+  if (!Object.keys(cachedPrices.items || {}).length) {
+    try { await updateAllPrices(true); } catch {}
+  }
 
-  // 1. Crypto history
-  if (item?.crypto) {
+  const item = cachedPrices.items?.[id];
+  const isDomesticAsset = id !== 'usdt' && (Boolean(NERKH[id]) || Boolean(DOMESTIC_EXTRA[id]) || Boolean(IRAN_MARKET_MAP[id]) || item?.kind === 'domestic');
+
+  // 1. Crypto history (strictly validated against requested range & live price)
+  if (item?.crypto || !isDomesticAsset) {
+    if (id === 'usdt') {
+      const pts = await wallexHistory('USDTTMN', range, item?.price || 0);
+      if (pts.length >= 2) {
+        const payload = { id, range, currency: 'IRT', source: 'wallex', points: pts };
+        historyMemCache.set(cacheKey, { at: now, data: payload });
+        return res.json(payload);
+      }
+      return res.json({ id, range, currency: 'IRT', points: [], unavailable: true });
+    }
     const [iv, lim] = KL[range] || ['5m', 288];
-    const base = item.sym;
-    for (const name of ['kucoin', 'okx', 'gate']) {
+    const base = (item?.sym || id).toUpperCase();
+    const exchangeOrder = range === '1Y'
+      ? [...new Set([item?.src !== 'okx' ? item?.src : null, 'gate', 'kucoin', 'okx'].filter(Boolean))]
+      : [...new Set([item?.src, 'okx', 'gate', 'kucoin'].filter(Boolean))];
+    for (const name of exchangeOrder) {
+      const src = EXCHANGE_SOURCES[name];
+      if (!src) continue;
       try {
-        const pair = name === 'gate' ? `${base}_USDT` : `${base}-USDT`;
-        const points = (await EXCHANGE_SOURCES[name].klines(pair, iv, lim))
-          .filter((p: any) => Number.isFinite(p[0]) && p[1] > 0)
-          .sort((a: any, b: any) => a[0] - b[0]);
+        const pair = (item && name === item.src && item.pair) ? item.pair : name === 'gate' ? `${base}_USDT` : `${base}-USDT`;
+        const rawPts = await src.klines(pair, iv, lim);
+        const points = validateHistoryPoints(rawPts, range, now, false, item?.price || 0);
         if (points.length >= 2) {
-          return res.json({ id, range, currency: 'USDT', source: name, points });
+          const payload = { id, range, currency: 'USDT', source: name, points };
+          historyMemCache.set(cacheKey, { at: now, data: payload });
+          return res.json(payload);
         }
       } catch {}
     }
     return res.json({ id, range, currency: 'USDT', points: [], unavailable: true });
   }
 
-  // 2. Domestic history from Nerkhsanj rates archive
+  // 2. Domestic history from verified Nerkhsanj daily archive only (only 1W, 1M, 1Y are guaranteed)
+  if (range !== '1W' && range !== '1M' && range !== '1Y') {
+    return res.json({ id, range, currency: item?.unit || 'IRT', points: [], unavailable: true });
+  }
+
   try {
     const key = (NERKH[id] || [])[0] || (DOMESTIC_EXTRA[id] || [])[0];
-    const now = Math.floor(Date.now() / 1000);
     const curPrice = item?.price || 0;
-    const curChange = Number.isFinite(item?.change) ? item.change : 0;
+    const curTs = item?.t || 0;
+    const rawPoints: [number, number][] = [];
 
-    const generateIntraday = (spanSec: number, count = 24) => {
-      if (!(curPrice > 0)) return [];
-      const openPrice = curPrice / (1 + (curChange || 0) / 100);
-      const pts: [number, number][] = [];
-      for (let i = 0; i <= count; i++) {
-        const frac = i / count;
-        const t = now - Math.floor((1 - frac) * spanSec);
-        const p = openPrice + frac * (curPrice - openPrice);
-        pts.push([t, Math.max(0, p)]);
-      }
-      pts[pts.length - 1] = [now, curPrice];
-      return pts;
-    };
-
-    if (range === '1H') {
-      return res.json({ id, range, currency: item?.unit || 'IRT', points: generateIntraday(3600, 15) });
-    }
-
-    if (!key) {
-      return res.json({ id, range, currency: item?.unit || 'IRT', points: generateIntraday(86400, 24) });
-    }
-
-    const text = await getRatesArchiveText();
-    let points: [number, number][] = [];
-
-    if (text) {
-      const marker = `"key":"${key}"`;
-      const idx = text.indexOf(marker);
-      if (idx !== -1) {
-        const daysIdx = text.indexOf('"days":', idx);
-        const endDaysIdx = text.indexOf(']]', daysIdx);
-        if (daysIdx !== -1 && endDaysIdx !== -1) {
-          const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
-          const n = ({ '1D': 4, '3D': 6, '1W': 9, '1M': 32, '1Y': 367 } as Record<string, number>)[range] || 8;
-          for (const [d, v] of days.slice(-n)) {
-            const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
-            if (!m || !(v > 0)) continue;
-            const [gy, gm, gd] = jalaliToGregorian(+m[1], +m[2], +m[3]);
-            points.push([Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600, Number(v)]);
+    if (key) {
+      const text = await getRatesArchiveText();
+      if (text) {
+        const marker = `"key":"${key}"`;
+        const idx = text.indexOf(marker);
+        if (idx !== -1) {
+          const daysIdx = text.indexOf('"days":', idx);
+          const endDaysIdx = text.indexOf(']]', daysIdx);
+          if (daysIdx !== -1 && endDaysIdx !== -1) {
+            const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
+            const maxSlice = range === '1W' ? 16 : range === '1M' ? 45 : 420;
+            const minTs = now - RANGES_MAP[range] - 43200;
+            for (const [d, v] of days.slice(-maxSlice)) {
+              const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
+              if (!m || !(v > 0)) continue;
+              const [gy, gm, gd] = jalaliToGregorian(+m[1], +m[2], +m[3]);
+              const ts = Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600;
+              if (ts >= minTs && ts <= now + 600) {
+                rawPoints.push([ts, Number(v)]);
+              }
+            }
           }
         }
       }
     }
 
-    if (range === '1D') {
-      if (curPrice > 0) {
-        return res.json({ id, range, currency: item?.unit || 'IRT', points: generateIntraday(86400, 24) });
+    if (rawPoints.length >= 2 && curPrice > 0 && curTs > 0 && (now - curTs < 86400)) {
+      const lastT = rawPoints[rawPoints.length - 1][0];
+      if (curTs > lastT) {
+        rawPoints.push([curTs, curPrice]);
       }
     }
 
-    if (curPrice > 0) {
-      if (!points.length) {
-        points = generateIntraday(range === '3D' ? 259200 : range === '1W' ? 604800 : 2592000, 30);
-      } else {
-        const lastT = points[points.length - 1][0];
-        if (now > lastT) {
-          points.push([now, curPrice]);
-        } else {
-          points[points.length - 1][1] = curPrice;
-        }
-      }
+    const points = validateHistoryPoints(rawPoints, range, now, true, curPrice);
+    if (points.length < 2) {
+      return res.json({ id, range, currency: item?.unit || 'IRT', points: [], unavailable: true });
     }
 
-    return res.json({ id, range, currency: item?.unit || 'IRT', points });
+    const payload = { id, range, currency: item?.unit || 'IRT', source: 'archive', points };
+    historyMemCache.set(cacheKey, { at: now, data: payload });
+    return res.json(payload);
   } catch (e) {
-    return res.json({ id, range, currency: item?.unit || 'IRT', points: [] });
+    return res.json({ id, range, currency: item?.unit || 'IRT', points: [], unavailable: true });
   }
 });
 
@@ -767,15 +897,17 @@ app.post('/api/auth/login', (req, res) => {
   const normalizedEmail = email.trim().toLowerCase();
   const isAdmin = normalizedEmail === ADMIN_EMAIL.toLowerCase();
 
-  // Strict verification for admin
+  // Track/update in systemUsers for admin viewing
+  let existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
+
+  // Strict verification for admin (supports updated password if changed via reset)
   if (isAdmin) {
-    if (password !== ADMIN_PASSWORD) {
+    const validAdminPass = existing?.password || ADMIN_PASSWORD;
+    if (password !== validAdminPass && password !== ADMIN_PASSWORD) {
       return res.status(401).json({ error: 'رمز عبور مدیر ارشد نادرست است.' });
     }
   }
 
-  // Track/update in systemUsers for admin viewing
-  let existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
   if (existing) {
     if (!isAdmin && existing.password && existing.password !== String(password)) {
       return res.status(401).json({ error: 'رمز عبور واردشده نادرست است.' });
@@ -816,6 +948,13 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 // Admin Panel APIs
+app.use('/api/admin', (req, res, next) => {
+  if (!currentAuthUser || !currentAuthUser.isAdmin) {
+    return res.status(403).json({ error: 'دسترسی فقط برای مدیر سیستم مجاز است.' });
+  }
+  next();
+});
+
 app.get('/api/admin/overview', (req, res) => {
   const t = Math.floor(Date.now() / 1000);
   const items = cachedPrices.items || {};
@@ -856,6 +995,7 @@ app.post('/api/admin/feeds/add', (req, res) => {
   const { name, url } = req.body || {};
   const type = req.body?.type || req.body?.protocol || 'crypto';
   if (!name || !url) return res.status(400).json({ error: 'نام و آدرس ایندپوینت الزامی است.' });
+  if (!isSafePublicUrl(String(url))) return res.status(400).json({ error: 'فقط آدرس‌های عمومی و امن (https:// یا wss://) مجاز هستند.' });
   const maxPriority = systemFeeds.reduce((max, f) => Math.max(max, f.priority), 0);
   const newFeed: SystemFeed = {
     id: 'f_' + Date.now(),
@@ -863,8 +1003,8 @@ app.post('/api/admin/feeds/add', (req, res) => {
     url: String(url).trim(),
     type: ['crypto', 'domestic', 'tether', 'websocket'].includes(type) ? type : 'crypto',
     status: 'active',
-    pingMs: Math.floor(Math.random() * 40) + 25,
-    reliability: '99.9%',
+    pingMs: 0,
+    reliability: '100%',
     priority: maxPriority + 1,
     custom: true
   };
@@ -951,9 +1091,10 @@ app.post('/api/admin/feeds/:id/test', async (req, res) => {
   let ok = true;
   let status = 200;
   try {
-    if (f.url.startsWith('http')) {
+    if (f.url.startsWith('https://') && isSafePublicUrl(f.url)) {
       const resp = await fetch(f.url, { signal: AbortSignal.timeout(4000) });
       status = resp.status;
+      ok = resp.ok;
     }
   } catch {
     ok = false;
@@ -964,7 +1105,7 @@ app.post('/api/admin/feeds/:id/test', async (req, res) => {
 });
 
 app.get('/api/admin/users', (req, res) => {
-  res.json({ ok: true, users: systemUsers });
+  res.json({ ok: true, users: systemUsers.map(u => ({ ...u, password: '••••••••' })) });
 });
 
 app.post('/api/admin/users/:id/toggle', (req, res) => {
@@ -978,7 +1119,7 @@ app.post('/api/admin/users/:id/toggle', (req, res) => {
     type: 'system',
     msg: `وضعیت کاربر ${u.email} به ${u.status === 'active' ? 'فعال' : 'مسدود'} تغییر یافت.`
   });
-  res.json({ ok: true, user: u });
+  res.json({ ok: true, user: { ...u, password: '••••••••' } });
 });
 
 app.get('/api/admin/logs', (req, res) => {
@@ -995,6 +1136,8 @@ app.post('/api/admin/logs/clear', (req, res) => {
 app.post('/api/admin/users/add', (req, res) => {
   const { name, email, role, password } = req.body || {};
   if (!name || !email) return res.status(400).json({ error: 'نام و ایمیل الزامی است.' });
+  const pass = String(password || '').trim();
+  if (pass.length < 8) return res.status(400).json({ error: 'رمز عبور باید حداقل ۸ کاراکتر باشد.' });
   const newUser = {
     id: 'u_' + Date.now(),
     name: String(name).trim(),
@@ -1005,7 +1148,7 @@ app.post('/api/admin/users/add', (req, res) => {
     holdingsCount: 0,
     alertsCount: 0,
     lastLogin: 'تازه ثبت‌نام‌شده',
-    password: password ? String(password) : 'Darayi@Pass' + Math.floor(1000 + Math.random() * 9000)
+    password: pass
   };
   systemUsers.unshift(newUser);
   systemAuditLogs.unshift({
@@ -1014,7 +1157,7 @@ app.post('/api/admin/users/add', (req, res) => {
     type: 'admin',
     msg: `کاربر جدید با ایمیل ${newUser.email} توسط مدیر ایجاد شد.`
   });
-  res.json({ ok: true, user: newUser });
+  res.json({ ok: true, user: { ...newUser, password: '••••••••' } });
 });
 
 let systemSettings = {

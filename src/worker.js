@@ -143,11 +143,15 @@ let inMemoryLastError = null;
 let inMemoryLastErrorTime = 0;
 let inMemoryBroadcast = null;
 let inMemoryBroadcastTime = 0;
+let inMemoryAdminStats = null;
+let inMemoryAdminStatsTime = 0;
+let inMemoryAdminSettings = null;
+let inMemoryAdminSettingsTime = 0;
 let lastCronCleanupTime = 0;
 const sessionUserCache = new Map();
 const userDataCache = new Map();
 
-const SKIP_BASES = new Set('USDT USDC FDUSD TUSD USDP BUSD DAI AEUR EUR GBP TRY BRL ARS UAH PLN RON CZK JPY MXN COP ZAR NGN RUB BIDR IDRT USD1 USDE XUSD USDS RLUSD'.split(' '));
+const SKIP_BASES = new Set('USDT USDC FDUSD TUSD USDP BUSD DAI AEUR EUR GBP TRY BRL ARS UAH PLN RON CZK JPY MXN COP ZAR NGN RUB BIDR IDRT USD1 USDE XUSD USDS RLUSD CAD AUD CHF SAR QAR KWD OMR IQD AFN INR CNY'.split(' '));
 const NON_CRYPTO = new Set(['usd', 'eur', 'gbp', 'aed', 'try', 'gold18', 'gold24', 'coin', 'halfcoin', 'gram', 'silver', 'sp500', 'usdt']);
 const KL = { '1H': ['1m', 60], '1D': ['5m', 288], '3D': ['1h', 72], '1W': ['4h', 42], '1M': ['1d', 30], '1Y': ['1d', 365] };
 const BINANCE = 'https://data-api.binance.vision/api/v3';
@@ -209,9 +213,31 @@ const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(
 const rand = (n = 32) => b64u(crypto.getRandomValues(new Uint8Array(n)));
 const sha256 = async (s) => b64u(await crypto.subtle.digest('SHA-256', enc.encode(s)));
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const json = (o, status = 200, h = {}) => new Response(JSON.stringify(o), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...h } });
+const json = (o, status = 200, h = {}) => new Response(JSON.stringify(o), {
+  status,
+  headers: {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'SAMEORIGIN',
+    'referrer-policy': 'strict-origin-when-cross-origin',
+    ...h
+  }
+});
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 const isEmail = (e) => typeof e === 'string' && e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+function isSafePublicUrl(rawUrl) {
+  try {
+    const u = new URL(String(rawUrl || '').trim());
+    if (u.protocol !== 'https:' && u.protocol !== 'wss:') return false;
+    const h = u.hostname.toLowerCase();
+    if (!h || h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') || h.includes(':')) return false;
+    if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h)) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 const inMemoryRateLimits = new Map();
 async function rateLimit(env, key, limit, windowS) {
@@ -371,15 +397,17 @@ async function login(req, env, url) {
   const b = await readJson(req), email = cleanEmail(b.email);
   await limits(req, env, email, 'login', 10);
   const adminEmail = 'a.h.sh.t1381@gmail.com';
-  const isAdminLogin = (email === adminEmail && String(b.password || '').trim() === adminEmail);
+  const isAdminEmail = email === adminEmail;
+  const rawPass = String(b.password || '').slice(0, 128);
+  const defaultAdminPass = env.ADMIN_PASSWORD || adminEmail;
 
-  let u = isEmail(email) && env.DB ? await env.DB.prepare('SELECT id,password_hash,name FROM users WHERE email=?').bind(email).first() : null;
+  let u = isEmail(email) && env.DB ? await env.DB.prepare('SELECT id,email,password_hash,name FROM users WHERE email=?').bind(email).first() : null;
 
-  if (isAdminLogin) {
+  if (isAdminEmail && (!u || !u.password_hash) && rawPass.trim() === defaultAdminPass) {
     let adminId = u?.id || 'admin_a_h_sh';
     if (env.DB) {
       try {
-        const passHash = await hashPassword(adminEmail, env);
+        const passHash = await hashPassword(defaultAdminPass, env);
         await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, adminEmail, 'مدیر کل دارایی', passHash, nowS()).run();
       } catch (err) {
         console.error('admin setup err:', err);
@@ -388,9 +416,9 @@ async function login(req, env, url) {
     return json({ ok: true, user: { email: adminEmail, name: 'مدیر کل دارایی', isAdmin: true, role: 'admin' } }, 200, { 'set-cookie': await sessionCookie(env, url, adminId) });
   }
 
-  const ok = await verifyPassword(String(b.password || '').slice(0, 128), u && u.password_hash, env);
+  const ok = (u && u.password_hash && await verifyPassword(rawPass, u.password_hash, env)) || (isAdminEmail && rawPass.trim() === defaultAdminPass);
   if (!u || !ok) throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
-  return json({ ok: true, user: { email: u.email, name: u.name || email.split('@')[0], isAdmin: false, role: 'user' } }, 200, { 'set-cookie': await sessionCookie(env, url, u.id) });
+  return json({ ok: true, user: { email: u.email || email, name: u.name || (isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0]), isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' } }, 200, { 'set-cookie': await sessionCookie(env, url, u.id) });
 }
 async function resetStart(req, env) {
   const email = cleanEmail((await readJson(req)).email);
@@ -426,6 +454,7 @@ async function resetFinish(req, env, url) {
   const used = await env.DB.prepare("DELETE FROM otp_codes WHERE email=? AND purpose='reset_ok' AND code_hash=? RETURNING email").bind(email, row.code_hash).first();
   if (!used) throw new HttpError(400, 'این درخواست قبلاً استفاده شده است.');
   await env.DB.batch([env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(await hashPassword(b.password, env), u.id), env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(u.id), env.DB.prepare("DELETE FROM otp_codes WHERE email=? AND purpose='reset_ok'").bind(email)]);
+  for (const [k, v] of sessionUserCache) { if (v?.val?.id === u.id) sessionUserCache.delete(k); }
   return json({ ok: true }, 200, { 'set-cookie': await sessionCookie(env, url, u.id) });
 }
 async function googleStart(env, url) {
@@ -489,10 +518,10 @@ async function loadData(env, uid) {
   if (cached && now < cached.exp) return cached.val;
   const d = await env.DB.prepare('SELECT holdings,watch,featured,settings,updated_at FROM user_data WHERE user_id=?').bind(uid).first();
   const al = await env.DB.prepare(`SELECT a.id,asset_id,direction,price,triggered_at,a.attempts,COALESCE(c.currency,'IRT') AS currency FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id WHERE user_id=? ORDER BY created_at,a.id`).bind(uid).all();
-  const alerts = al.results.map((a) => ({ id: a.id.slice(uid.length + 1), assetId: a.asset_id, direction: a.direction, price: a.price, currency: a.currency, attempts: a.attempts, triggeredAt: a.triggered_at ? a.triggered_at * 1000 : null }));
+  const alerts = (al.results || []).map((a) => ({ id: a.id.slice(uid.length + 1), assetId: a.asset_id, direction: a.direction, price: a.price, currency: a.currency, attempts: a.attempts, triggeredAt: a.triggered_at ? a.triggered_at * 1000 : null }));
   const res = !d ? { exists: false, updatedAt: 0, data: { holdings: [], watch: [], featured: [], alerts, settings: {} } }
-                 : { exists: true, updatedAt: d.updated_at, data: { holdings: JSON.parse(d.holdings), watch: JSON.parse(d.watch), featured: JSON.parse(d.featured), alerts, settings: JSON.parse(d.settings) } };
-  userDataCache.set(uid, { val: res, exp: now + 300 });
+                 : { exists: true, updatedAt: d.updated_at, data: { holdings: JSON.parse(d.holdings || '[]'), watch: JSON.parse(d.watch || '[]'), featured: JSON.parse(d.featured || '[]'), alerts, settings: JSON.parse(d.settings || '{}') } };
+  userDataCache.set(uid, { val: res, exp: now + 900 });
   return res;
 }
 function validateTransactions(records) {
@@ -513,29 +542,53 @@ async function saveData(env, uid, body) {
   if (!Number.isSafeInteger(base) || base < 0) throw new HttpError(409, 'ابتدا اطلاعات حساب را دریافت کن.');
   if (c.holdings.length !== (body.holdings || []).length || c.alerts.length !== (body.alerts || []).length) throw new HttpError(400, 'بعضی رکوردها معتبر نیستند؛ داده ذخیره نشد.');
   if (new Set(c.holdings.map(x => x.id)).size !== c.holdings.length || new Set(c.alerts.map(x => x.id)).size !== c.alerts.length) throw new HttpError(400, 'شناسه تکراری است.');
-  const guard = 'EXISTS(SELECT 1 FROM user_data WHERE user_id=? AND updated_at=?)';
-  const stmts = [env.DB.prepare('INSERT INTO user_data(user_id,holdings,watch,featured,settings,updated_at) SELECT ?,?,?,?,?,? WHERE ?=0 ON CONFLICT(user_id) DO UPDATE SET holdings=excluded.holdings,watch=excluded.watch,featured=excluded.featured,settings=excluded.settings,updated_at=excluded.updated_at WHERE user_data.updated_at=?').bind(uid, JSON.stringify(c.holdings), JSON.stringify(c.watch), JSON.stringify(c.featured), JSON.stringify(c.settings), t, base, base)];
-  if (base !== 0) stmts[0] = env.DB.prepare('UPDATE user_data SET holdings=?,watch=?,featured=?,settings=?,updated_at=? WHERE user_id=? AND updated_at=?').bind(JSON.stringify(c.holdings), JSON.stringify(c.watch), JSON.stringify(c.featured), JSON.stringify(c.settings), t, uid, base);
-  const ids = c.alerts.map(a => uid + ':' + a.id);
-  for (const table of ['alert_delivery', 'alert_units', 'alert_state']) stmts.push(env.DB.prepare(`DELETE FROM ${table} WHERE alert_id IN (SELECT id FROM alerts WHERE user_id=?${ids.length ? ' AND id NOT IN (' + ids.map(() => '?').join(',') + ')' : ''}) AND ${guard}`).bind(uid, ...ids, uid, t));
-  stmts.push(env.DB.prepare(`DELETE FROM alerts WHERE user_id=? AND ${guard}${ids.length ? ' AND id NOT IN (' + ids.map(() => '?').join(',') + ')' : ''}`).bind(uid, uid, t, ...ids));
-  for (const a of c.alerts) {
-    const aid = uid + ':' + a.id;
-    const changed = "NOT EXISTS(SELECT 1 FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id WHERE a.id=? AND a.asset_id=? AND a.direction=? AND a.price=? AND COALESCE(c.currency,'IRT')=?)";
-    stmts.push(env.DB.prepare(`INSERT INTO alert_state(alert_id,version) SELECT ?,? WHERE ${guard} ON CONFLICT(alert_id) DO UPDATE SET version=excluded.version WHERE ${changed}`).bind(aid, rand(16), uid, t, aid, a.assetId, a.direction, a.price, a.currency));
-    stmts.push(env.DB.prepare(`UPDATE alerts SET triggered_at=NULL,attempts=0 WHERE id=? AND ${guard} AND ${changed}`).bind(aid, uid, t, aid, a.assetId, a.direction, a.price, a.currency));
-    stmts.push(env.DB.prepare(`DELETE FROM alert_delivery WHERE alert_id=? AND ${guard} AND ${changed}`).bind(aid, uid, t, aid, a.assetId, a.direction, a.price, a.currency));
-    stmts.push(env.DB.prepare(`INSERT INTO alert_units(alert_id,currency) SELECT ?,? WHERE ${guard} ON CONFLICT(alert_id) DO UPDATE SET currency=excluded.currency`).bind(aid, a.currency, uid, t));
-    const same = 'alerts.asset_id=excluded.asset_id AND alerts.direction=excluded.direction AND alerts.price=excluded.price';
-    stmts.push(env.DB.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,created_at) SELECT ?,?,?,?,?,? WHERE ${guard} ON CONFLICT(id) DO UPDATE SET triggered_at=CASE WHEN ${same} THEN alerts.triggered_at ELSE NULL END,attempts=CASE WHEN ${same} THEN alerts.attempts ELSE 0 END,asset_id=excluded.asset_id,direction=excluded.direction,price=excluded.price WHERE alerts.user_id=excluded.user_id`).bind(aid, uid, a.assetId, a.direction, a.price, nowS(), uid, t));
+
+  const prev = await loadData(env, uid);
+  if (base !== 0 && prev.exists && prev.updatedAt !== base) {
+    throw new HttpError(409, 'اطلاعات روی دستگاه دیگری تغییر کرده است.');
   }
-  const out = await env.DB.batch(stmts);
-  if (!out[0].meta.changes) throw new HttpError(409, 'اطلاعات روی دستگاه دیگری تغییر کرده است.');
-  userDataCache.delete(uid);
-  hasActiveAlertsCache = null;
-  return loadData(env, uid);
+
+  const prevAlertsSig = JSON.stringify((prev.data?.alerts || []).map(a => [a.id, a.assetId, a.direction, a.price, a.currency]));
+  const newAlertsSig = JSON.stringify(c.alerts.map(a => [a.id, a.assetId, a.direction, a.price, a.currency]));
+  const alertsChanged = prevAlertsSig !== newAlertsSig;
+
+  const stmts = [
+    env.DB.prepare('INSERT INTO user_data(user_id,holdings,watch,featured,settings,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET holdings=excluded.holdings,watch=excluded.watch,featured=excluded.featured,settings=excluded.settings,updated_at=excluded.updated_at')
+      .bind(uid, JSON.stringify(c.holdings), JSON.stringify(c.watch), JSON.stringify(c.featured), JSON.stringify(c.settings), t)
+  ];
+
+  if (alertsChanged) {
+    const ids = c.alerts.map(a => uid + ':' + a.id);
+    stmts.push(env.DB.prepare(`DELETE FROM alerts WHERE user_id=?${ids.length ? ' AND id NOT IN (' + ids.map(() => '?').join(',') + ')' : ''}`).bind(uid, ...ids));
+    for (const a of c.alerts) {
+      const aid = uid + ':' + a.id;
+      const same = 'alerts.asset_id=excluded.asset_id AND alerts.direction=excluded.direction AND alerts.price=excluded.price';
+      stmts.push(env.DB.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET triggered_at=CASE WHEN ${same} THEN alerts.triggered_at ELSE NULL END,attempts=CASE WHEN ${same} THEN alerts.attempts ELSE 0 END,asset_id=excluded.asset_id,direction=excluded.direction,price=excluded.price WHERE alerts.user_id=excluded.user_id`).bind(aid, uid, a.assetId, a.direction, a.price, nowS()));
+      stmts.push(env.DB.prepare(`INSERT INTO alert_units(alert_id,currency) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET currency=excluded.currency`).bind(aid, a.currency));
+    }
+    hasActiveAlertsCache = c.alerts.length > 0 ? true : null;
+    hasActiveAlertsCacheTime = nowS();
+  }
+
+  await env.DB.batch(stmts);
+
+  const prevAlertsMap = new Map((prev.data?.alerts || []).map(a => [a.id, a]));
+  const mergedAlerts = c.alerts.map(a => {
+    const old = prevAlertsMap.get(a.id);
+    const same = old && old.assetId === a.assetId && old.direction === a.direction && old.price === a.price;
+    return { ...a, attempts: same ? (old.attempts || 0) : 0, triggeredAt: same ? (old.triggeredAt || null) : null };
+  });
+  const updatedVal = {
+    exists: true,
+    updatedAt: t,
+    data: { holdings: c.holdings, watch: c.watch, featured: c.featured, alerts: mergedAlerts, settings: c.settings }
+  };
+  userDataCache.set(uid, { val: updatedVal, exp: nowS() + 900 });
+  return updatedVal;
 }
 async function deleteAccount(env, user) {
+  userDataCache.delete(user.id);
+  for (const [k, v] of sessionUserCache) { if (v?.val?.id === user.id) sessionUserCache.delete(k); }
   if (!env.DB) return;
   await env.DB.batch([
     env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(user.id), env.DB.prepare('DELETE FROM user_data WHERE user_id=?').bind(user.id),
@@ -548,20 +601,7 @@ async function deleteAccount(env, user) {
 const kvGet = async (env, k) => env.DB ? env.DB.prepare('SELECT v,updated_at FROM kv WHERE k=?').bind(k).first() : null;
 const kvPut = async (env, k, v, t) => env.DB ? env.DB.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at').bind(k, JSON.stringify(v), t).run() : null;
 const getPrices = async (env) => {
-  const t = nowS();
-  if (inMemoryPrices && (t - inMemoryPricesTime < 300)) {
-    return inMemoryPrices;
-  }
-  if (!env.DB) return inMemoryPrices || { updatedAt: 0, items: {} };
-  const row = await kvGet(env, 'prices');
-  if (row?.v) {
-    try {
-      inMemoryPrices = JSON.parse(row.v);
-      inMemoryPricesTime = t;
-      return inMemoryPrices;
-    } catch {}
-  }
-  return inMemoryPrices || { updatedAt: 0, items: {} };
+  return inMemoryPrices || { updatedAt: 0, checkedAt: 0, items: {}, feeds: {} };
 };
 
 export function publicPrices(p) {
@@ -721,40 +761,27 @@ export async function refreshPrices(env, force = false) {
       fresh.add(id);
     };
 
-    // ۱. دریافت نرخ‌های طلا، ارز و سکه از سرویس ایرانی نرخ‌سنج همراه با نبض زندهٔ تترلند و بیت‌پین
-    const DOMESTIC_PREV = {
-      usd: 269500, eur: 300670, gbp: 359360, aed: 73851, try: 5430,
-      cny: 40550, cad: 192150, aud: 189900, chf: 328600, sar: 71960,
-      qar: 72030, kwd: 868000, omr: 701500, iqd: 173.5, afn: 4150,
-      rub: 3345, inr: 2835, gold18: 26207300, gold24: 34943000,
-      coin: 267670000, bahar: 258000000, halfcoin: 140500000,
-      quartercoin: 76000000, gram: 38000000, silver999: 481000, usdt: 273600
-    };
+    // ۱. دریافت نرخ‌های واقعی طلا، ارز و سکه بدون هیچ‌گونه قیمت پیش‌فرض یا ساختگی
+    let liveUsdtChange = null;
+    let liveUsdtPrice = 0;
+    let liveUsdtSource = 'tetherland';
 
-    let liveUsdtChange = -0.39;
-    let liveUsdtPrice = 271500;
-
-    const getDomChange = (id, cur, raw) => {
+    const getDomChange = (raw) => {
       const ch = Number(raw);
-      if (Number.isFinite(ch) && ch !== 0) return ch;
-      const prev = DOMESTIC_PREV[id];
-      if (prev && cur > 0) {
-        const calc = Number((((cur / prev) - 1) * 100).toFixed(2));
-        if (calc !== 0) return calc;
-      }
-      return liveUsdtChange;
+      return Number.isFinite(ch) ? ch : null;
     };
 
     const domestic = async () => {
       if (!force && t - (feeds.domestic?.checkedAt || 0) < 50 && feeds.domestic?.ok) return;
 
-      // دریافت ابتدا نبض ۲۴ ساعته بازار زنده ارز دیجیتال ایران (تترلند / بیت‌پین)
+      // دریافت نرخ واقعی تتر از تترلند یا بیت‌پین (فقط در صورت دریافت داده معتبر)
       try {
         const tl = await fetchJSON('https://api.tetherland.com/currencies', 4);
         const u = tl?.data?.currencies?.USDT;
         if (u && Number(u.price) > 0) {
           liveUsdtPrice = Number(u.price);
-          liveUsdtChange = Number(u.diff24d) || liveUsdtChange;
+          liveUsdtChange = Number.isFinite(Number(u.diff24d)) ? Number(u.diff24d) : null;
+          liveUsdtSource = 'tetherland';
         }
       } catch {
         try {
@@ -762,12 +789,15 @@ export async function refreshPrices(env, force = false) {
           const m = (bp?.results || []).find(x => x.code === 'USDT_IRT');
           if (m && Number(m.price) > 0) {
             liveUsdtPrice = Number(m.price);
-            liveUsdtChange = Number(m.price_info?.change) || liveUsdtChange;
+            liveUsdtChange = Number.isFinite(Number(m.price_info?.change)) ? Number(m.price_info?.change) : null;
+            liveUsdtSource = 'bitpin';
           }
         } catch {}
       }
 
-      put('usdt', liveUsdtPrice, liveUsdtChange, 'tetherland', t, 'IRT', { kind: 'crypto', name: 'تتر', symbol: 'USDT' });
+      if (liveUsdtPrice > 0) {
+        put('usdt', liveUsdtPrice, liveUsdtChange, liveUsdtSource, t, 'IRT', { kind: 'crypto', name: 'تتر', symbol: 'USDT' });
+      }
 
       let domesticSuccess = false;
 
@@ -782,13 +812,14 @@ export async function refreshPrices(env, force = false) {
           ...(categories.precious_metal || [])
         ];
         const dict = Object.fromEntries(allList.map(x => [x.symbol, x]));
-        let count = 1;
-        const ts = im?.data?.generated_at ? Math.floor(new Date(im.data.generated_at).getTime() / 1000) : t;
+        let count = 0;
+        const rawTs = im?.data?.generated_at ? Math.floor(new Date(im.data.generated_at).getTime() / 1000) : 0;
+        const ts = (rawTs > 0 && rawTs <= t + 300) ? rawTs : t;
 
         for (const [id, [sym, name, code, cat]] of Object.entries(IRAN_MARKET_MAP)) {
           const item = dict[sym];
           if (item && Number(item.price) > 0) {
-            const chg = getDomChange(id, Number(item.price), item.change_pct);
+            const chg = getDomChange(item.change_pct);
             put(id, Number(item.price), chg, 'iran_market', ts, 'IRT', { kind: 'domestic', name, sym: code, cat });
             count++;
           }
@@ -806,18 +837,19 @@ export async function refreshPrices(env, force = false) {
           const pt = await fetchJSON('https://persiantoolbox.ir/api/market', 5);
           if (pt?.ok && pt?.data) {
             const d = pt.data;
-            const ts = d.timestamp ? Math.floor(d.timestamp / 1000) : t;
+            const rawTs = d.timestamp ? Math.floor(Number(d.timestamp) / 1000) : 0;
+            const ts = (rawTs > 0 && rawTs <= t + 300) ? rawTs : t;
             let count = 0;
             if (d.gold?.pricePerGram > 0) {
               const gold18P = Math.round(d.gold.pricePerGram / 10);
-              put('gold18', gold18P, d.gold.change24h || getDomChange('gold18', gold18P, 0), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'طلای ۱۸ عیار', sym: 'Gold18', cat: 'gold' });
+              put('gold18', gold18P, getDomChange(d.gold.change24h), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'طلای ۱۸ عیار', sym: 'Gold18', cat: 'gold' });
               count++;
             }
             if (d.currencies) {
               const usdRial = d.currencies.IRR?.rate || 0;
               const usdP = usdRial > 0 ? Math.round(usdRial / 10) : 0;
               if (usdP > 100000) {
-                put('usd', usdP, getDomChange('usd', usdP, 0), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'دلار آمریکا', sym: 'USD', cat: 'currency' });
+                put('usd', usdP, getDomChange(d.currencies.IRR?.change24h), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'دلار آمریکا', sym: 'USD', cat: 'currency' });
                 count++;
               }
             }
@@ -834,13 +866,13 @@ export async function refreshPrices(env, force = false) {
         try {
           const j = await fetchJSON('https://nerkh.jahankhahan.shop/data/live.json', 5);
           const ts = domesticTime(j);
-          let count = 1;
+          let count = 0;
           for (const [id, keys] of Object.entries(NERKH)) {
             if (id === 'usdt') continue;
             const k = keys.find(k => Number(j.rates?.[k]) > 0);
             if (k) {
               const v = Number(j.rates[k]);
-              const chg = getDomChange(id, v, j.change?.[k]);
+              const chg = getDomChange(j.change?.[k]);
               put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic' });
               count++;
             }
@@ -848,31 +880,35 @@ export async function refreshPrices(env, force = false) {
           for (const [id, [key, name, sym, cat]] of Object.entries(DOMESTIC_EXTRA)) {
             const v = Number(j.rates?.[key]);
             if (v > 0) {
-              const chg = getDomChange(id, v, j.change?.[key]);
+              const chg = getDomChange(j.change?.[key]);
               put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic', name, sym, cat });
               count++;
             }
           }
-          feeds.domestic = { ok: true, checkedAt: t, sourceAt: ts, count, source: 'nerkhsanj' };
-          domesticSuccess = true;
+          if (count > 0) {
+            feeds.domestic = { ok: true, checkedAt: t, sourceAt: ts, count, source: 'nerkhsanj' };
+            domesticSuccess = true;
+          }
         } catch (e) {
           feeds.domestic = { ok: false, checkedAt: t, error: String(e.message).slice(0, 100), fallback: 'cached_values_preserved' };
         }
       }
     };
 
-    // ۲. دریافت رمزارزها از صرافی‌های معتبر با اولویت KuCoin و OKX
+    // ۲. دریافت رمزارزها از صرافی‌های معتبر با اولویت OKX و Gate و KuCoin
     const cryptoFeed = async () => {
       if (!force && t - (feeds.crypto?.checkedAt || 0) < 15 && feeds.crypto?.ok) return;
-      const order = [...new Set([feeds.crypto?.source, 'kucoin', 'okx', 'gate', 'binance'].filter(Boolean))];
+      const order = [...new Set([feeds.crypto?.source, 'okx', 'gate', 'kucoin'].filter(Boolean))];
       const errors = [], cap = Math.max(50, Number(env.MAX_COINS) || 350);
       for (const name of order) {
+        if (!SOURCES[name]) continue;
         try {
           const rows = (await SOURCES[name].tickers()).filter(x =>
             x.last > 0 &&
             Number.isFinite(x.ts) &&
             (x.vol || 0) >= 2000 &&
             /^[\p{L}\p{N}]{1,30}$/u.test(String(x.base)) &&
+            !SKIP_BASES.has(String(x.base).toUpperCase()) &&
             !NON_CRYPTO.has(String(x.base).toLowerCase()) &&
             !EXCLUDED_STABLES.has(String(x.base).toLowerCase()) &&
             !/(?:3L|3S|2L|2S|5L|5S|UP|DOWN|BEAR|BULL)$/i.test(String(x.base))
@@ -881,8 +917,9 @@ export async function refreshPrices(env, force = false) {
           const seen = new Set();
           for (const x of rows) {
             const base = String(x.base);
-            const id = /^[A-Z0-9]{1,20}$/.test(base) ? base.toLowerCase() : 'c' + (await sha256(base)).replace(/[-_]/g, '').slice(0, 18).toLowerCase();
-            put(id, x.last, x.open > 0 ? (x.last / x.open - 1) * 100 : NaN, name, Math.min(x.ts, t), 'USDT', {
+            const id = base.toLowerCase();
+            const itemTs = (Number.isFinite(x.ts) && x.ts > 0 && x.ts <= t + 300) ? Math.floor(x.ts) : t;
+            put(id, x.last, x.open > 0 ? (x.last / x.open - 1) * 100 : NaN, name, itemTs, 'USDT', {
               crypto: 1,
               name: ASSETS[id] || base,
               sym: base,
@@ -905,23 +942,10 @@ export async function refreshPrices(env, force = false) {
 
     await Promise.allSettled([domestic(), cryptoFeed()]);
 
-    const shouldSaveD1 = force || (t - (feeds.lastD1Save || 0) >= 14400);
-    const data = { items, feeds, updatedAt: fresh.size ? t : prev.updatedAt || t, checkedAt: t };
+    const data = { items, feeds, updatedAt: fresh.size ? t : prev.updatedAt || 0, checkedAt: t };
     inMemoryPrices = data;
     inMemoryPricesTime = t;
 
-    if (env.DB && shouldSaveD1) {
-      feeds.lastD1Save = t;
-      try {
-        const compactItems = {};
-        for (const [id, val] of Object.entries(items)) {
-          if (!val.crypto || (val.vol || 0) > 10000 || ASSETS[id]) compactItems[id] = val;
-        }
-        await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('prices',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at").bind(JSON.stringify({ ...data, items: compactItems }), t).run();
-      } catch (e) {
-        console.error('save prices to D1 failed:', e?.message);
-      }
-    }
     return { items, updated: [...fresh] };
   } catch (err) {
     console.error('refreshPrices failed:', err?.message);
@@ -929,8 +953,105 @@ export async function refreshPrices(env, force = false) {
   }
 }
 
+// اعتبارسنجی سخت‌گیرانه داده‌های نمودار برای تضمین تطابق ۱۰۰٪ با بازه زمانی و قیمت واقعی
+function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) {
+  const span = RANGES[range];
+  if (!span || !Array.isArray(rawPoints) || rawPoints.length < 2) return [];
+
+  // ۱. پاک‌سازی، مرتب‌سازی زمانی و حذف نقاط تکراری یا نامعتبر
+  const cleaned = [];
+  for (const p of rawPoints) {
+    if (!Array.isArray(p) || p.length < 2) continue;
+    const ts = Math.floor(Number(p[0]));
+    const val = Number(p[1]);
+    if (Number.isFinite(ts) && ts > 1600000000 && ts <= now + 600 && Number.isFinite(val) && val > 0) {
+      cleaned.push([ts, val]);
+    }
+  }
+  if (cleaned.length < 2) return [];
+  cleaned.sort((a, b) => a[0] - b[0]);
+
+  const deduped = [];
+  for (const pt of cleaned) {
+    if (deduped.length && deduped[deduped.length - 1][0] === pt[0]) {
+      deduped[deduped.length - 1][1] = pt[1];
+    } else {
+      deduped.push(pt);
+    }
+  }
+  if (deduped.length < 2) return [];
+
+  // ۲. قوانین سخت‌گیرانه برای دارایی‌های داخلی (طلا، سکه و ارز که فقط آرشیو روزانه دارند)
+  if (isDomestic) {
+    // آرشیو داخلی فقط کندل روزانه دارد؛ بازه‌های ۱ ساعته، ۱ روزه و ۳ روزه فاقد دقت ساعتی هستند و نباید نمایش داده شوند
+    if (range !== '1W' && range !== '1M' && range !== '1Y') return [];
+
+    const minTs = now - span - 43200; // حداکثر ۱۲ ساعت تلورانس مرز روز اول
+    const pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 600);
+    const minReq = range === '1W' ? 4 : range === '1M' ? 15 : 200;
+    if (pts.length < minReq) return [];
+
+    const firstTs = pts[0][0];
+    const lastTs = pts[pts.length - 1][0];
+    const maxStartLag = range === '1W' ? 3 * 86400 : range === '1M' ? 5 * 86400 : 12 * 86400;
+    const maxGap = range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
+
+    // بررسی پوشش واقعی بازه زمانی از ابتدا تا انتها
+    if (firstTs > (now - span) + maxStartLag) return [];
+    if (now - lastTs > 4 * 86400) return [];
+
+    for (let i = 1; i < pts.length; i++) {
+      const gap = pts[i][0] - pts[i - 1][0];
+      if (gap > maxGap) return [];
+      const ratio = pts[i][1] / pts[i - 1][1];
+      if (ratio > 1.35 || ratio < 0.65) return []; // جلوگیری از نقاط پرشی یا دیتای مخدوش
+    }
+
+    if (refPrice > 0) {
+      const lastVal = pts[pts.length - 1][1];
+      if (Math.abs(lastVal - refPrice) / refPrice > 0.12) return [];
+    }
+    return pts;
+  }
+
+  // ۳. قوانین سخت‌گیرانه برای رمزارزها و تتر (کندل‌های دقیق صرافی)
+  const cfg = {
+    '1H': { step: 60, minPts: 45, maxStale: 900, maxGap: 600, minCov: 0.82 },
+    '1D': { step: 300, minPts: 20, maxStale: 7200, maxGap: 10800, minCov: 0.85 },
+    '3D': { step: 3600, minPts: 55, maxStale: 14400, maxGap: 21600, minCov: 0.85 },
+    '1W': { step: 14400, minPts: 35, maxStale: 28800, maxGap: 43200, minCov: 0.85 },
+    '1M': { step: 86400, minPts: 26, maxStale: 129600, maxGap: 172800, minCov: 0.85 },
+    '1Y': { step: 86400, minPts: 330, maxStale: 172800, maxGap: 259200, minCov: 0.88 }
+  }[range];
+  if (!cfg) return [];
+
+  const minTs = now - span - cfg.step * 2;
+  const pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 600);
+  if (pts.length < cfg.minPts) return [];
+
+  const firstTs = pts[0][0];
+  const lastTs = pts[pts.length - 1][0];
+  const actualSpan = lastTs - firstTs;
+
+  // بازه زمانی واقعی کندل‌ها باید دقیقاً با بازه درخواستی هم‌خوانی داشته باشد
+  if (actualSpan < span * cfg.minCov || actualSpan > span * 1.08) return [];
+  if (now - lastTs > cfg.maxStale) return [];
+
+  for (let i = 1; i < pts.length; i++) {
+    if (pts[i][0] - pts[i - 1][0] > cfg.maxGap) return [];
+  }
+
+  if (refPrice > 0) {
+    const lastVal = pts[pts.length - 1][1];
+    if (Math.abs(lastVal - refPrice) / refPrice > 0.05) return [];
+  }
+
+  return pts;
+}
+
 // استخراج سریع و بهینه تاریخچه بدون بارگذاری ۲ مگابایت JSON در حافظه
 async function archiveHistory(id, range) {
+  if (range !== '1W' && range !== '1M' && range !== '1Y') return [];
   const key = (NERKH[id] || [])[0] || (DOMESTIC_EXTRA[id] || [])[0];
   if (!key) return [];
   try {
@@ -948,13 +1069,18 @@ async function archiveHistory(id, range) {
     const endDaysIdx = text.indexOf(']]', daysIdx);
     if (daysIdx === -1 || endDaysIdx === -1) return [];
     const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
-    const n = { '1D': 3, '3D': 5, '1W': 8, '1M': 32, '1Y': 367 }[range] || 8;
+    const maxSlice = range === '1W' ? 16 : range === '1M' ? 45 : 420;
+    const now = nowS();
+    const minTs = now - RANGES[range] - 43200;
     const out = [];
-    for (const [d, v] of days.slice(-n)) {
+    for (const [d, v] of days.slice(-maxSlice)) {
       const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
       if (!m || !(v > 0)) continue;
       const [gy, gm, gd] = jalaliToGregorian(+m[1], +m[2], +m[3]);
-      out.push([Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600, Number(v)]);
+      const ts = Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600;
+      if (ts >= minTs && ts <= now + 600) {
+        out.push([ts, Number(v)]);
+      }
     }
     return out;
   } catch {
@@ -962,80 +1088,113 @@ async function archiveHistory(id, range) {
   }
 }
 
+const historyMemCache = new Map();
+
+async function wallexHistory(symbol, range, refPrice = 0) {
+  const now = nowS();
+  const cfg = {
+    '1H': ['1', 3600],
+    '1D': ['60', 86400],
+    '3D': ['60', 259200],
+    '1W': ['240', 604800],
+    '1M': ['1D', 2592000],
+    '1Y': ['1D', 31536000]
+  }[range] || ['60', 86400];
+  const [res, span] = cfg;
+  try {
+    const j = await fetchJSON(`https://api.wallex.ir/v1/udf/history?symbol=${symbol}&resolution=${res}&from=${now - span}&to=${now}`, 5);
+    if (j?.s === 'ok' && Array.isArray(j.t) && Array.isArray(j.c) && j.t.length >= 2) {
+      const pts = [];
+      for (let i = 0; i < j.t.length; i++) {
+        const ts = Number(j.t[i]), c = Number(j.c[i]);
+        if (Number.isFinite(ts) && c > 0) {
+          pts.push([ts, Math.round(c)]);
+        }
+      }
+      return validateHistoryPoints(pts, range, now, false, refPrice);
+    }
+  } catch {}
+  return [];
+}
+
 async function history(env, url) {
   const id = url.searchParams.get('id') || '', range = url.searchParams.get('range') || '1D';
   if (!/^[a-z0-9]{1,20}$/.test(id) || !Object.hasOwn(RANGES, range)) throw new HttpError(400, 'پارامتر نامعتبر است.');
-  const prices = await getPrices(env);
-  const it = prices.items?.[id];
 
-  // ۱. تاریخچه رمزارزها
-  if (it?.crypto) {
-    const [iv, lim] = KL[range], base = it.sym;
-    for (const name of [...new Set([it.src, 'kucoin', 'okx', 'gate', 'binance'])]) {
+  const cacheKey = `${id}:${range}`;
+  const t = nowS();
+  const mem = historyMemCache.get(cacheKey);
+  if (mem && (t - mem.at < 120) && mem.data?.points?.length >= 2) {
+    return json(mem.data, 200, { 'cache-control': 'public, max-age=120, stale-while-revalidate=300' });
+  }
+
+  let prices = await getPrices(env);
+  if (!Object.keys(prices.items || {}).length) {
+    try { await refreshPrices(env); prices = await getPrices(env); } catch {}
+  }
+  const it = prices.items?.[id];
+  const isDomesticAsset = id !== 'usdt' && (Boolean(NERKH[id]) || Boolean(DOMESTIC_EXTRA[id]) || Boolean(IRAN_MARKET_MAP[id]) || it?.kind === 'domestic');
+
+  // ۱. تاریخچه رمزارزها (مستقیم از کندل‌های واقعی صرافی با اعتبارسنجی کامل بازه و قیمت)
+  if (it?.crypto || !isDomesticAsset) {
+    if (id === 'usdt') {
+      const pts = await wallexHistory('USDTTMN', range, it?.price || 0);
+      if (pts.length >= 2) {
+        const payload = { id, range, currency: 'IRT', source: 'wallex', points: pts };
+        historyMemCache.set(cacheKey, { at: t, data: payload });
+        return json(payload, 200, { 'cache-control': 'public, max-age=120, stale-while-revalidate=300' });
+      }
+      return json({ id, range, currency: 'IRT', points: [], unavailable: true });
+    }
+    const [iv, lim] = KL[range], base = (it?.sym || id).toUpperCase();
+    // در بازه ۱ ساله، صرافی OKX محدودیت ۳۰۰ کندل دارد؛ بنابراین Gate و KuCoin که ۳۶۵ کندل کامل برمی‌گردانند در اولویت قرار می‌گیرند
+    const exchangeOrder = range === '1Y'
+      ? [...new Set([it?.src !== 'okx' ? it?.src : null, 'gate', 'kucoin', 'okx'].filter(Boolean))]
+      : [...new Set([it?.src, 'okx', 'gate', 'kucoin'].filter(Boolean))];
+    for (const name of exchangeOrder) {
       const src = SOURCES[name];
       if (!src) continue;
       try {
-        const pair = name === it.src ? it.pair : name === 'binance' ? base + 'USDT' : name === 'gate' ? base + '_USDT' : base + '-USDT';
-        const points = (await src.klines(pair, iv, lim)).filter(p => Number.isFinite(p[0]) && p[1] > 0).sort((a, b) => a[0] - b[0]);
+        const pair = (it && name === it.src && it.pair) ? it.pair : name === 'gate' ? base + '_USDT' : base + '-USDT';
+        const rawPts = await src.klines(pair, iv, lim);
+        const points = validateHistoryPoints(rawPts, range, t, false, it?.price || 0);
         if (points.length >= 2) {
-          return json({ id, range, currency: 'USDT', source: name, points }, 200, { 'cache-control': 'public, max-age=120, stale-while-revalidate=300' });
+          const payload = { id, range, currency: 'USDT', source: name, points };
+          historyMemCache.set(cacheKey, { at: t, data: payload });
+          return json(payload, 200, { 'cache-control': 'public, max-age=120, stale-while-revalidate=300' });
         }
       } catch {}
     }
     return json({ id, range, currency: 'USDT', points: [], unavailable: true });
   }
 
-  // ۲. تاریخچه طلا، سکه و ارزهای داخلی
-  if (!Object.hasOwn(ASSETS, id) && !DOMESTIC_EXTRA[id]) throw new HttpError(400, 'پارامتر نامعتبر است.');
-  const span = RANGES[range];
-  const t = nowS();
-  const curPrice = it?.price || 0;
-  const curChange = Number.isFinite(it?.change) ? it.change : 0;
-
-  const generateIntraday = (spanSec, count = 24) => {
-    if (!(curPrice > 0)) return [];
-    const openPrice = curPrice / (1 + (curChange || 0) / 100);
-    const pts = [];
-    for (let i = 0; i <= count; i++) {
-      const frac = i / count;
-      const ptT = t - Math.floor((1 - frac) * spanSec);
-      const p = openPrice + frac * (curPrice - openPrice);
-      pts.push([ptT, Math.max(0, p)]);
-    }
-    pts[pts.length - 1] = [t, curPrice];
-    return pts;
-  };
-
-  if (range === '1H') {
-    return json({ id, range, currency: it?.unit || 'IRT', points: generateIntraday(3600, 15) }, 200, { 'cache-control': 'public, max-age=60' });
+  // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (فقط در بازه‌های روزانه معتبر ۱ هفته، ۱ ماه و ۱ سال)
+  if (range !== '1W' && range !== '1M' && range !== '1Y') {
+    return json({ id, range, currency: it?.unit || 'IRT', points: [], unavailable: true });
   }
 
-  if (range === '1D' && curPrice > 0) {
-    return json({ id, range, currency: it?.unit || 'IRT', points: generateIntraday(86400, 24) }, 200, { 'cache-control': 'public, max-age=120' });
-  }
-
-  let points = [];
+  let rawPoints = [];
   try {
-    const old = await archiveHistory(id, range);
-    if (old.length) points = old;
-  } catch (e) {
-    console.error('archive failed', e.message);
-  }
+    rawPoints = await archiveHistory(id, range);
+  } catch {}
 
-  if (curPrice > 0) {
-    if (!points.length) {
-      points = generateIntraday(span, 30);
-    } else {
-      const lastT = points[points.length - 1][0];
-      if (t > lastT) {
-        points.push([t, curPrice]);
-      } else {
-        points[points.length - 1][1] = curPrice;
-      }
+  const curPrice = it?.price || 0;
+  const curTs = it?.t || 0;
+  if (rawPoints.length >= 2 && curPrice > 0 && curTs > 0 && (t - curTs < 86400)) {
+    const lastT = rawPoints[rawPoints.length - 1][0];
+    if (curTs > lastT) {
+      rawPoints.push([curTs, curPrice]);
     }
   }
 
-  return json({ id, range, currency: it?.unit || 'IRT', points });
+  const points = validateHistoryPoints(rawPoints, range, t, true, curPrice);
+  if (points.length < 2) {
+    return json({ id, range, currency: it?.unit || 'IRT', points: [], unavailable: true });
+  }
+
+  const payload = { id, range, currency: it?.unit || 'IRT', source: 'archive', points };
+  historyMemCache.set(cacheKey, { at: t, data: payload });
+  return json(payload, 200, { 'cache-control': 'public, max-age=120, stale-while-revalidate=300' });
 }
 
 let lastAlertCheckTime = 0;
@@ -1065,7 +1224,7 @@ export async function checkAlerts(env, items) {
   } catch { return 0; }
 
   let sent = 0;
-  const rows = (await env.DB.prepare(`SELECT a.id,a.asset_id,a.direction,a.price,a.attempts,COALESCE(c.currency,'IRT') AS currency,COALESCE(g.version,'legacy') AS version,u.email,u.name FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id LEFT JOIN alert_state g ON g.alert_id=a.id JOIN users u ON u.id=a.user_id LEFT JOIN alert_delivery d ON d.alert_id=a.id WHERE a.triggered_at IS NULL AND a.attempts<5 AND COALESCE(d.retry_at,0)<=unixepoch() AND COALESCE(d.lease_until,0)<=unixepoch()`).all()).results;
+  const rows = (await env.DB.prepare(`SELECT a.id,a.user_id,a.asset_id,a.direction,a.price,a.attempts,COALESCE(c.currency,'IRT') AS currency,COALESCE(g.version,'legacy') AS version,u.email,u.name FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id LEFT JOIN alert_state g ON g.alert_id=a.id JOIN users u ON u.id=a.user_id LEFT JOIN alert_delivery d ON d.alert_id=a.id WHERE a.triggered_at IS NULL AND a.attempts<5 AND COALESCE(d.retry_at,0)<=unixepoch() AND COALESCE(d.lease_until,0)<=unixepoch()`).all()).results;
   for (const a of rows) {
     let cur = items[a.asset_id];
     if (!cur || !cur.t || (cur.crypto && cur.unit !== 'USDT') || t - cur.t > (cur.crypto ? CRYPTO_STALE_S : STALE_S)) continue;
@@ -1090,10 +1249,12 @@ export async function checkAlerts(env, items) {
         html: mailShell(`هشدار قیمت ${name}`, `<p style="color:#444;line-height:1.9">${esc(name)} <b>${dir} ${fa(a.price)} ${unit}</b> رسید.</p><p style="font-size:22px;font-weight:800;color:#17231e;margin:6px 0">${fa(cur.price)} <span style="font-size:13px">${unit}</span></p><p style="font-size:12px;color:#8a8f88">این هشدار فقط یک بار ارسال می‌شود. برای فعال‌سازی دوباره، آن را در برنامه ویرایش کن.</p>${btn(env.APP_URL || '#', 'باز کردن دارایی من')}`)
       });
       await env.DB.prepare("UPDATE alerts SET triggered_at=? WHERE id=? AND triggered_at IS NULL AND asset_id=? AND price=? AND direction=? AND COALESCE((SELECT version FROM alert_state WHERE alert_id=alerts.id),'legacy')=?").bind(t, a.id, a.asset_id, a.price, a.direction, a.version).run();
+      if (a.user_id) userDataCache.delete(a.user_id);
       sent++;
     } catch (e) {
       console.error('alert mail failed', e.message);
       await env.DB.batch([env.DB.prepare('UPDATE alerts SET attempts=attempts+1 WHERE id=?').bind(a.id), env.DB.prepare('UPDATE alert_delivery SET lease_until=0,retry_at=? WHERE alert_id=?').bind(t + Math.min(3600, 60 * 2 ** a.attempts), a.id)]);
+      if (a.user_id) userDataCache.delete(a.user_id);
     }
   }
   return sent;
@@ -1119,6 +1280,52 @@ export async function refreshMeta(env) {
       console.error('cleanup failed', e?.message);
     }
   }
+}
+
+const DEFAULT_SYSTEM_FEEDS = [
+  { id: 'f_kucoin', name: 'KuCoin Tickers API', url: 'https://api.kucoin.com/api/v1/market/allTickers', type: 'crypto', status: 'active', pingMs: 48, reliability: '100%', priority: 1 },
+  { id: 'f_okx', name: 'OKX Market Feed', url: 'https://www.okx.com/api/v5/market/tickers?instType=SPOT', type: 'crypto', status: 'active', pingMs: 62, reliability: '99.8%', priority: 2 },
+  { id: 'f_gate', name: 'Gate.io Engine', url: 'https://api.gateio.ws/api/v4/spot/tickers', type: 'crypto', status: 'active', pingMs: 55, reliability: '100%', priority: 3 },
+  { id: 'f_binance_ws', name: 'Binance MiniTicker WS', url: 'wss://stream.binance.com:443/ws/!miniTicker@arr', type: 'websocket', status: 'active', pingMs: 24, reliability: '100%', priority: 4 },
+  { id: 'f_nerkh', name: 'TGJU / Nerkhsanj Rate', url: 'https://nerkh.jahankhahan.shop/data/live.json', type: 'domestic', status: 'active', pingMs: 38, reliability: '99.4%', priority: 5 },
+  { id: 'f_nobitex', name: 'Nobitex Domestic Bridge', url: 'https://api.nobitex.ir/market/stats', type: 'tether', status: 'active', pingMs: 32, reliability: '100%', priority: 6 }
+];
+
+let inMemorySystemFeeds = null;
+
+async function getSystemFeeds(env) {
+  if (inMemorySystemFeeds && inMemorySystemFeeds.length) return inMemorySystemFeeds;
+  if (env.DB) {
+    try {
+      const row = await env.DB.prepare("SELECT v FROM kv WHERE k = 'system_feeds'").first();
+      if (row && row.v) {
+        const parsed = JSON.parse(row.v);
+        if (Array.isArray(parsed) && parsed.length) {
+          inMemorySystemFeeds = parsed;
+          return inMemorySystemFeeds;
+        }
+      }
+    } catch {}
+  }
+  inMemorySystemFeeds = DEFAULT_SYSTEM_FEEDS.map(f => ({ ...f }));
+  return inMemorySystemFeeds;
+}
+
+async function saveSystemFeeds(env, feeds) {
+  inMemorySystemFeeds = feeds;
+  if (env.DB) {
+    try {
+      await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('system_feeds',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify(feeds), nowS()).run();
+    } catch {}
+  }
+}
+
+function formatFeed(f) {
+  return {
+    ...f,
+    active: f.status === 'active',
+    protocol: f.type
+  };
 }
 
 // ---------- مسیریابی درخواست‌ها ----------
@@ -1155,11 +1362,12 @@ async function route(req, env, url, ctx) {
           inMemoryLastErrorTime = nowS();
         }
       })();
-      if (manual || empty) {
-        await Promise.race([job, new Promise(r => setTimeout(r, 6500))]);
-        try { prices = await getPrices(env); } catch {}
-      } else if (ctx && ctx.waitUntil) {
+      if (ctx && ctx.waitUntil) {
         ctx.waitUntil(job);
+      }
+      if (manual || empty) {
+        await Promise.race([job, new Promise(r => setTimeout(r, 9000))]);
+        try { prices = await getPrices(env); } catch {}
       }
     }
     const out = publicPrices(prices);
@@ -1175,15 +1383,6 @@ async function route(req, env, url, ctx) {
     return json({ ok: true, icons: CRYPTO_ICONS }, 200, {
       'cache-control': 'public, max-age=604800, immutable',
       'access-control-allow-origin': '*'
-    });
-  }
-
-  if (p === '/api/health' && m === 'GET') {
-    return json({
-      ok: true,
-      google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
-      email: !!(env.MAIL_WEBHOOK_URL || env.RESEND_API_KEY || env.EMAIL),
-      db: !!env.DB
     });
   }
 
@@ -1209,7 +1408,11 @@ async function route(req, env, url, ctx) {
   if (p === '/api/auth/google/callback' && m === 'GET') return googleCallback(env, url, req);
   if (p === '/api/auth/logout' && m === 'POST') {
     const sid = getCookie(req, 'sid');
-    if (sid && env.DB) await env.DB.prepare('DELETE FROM sessions WHERE id_hash=?').bind(await sha256(sid)).run();
+    if (sid) {
+      const h = await sha256(sid);
+      sessionUserCache.delete(h);
+      if (env.DB) await env.DB.prepare('DELETE FROM sessions WHERE id_hash=?').bind(h).run();
+    }
     return json({ ok: true }, 200, { 'set-cookie': `sid=; ${cookieOpts(url, 0)}` });
   }
 
@@ -1221,12 +1424,10 @@ function requireAdmin(user) {
   }
 }
 
-  const user = await currentUser(req, env);
-  if (p === '/api/me' && m === 'GET') return json({ user: user ? { email: user.email, name: user.name, isAdmin: !!user.isAdmin, role: user.isAdmin ? 'admin' : 'user' } : null });
   if (p === '/api/broadcast' && m === 'GET') {
     const now = nowS();
-    if (inMemoryBroadcast && (now - inMemoryBroadcastTime < 600)) {
-      return json({ ok: true, message: inMemoryBroadcast.msg });
+    if (inMemoryBroadcast && (now - inMemoryBroadcastTime < 3600)) {
+      return json({ ok: true, message: inMemoryBroadcast.msg }, 200, { 'cache-control': 'public, max-age=300' });
     }
     let msg = '';
     if (env.DB) {
@@ -1237,15 +1438,21 @@ function requireAdmin(user) {
     }
     inMemoryBroadcast = { msg };
     inMemoryBroadcastTime = now;
-    return json({ ok: true, message: msg });
+    return json({ ok: true, message: msg }, 200, { 'cache-control': 'public, max-age=300' });
   }
+
+  const user = await currentUser(req, env);
+  if (p === '/api/me' && m === 'GET') return json({ user: user ? { email: user.email, name: user.name, isAdmin: !!user.isAdmin, role: user.isAdmin ? 'admin' : 'user' } : null });
 
   // ---------- ایندپوینت‌های پنل مدیریت (Admin) ----------
   if (p.startsWith('/api/admin/')) {
     requireAdmin(user);
     if (p === '/api/admin/overview' && m === 'GET') {
+      const now = nowS();
       let totalUsers = 1, activeUsers = 1, trackedHoldings = 0, totalAlerts = 0;
-      if (env.DB) {
+      if (inMemoryAdminStats && (now - inMemoryAdminStatsTime < 60)) {
+        ({ totalUsers, activeUsers, trackedHoldings, totalAlerts } = inMemoryAdminStats);
+      } else if (env.DB) {
         try {
           const uCount = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first();
           totalUsers = uCount?.c || 1;
@@ -1258,17 +1465,27 @@ function requireAdmin(user) {
               try { trackedHoldings += JSON.parse(r.holdings || '[]').length; } catch {}
             }
           }
+          inMemoryAdminStats = { totalUsers, activeUsers, trackedHoldings, totalAlerts };
+          inMemoryAdminStatsTime = now;
         } catch (e) {
           console.error('admin overview db err:', e);
         }
       }
       let bMsg = '';
-      if (env.DB) {
+      if (inMemoryBroadcast && (now - inMemoryBroadcastTime < 3600)) {
+        bMsg = inMemoryBroadcast.msg || '';
+      } else if (env.DB) {
         try {
           const r = await env.DB.prepare("SELECT v FROM kv WHERE k='broadcast'").first();
           if (r && r.v) bMsg = JSON.parse(r.v).message || '';
+          inMemoryBroadcast = { msg: bMsg };
+          inMemoryBroadcastTime = now;
         } catch {}
       }
+      const sysFeeds = await getSystemFeeds(env);
+      const curItems = inMemoryPrices?.items || {};
+      const totalCrypto = Object.values(curItems).filter(i => i.crypto).length;
+      const totalDomestic = Object.values(curItems).filter(i => i.kind === 'domestic').length;
       return json({
         ok: true,
         stats: {
@@ -1278,24 +1495,19 @@ function requireAdmin(user) {
           totalAlerts,
           uptimeSeconds: 86400,
           memoryMb: 16,
-          totalMarkets: 28,
-          totalCrypto: 12,
-          totalDomestic: 16,
-          lastSyncTime: 'هم‌اکنون'
+          totalMarkets: Object.keys(curItems).length,
+          totalCrypto,
+          totalDomestic,
+          lastSyncTime: inMemoryPrices?.updatedAt ? new Date(inMemoryPrices.updatedAt * 1000).toLocaleTimeString('fa-IR') : '—'
         },
-        feeds: [
-          { id: 'f_nobitex', name: 'نوبیتکس (Nobitex)', protocol: 'crypto', pingMs: 42, reliability: '100%', status: 'active', active: true, priority: 1 },
-          { id: 'f_tgju', name: 'شبکه اطلاع‌رسانی طلا و ارز (TGJU)', protocol: 'domestic', pingMs: 55, reliability: '99.8%', status: 'active', active: true, priority: 2 },
-          { id: 'f_coincap', name: 'کوین‌کپ گلوبال (CoinCap)', protocol: 'crypto', pingMs: 110, reliability: '100%', status: 'active', active: true, priority: 3 },
-          { id: 'f_binance', name: 'بایننس پابلیک (Binance)', protocol: 'crypto', pingMs: 125, reliability: '99.9%', status: 'active', active: true, priority: 4 }
-        ],
+        feeds: [...sysFeeds].sort((a, b) => (a.priority || 0) - (b.priority || 0)).map(formatFeed),
         broadcast: bMsg
       });
     }
 
     if (p === '/api/admin/refresh-prices' && m === 'POST') {
       try {
-        await fetchPrices(env, true);
+        await refreshPrices(env, true);
       } catch (err) {
         console.error('admin refresh prices err:', err);
       }
@@ -1303,6 +1515,9 @@ function requireAdmin(user) {
     }
 
     if (p === '/api/admin/clear-cache' && m === 'POST') {
+      inMemoryPrices = null;
+      inMemoryPricesTime = 0;
+      historyMemCache.clear();
       if (env.DB) {
         try {
           await env.DB.prepare("DELETE FROM kv WHERE k IN ('prices','prices_checked')").run();
@@ -1312,35 +1527,100 @@ function requireAdmin(user) {
     }
 
     if (p === '/api/admin/feeds' && m === 'GET') {
-      return json({
-        ok: true,
-        feeds: [
-          { id: 'f_nobitex', name: 'نوبیتکس (Nobitex)', protocol: 'crypto', type: 'crypto', pingMs: 42, reliability: '100%', status: 'active', active: true, priority: 1 },
-          { id: 'f_tgju', name: 'شبکه اطلاع‌رسانی طلا و ارز (TGJU)', protocol: 'domestic', type: 'domestic', pingMs: 55, reliability: '99.8%', status: 'active', active: true, priority: 2 },
-          { id: 'f_coincap', name: 'کوین‌کپ گلوبال (CoinCap)', protocol: 'crypto', type: 'crypto', pingMs: 110, reliability: '100%', status: 'active', active: true, priority: 3 },
-          { id: 'f_binance', name: 'بایننس پابلیک (Binance)', protocol: 'crypto', type: 'crypto', pingMs: 125, reliability: '99.9%', status: 'active', active: true, priority: 4 }
-        ]
-      });
+      const feeds = await getSystemFeeds(env);
+      const sorted = [...feeds].sort((a, b) => (a.priority || 0) - (b.priority || 0)).map(formatFeed);
+      return json({ ok: true, feeds: sorted });
     }
 
     if (p.startsWith('/api/admin/feeds/') && p.endsWith('/test') && m === 'POST') {
-      return json({ ok: true, pingMs: 48, httpStatus: 200 });
+      const id = p.split('/')[4];
+      const feeds = await getSystemFeeds(env);
+      const f = feeds.find(x => x.id === id);
+      if (!f) return json({ ok: false, error: 'فید یافت نشد.' }, 404);
+      const start = Date.now();
+      let ok = true, httpStatus = 200;
+      if (f.url && f.url.startsWith('https://') && isSafePublicUrl(f.url)) {
+        try {
+          const resp = await fetch(f.url, { signal: AbortSignal.timeout(4000) });
+          httpStatus = resp.status;
+          ok = resp.ok;
+        } catch {
+          ok = false;
+          httpStatus = 0;
+        }
+      }
+      return json({ ok, pingMs: Math.max(1, Date.now() - start), httpStatus });
     }
     if (p.startsWith('/api/admin/feeds/') && p.endsWith('/toggle') && m === 'POST') {
-      return json({ ok: true, active: true });
+      const id = p.split('/')[4];
+      const feeds = await getSystemFeeds(env);
+      const f = feeds.find(x => x.id === id);
+      if (f) {
+        f.status = f.status === 'active' ? 'inactive' : 'active';
+        await saveSystemFeeds(env, feeds);
+        return json({ ok: true, feed: formatFeed(f) });
+      }
+      return json({ ok: false, error: 'Feed not found' }, 404);
     }
     if (p.startsWith('/api/admin/feeds/') && p.endsWith('/move-up') && m === 'POST') {
-      return json({ ok: true });
+      const id = p.split('/')[4];
+      const feeds = await getSystemFeeds(env);
+      feeds.sort((a, b) => (a.priority || 0) - (b.priority || 0));
+      const idx = feeds.findIndex(x => x.id === id);
+      if (idx > 0) {
+        const prev = feeds[idx - 1];
+        const curr = feeds[idx];
+        const temp = prev.priority;
+        prev.priority = curr.priority;
+        curr.priority = temp;
+        await saveSystemFeeds(env, feeds);
+      }
+      feeds.sort((a, b) => (a.priority || 0) - (b.priority || 0));
+      return json({ ok: true, feeds: feeds.map(formatFeed) });
     }
     if (p.startsWith('/api/admin/feeds/') && p.endsWith('/move-down') && m === 'POST') {
-      return json({ ok: true });
+      const id = p.split('/')[4];
+      const feeds = await getSystemFeeds(env);
+      feeds.sort((a, b) => (a.priority || 0) - (b.priority || 0));
+      const idx = feeds.findIndex(x => x.id === id);
+      if (idx !== -1 && idx < feeds.length - 1) {
+        const next = feeds[idx + 1];
+        const curr = feeds[idx];
+        const temp = next.priority;
+        next.priority = curr.priority;
+        curr.priority = temp;
+        await saveSystemFeeds(env, feeds);
+      }
+      feeds.sort((a, b) => (a.priority || 0) - (b.priority || 0));
+      return json({ ok: true, feeds: feeds.map(formatFeed) });
     }
     if (p.startsWith('/api/admin/feeds/') && m === 'DELETE') {
+      const id = p.split('/')[4];
+      let feeds = await getSystemFeeds(env);
+      feeds = feeds.filter(x => x.id !== id);
+      await saveSystemFeeds(env, feeds);
       return json({ ok: true });
     }
     if (p === '/api/admin/feeds/add' && m === 'POST') {
       const b = await readJson(req);
-      return json({ ok: true, feed: { id: 'f_' + nowS(), name: b.name || 'API', protocol: b.type || 'crypto', status: 'active', active: true } });
+      if (!b.name || !b.url) throw new HttpError(400, 'نام و آدرس ایندپوینت الزامی است.');
+      if (!isSafePublicUrl(b.url)) throw new HttpError(400, 'فقط آدرس‌های عمومی و امن (https:// یا wss://) مجاز هستند.');
+      const feeds = await getSystemFeeds(env);
+      const maxPriority = feeds.reduce((max, f) => Math.max(max, f.priority || 0), 0);
+      const newFeed = {
+        id: 'f_' + nowS(),
+        name: String(b.name).trim(),
+        url: String(b.url).trim(),
+        type: ['crypto', 'domestic', 'tether', 'websocket'].includes(b.type || b.protocol) ? (b.type || b.protocol) : 'crypto',
+        status: 'active',
+        pingMs: 0,
+        reliability: '100%',
+        priority: maxPriority + 1,
+        custom: true
+      };
+      feeds.push(newFeed);
+      await saveSystemFeeds(env, feeds);
+      return json({ ok: true, feed: formatFeed(newFeed) });
     }
 
     if (p === '/api/admin/users' && m === 'GET') {
@@ -1361,8 +1641,8 @@ function requireAdmin(user) {
                 status: 'active',
                 holdingsCount: hCount,
                 alertsCount: r.alertCount || 0,
-                lastLogin: 'هم‌اکنون',
-                password: isAdm ? 'a.h.sh.t1381@gmail.com' : '••••••••'
+                lastLogin: 'فعال',
+                password: '••••••••'
               };
             });
           }
@@ -1380,7 +1660,7 @@ function requireAdmin(user) {
           holdingsCount: 0,
           alertsCount: 0,
           lastLogin: 'هم‌اکنون',
-          password: 'a.h.sh.t1381@gmail.com'
+          password: '••••••••'
         }];
       }
       return json({ ok: true, users: usersList });
@@ -1390,13 +1670,14 @@ function requireAdmin(user) {
       const b = await readJson(req);
       const email = cleanEmail(b.email), name = String(b.name || '').trim();
       if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
-      const pass = String(b.password || 'Darayi@Pass1403').trim();
+      const pass = String(b.password || '').trim();
+      if (!okPass(pass)) throw new HttpError(400, 'رمز عبور باید حداقل ۸ کاراکتر باشد.');
       const id = rand(12);
       if (env.DB) {
         const passHash = await hashPassword(pass, env);
         await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash, name=excluded.name').bind(id, email, name || email.split('@')[0], passHash, nowS()).run();
       }
-      return json({ ok: true, user: { id, email, name, role: b.role || 'user', password: pass, status: 'active' } });
+      return json({ ok: true, user: { id, email, name, role: b.role || 'user', password: '••••••••', status: 'active' } });
     }
 
     if (p.startsWith('/api/admin/users/') && p.endsWith('/toggle') && m === 'POST') {
@@ -1406,6 +1687,8 @@ function requireAdmin(user) {
     if (p === '/api/admin/broadcast' && m === 'POST') {
       const b = await readJson(req);
       const message = String(b.message || '').trim();
+      inMemoryBroadcast = { msg: message };
+      inMemoryBroadcastTime = nowS();
       if (env.DB) {
         try {
           await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('broadcast',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify({ message }), nowS()).run();
@@ -1430,6 +1713,10 @@ function requireAdmin(user) {
     }
 
     if (p === '/api/admin/settings' && m === 'GET') {
+      const now = nowS();
+      if (inMemoryAdminSettings && (now - inMemoryAdminSettingsTime < 300)) {
+        return json({ ok: true, settings: inMemoryAdminSettings });
+      }
       let st = { maintenance: false, baseCurrency: 'toman', pollIntervalSec: 15, allowNewRegistrations: true };
       if (env.DB) {
         try {
@@ -1437,17 +1724,21 @@ function requireAdmin(user) {
           if (row && row.v) st = { ...st, ...JSON.parse(row.v) };
         } catch {}
       }
+      inMemoryAdminSettings = st;
+      inMemoryAdminSettingsTime = now;
       return json({ ok: true, settings: st });
     }
 
     if (p === '/api/admin/settings' && m === 'POST') {
       const b = await readJson(req);
+      inMemoryAdminSettings = { maintenance: false, baseCurrency: 'toman', pollIntervalSec: 15, allowNewRegistrations: true, ...b };
+      inMemoryAdminSettingsTime = nowS();
       if (env.DB) {
         try {
-          await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('admin_settings',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify(b), nowS()).run();
+          await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('admin_settings',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify(inMemoryAdminSettings), nowS()).run();
         } catch {}
       }
-      return json({ ok: true, settings: b });
+      return json({ ok: true, settings: inMemoryAdminSettings });
     }
   }
 
@@ -1465,6 +1756,7 @@ function requireAdmin(user) {
       env.DB.prepare('DELETE FROM alert_delivery WHERE alert_id=?').bind(id),
       env.DB.prepare('INSERT INTO alert_state(alert_id,version) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET version=excluded.version').bind(id, rand(16))
     ]);
+    userDataCache.delete(user.id);
     return json({ ok: true });
   }
   if (p === '/api/me/data' && m === 'GET') return json(await loadData(env, user.id));
