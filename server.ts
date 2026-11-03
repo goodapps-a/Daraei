@@ -575,26 +575,35 @@ app.get('/api/prices', async (req, res) => {
 
 let cachedRatesArchiveText = '';
 let cachedRatesArchiveTime = 0;
+let archiveFetchPromise: Promise<string> | null = null;
 
 async function getRatesArchiveText(): Promise<string> {
   const now = Date.now();
   if (cachedRatesArchiveText && now - cachedRatesArchiveTime < 1800000) {
     return cachedRatesArchiveText;
   }
-  try {
-    const archiveRes = await fetch('https://nerkh.jahankhahan.shop/data/rates.json', {
-      headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0' },
-      signal: AbortSignal.timeout(6000)
-    });
-    if (archiveRes.ok) {
-      cachedRatesArchiveText = await archiveRes.text();
-      cachedRatesArchiveTime = now;
-      return cachedRatesArchiveText;
-    }
-  } catch (e) {
-    console.warn('Failed to refresh rates archive:', e);
+  if (archiveFetchPromise) {
+    return archiveFetchPromise;
   }
-  return cachedRatesArchiveText;
+  archiveFetchPromise = (async () => {
+    try {
+      const archiveRes = await fetch('https://nerkh.jahankhahan.shop/data/rates.json', {
+        headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0' },
+        signal: AbortSignal.timeout(12000)
+      });
+      if (archiveRes.ok) {
+        cachedRatesArchiveText = await archiveRes.text();
+        cachedRatesArchiveTime = Date.now();
+        return cachedRatesArchiveText;
+      }
+    } catch {
+      // Intentionally silent fallback to intraday interpolation
+    } finally {
+      archiveFetchPromise = null;
+    }
+    return cachedRatesArchiveText;
+  })();
+  return archiveFetchPromise;
 }
 
 // Fast klines & historical archive
@@ -644,8 +653,7 @@ app.get('/api/history', async (req, res) => {
       for (let i = 0; i <= count; i++) {
         const frac = i / count;
         const t = now - Math.floor((1 - frac) * spanSec);
-        const wave = Math.sin(frac * Math.PI) * 0.0025;
-        const p = openPrice + frac * (curPrice - openPrice) + curPrice * wave;
+        const p = openPrice + frac * (curPrice - openPrice);
         pts.push([t, Math.max(0, p)]);
       }
       pts[pts.length - 1] = [now, curPrice];

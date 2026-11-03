@@ -71,11 +71,16 @@ body.is-reordering{-webkit-user-select:none;user-select:none;overscroll-behavior
 .allocation-legend-row,.allocation-legend-row strong{font-size:12px}
 #featuredGrid .market-card .asset-name{font-size:clamp(13px,3.8vw,16px)}
 #featuredGrid .market-card .asset-symbol{font-size:10px}
-#featuredGrid .market-card .price{font-size:clamp(16px,4.7vw,23px)}
-@media(max-width:380px){#featuredGrid .market-card .asset-name{font-size:13px}#featuredGrid .market-card .price{font-size:16px}}
+#featuredGrid .market-card .price{font-size:clamp(20px,5.3vw,28px)!important;font-weight:900!important}
+@media(max-width:380px){#featuredGrid .market-card .asset-name{font-size:13px}#featuredGrid .market-card .price{font-size:19px!important}}
+.market-card .price{font-size:clamp(18px,4.5vw,25px)!important;font-weight:900!important}
+.ticker-price{font-size:20px!important;font-weight:900!important}
+.detail-price{font-size:34px!important;font-weight:900!important}
+.row-price{font-size:14.5px!important;font-weight:900!important}
+.watch-alert .alert-price{font-size:14px!important;font-weight:900!important}
 .holding-title{font-size:16px}
-.holding-right b{font-size:clamp(16px,4.6vw,21px)}
-.holding-right small{font-size:clamp(12px,3.3vw,15px)}
+.holding-right b{font-size:clamp(18px,5vw,24px)!important}
+.holding-right small{font-size:clamp(13px,3.5vw,16px)}
 .modal .page-actions{flex-wrap:nowrap;gap:6px}
 .modal .page-actions .btn{flex:1 1 0;min-width:0;min-height:38px;padding:7px 4px;font-size:11px;border-radius:12px;gap:4px;white-space:nowrap}
 .detail-hero{padding:14px}
@@ -227,13 +232,24 @@ body{font-size:15px}
   display: inline-block;
 }
 .p-unit {
-  font-size: 0.65em !important;
+  font-size: 11px !important;
   font-weight: 500 !important;
   color: var(--muted) !important;
   margin-inline-start: 4px !important;
   display: inline-block !important;
   vertical-align: baseline !important;
   opacity: 0.85;
+  letter-spacing: normal !important;
+}
+
+.market-card .price .p-unit,
+#featuredGrid .market-card .price .p-unit,
+.holding-price-main .p-unit,
+.ticker-price .p-unit,
+.detail-price .p-unit,
+.hero-value .p-unit {
+  font-size: 11px !important;
+  font-weight: 500 !important;
 }
 
 /* Compact Timestamp (● به‌روز · امروز، ۱۶:۵۹) */
@@ -1365,7 +1381,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
     margin-left: 6px !important;
   }
   .holding-price-main {
-    font-size: 16.5px !important;
+    font-size: 19px !important;
     font-weight: 900 !important;
     color: var(--ink) !important;
     line-height: 1.3 !important;
@@ -1417,7 +1433,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
     flex: none !important;
   }
   .holding-price-main {
-    font-size: 15.5px !important;
+    font-size: 17.5px !important;
     font-weight: 900 !important;
     color: var(--ink) !important;
     line-height: 1.25 !important;
@@ -3061,31 +3077,58 @@ function normFa(s) {
     .replace(/[‌\s]/g, '')
     .toLowerCase();
 }
+const TOP_CURRENCIES_ORDER = ['usd', 'usdt', 'gold18', 'btc', 'eur', 'gbp', 'try', 'cad', 'coin'];
+
+function getAssetSortPriority(a) {
+  if (!a) return 999999;
+  const id = String(a.id || '').toLowerCase();
+  const topIdx = TOP_CURRENCIES_ORDER.indexOf(id);
+  if (topIdx !== -1) return topIdx;
+  if (id === 'toman') return -2;
+  if (id === 'rial') return -1;
+  if (a.cat === 'currency') return 100;
+  if (a.cat === 'gold') return 200;
+  return 1000;
+}
+
+function sortAssetsStandard(arr) {
+  return arr.slice().sort((a, b) => {
+    const prioA = getAssetSortPriority(a);
+    const prioB = getAssetSortPriority(b);
+    if (prioA !== prioB) return prioA - prioB;
+    if (prioA === 1000) {
+      return (b.vol || 0) - (a.vol || 0);
+    }
+    return (a.name || '').localeCompare(b.name || '', 'fa');
+  });
+}
+
 const seed=[
 {id:'usd',name:'دلار آمریکا',en:'US Dollar',symbol:'USD',cat:'currency',icon:'$',price:59800,change:-0.42,color:'#55a8e8',source:'نمونه'},
+{id:'usdt',name:'تتر',symbol:'USDT',cat:'crypto',icon:'₮',price:60100,change:.06,color:'#26a17b',cg:'tether'},
+{id:'gold18',name:'طلای ۱۸ عیار',symbol:'۱۸ عیار',cat:'gold',icon:'✦',price:4250000,change:.72,color:'#e2a92d'},
+{id:'btc',name:'بیت‌کوین',symbol:'BTC',cat:'crypto',icon:'₿',price:4210000000,change:2.8,color:'#f7931a',cg:'bitcoin'},
 {id:'eur',name:'یورو',en:'Euro',symbol:'EUR',cat:'currency',icon:'€',price:67200,change:.31,color:'#7357ff',source:'نمونه'},
 {id:'gbp',name:'پوند انگلیس',symbol:'GBP',cat:'currency',icon:'£',price:78600,change:.18,color:'#d16d9e',source:'نمونه'},
-{id:'aed',name:'درهم امارات',symbol:'AED',cat:'currency',icon:'د.إ',price:16300,change:.12,color:'#20a77a',source:'نمونه'},
 {id:'try',name:'لیر ترکیه',symbol:'TRY',cat:'currency',icon:'₺',price:1450,change:-.65,color:'#ef6464',source:'نمونه'},
-{id:'gold18',name:'طلای ۱۸ عیار',symbol:'۱۸ عیار',cat:'gold',icon:'✦',price:4250000,change:.72,color:'#e2a92d'},
-{id:'gold24',name:'طلای ۲۴ عیار',symbol:'۲۴ عیار',cat:'gold',icon:'✧',price:5665000,change:.68,color:'#d8a329'},
+{id:'cad',name:'دلار کانادا',symbol:'CAD',cat:'currency',icon:'C$',price:192150,change:.15,color:'#e8505b'},
 {id:'coin',name:'سکه امامی',symbol:'سکه',cat:'gold',icon:'◉',price:51200000,change:-.34,color:'#d98e29'},
 {id:'halfcoin',name:'نیم‌سکه',symbol:'نیم',cat:'gold',icon:'◐',price:27300000,change:.22,color:'#e5b83e'},
 {id:'gram',name:'طلای آب‌شده',symbol:'مثقال',cat:'gold',icon:'✦',price:18400000,change:-.21,color:'#bb8b24'},
-{id:'btc',name:'بیت‌کوین',symbol:'BTC',cat:'crypto',icon:'₿',price:4210000000,change:2.8,color:'#f7931a',cg:'bitcoin'},
+{id:'gold24',name:'طلای ۲۴ عیار',symbol:'۲۴ عیار',cat:'gold',icon:'✧',price:5665000,change:.68,color:'#d8a329'},
+{id:'aed',name:'درهم امارات',symbol:'AED',cat:'currency',icon:'د.إ',price:16300,change:.12,color:'#20a77a',source:'نمونه'},
 {id:'eth',name:'اتریوم',symbol:'ETH',cat:'crypto',icon:'◆',price:225000000,change:1.32,color:'#627eea',cg:'ethereum'},
-{id:'usdt',name:'تتر',symbol:'USDT',cat:'crypto',icon:'₮',price:60100,change:.06,color:'#26a17b',cg:'tether'},
 {id:'sol',name:'سولانا',symbol:'SOL',cat:'crypto',icon:'S',price:8200000,change:4.1,color:'#8d68ff',cg:'solana'},
 {id:'bnb',name:'بایننس کوین',symbol:'BNB',cat:'crypto',icon:'◆',price:38500000,change:-1.1,color:'#f3ba2f',cg:'binancecoin'},
 {id:'xrp',name:'ریپل',symbol:'XRP',cat:'crypto',icon:'✕',price:33000,change:-.8,color:'#5a6b80',cg:'ripple'},
 {id:'sp500',name:'شاخص S&P 500',symbol:'SPX',cat:'global',icon:'SPX',price:5800,change:.28,color:'#398a65'}
-];let assets=seed.filter(x=>x.id!=='sp500').map(x=>({...x,price:null,change:null,source:null,stale:true,currency:x.cat==='crypto'&&x.id!=='usdt'?'USDT':x.id==='silver'?'USD':'IRT'}));try{for(const x of JSON.parse(localStorage.getItem('darayi-assets')||'[]'))if(x&&/^[a-z0-9]{1,20}$/.test(x.id)&&!assets.some(a=>a.id===x.id))assets.push({...x,name:escapeHtml(x.name||x.id),en:escapeHtml(x.en||x.id),icon:escapeHtml(x.icon||x.id[0]),symbol:escapeHtml(x.symbol||x.id),color:/^#[a-f0-9]{6}$/i.test(x.color)?x.color:'#7357ff',price:null,change:null,stale:true,currency:'USDT'})}catch{};let state={holdings:[],watch:[],alerts:[],featured:['usd','gold18','btc','usdt','eur','sol'],theme:'light',unit:'toman',privacy:false,filter:'all',query:'',lastSync:null};
+];let assets=seed.filter(x=>x.id!=='sp500').map(x=>({...x,price:null,change:null,source:null,stale:true,currency:x.cat==='crypto'&&x.id!=='usdt'?'USDT':x.id==='silver'?'USD':'IRT'}));try{for(const x of JSON.parse(localStorage.getItem('darayi-assets')||'[]'))if(x&&/^[a-z0-9]{1,20}$/.test(x.id)&&!assets.some(a=>a.id===x.id))assets.push({...x,name:escapeHtml(x.name||x.id),en:escapeHtml(x.en||x.id),icon:escapeHtml(x.icon||x.id[0]),symbol:escapeHtml(x.symbol||x.id),color:/^#[a-f0-9]{6}$/i.test(x.color)?x.color:'#7357ff',price:null,change:null,stale:true,currency:'USDT'})}catch{};let state={holdings:[],watch:[],alerts:[],featured:['usd','usdt','gold18','btc','eur','gbp','try','cad','coin'],theme:'light',unit:'toman',privacy:false,filter:'all',query:'',lastSync:null};
 try{const saved=JSON.parse(localStorage.getItem('darayi-v5'));if(saved&&typeof saved==='object')state={...state,...saved};}catch{};let fd=null,suppress=false;
 function sanitizeState(){const ok=id=>typeof id==='string'&&/^[a-z0-9]{1,20}$/.test(id);
 if(!Array.isArray(state.holdings))state.holdings=[];state.holdings=state.holdings.filter(h=>h&&ok(h.assetId)&&Number(h.qty)>0&&Number(h.buyPrice)>0).map(h=>({...h,id:typeof h.id==='string'&&/^[A-Za-z0-9_-]{1,40}$/.test(h.id)?h.id:uid(),qty:Number(h.qty),buyPrice:Number(h.buyPrice),fee:Math.max(0,Number(h.fee)||0)}));
 if(!Array.isArray(state.watch))state.watch=[];state.watch=[...new Set(state.watch)].filter(ok);
 if(!Array.isArray(state.alerts))state.alerts=[];state.alerts=state.alerts.filter(a=>a&&ok(a.assetId)&&Number(a.price)>0&&(a.direction==='above'||a.direction==='below')).map(a=>({id:typeof a.id==='string'&&/^[A-Za-z0-9_-]{1,40}$/.test(a.id)?a.id.slice(0,40):uid(),assetId:a.assetId,direction:a.direction,price:Number(a.price),currency:['IRT','USD','USDT'].includes(a.currency)?a.currency:'IRT',attempts:Number(a.attempts)||0,triggeredAt:Number(a.triggeredAt)||null}));
-if(!Array.isArray(state.featured))state.featured=[];state.featured=[...new Set(state.featured)].filter(ok).slice(0,24);if(!state.featured.length)state.featured=['usd','gold18','btc','usdt','eur','sol'];
+if(!Array.isArray(state.featured))state.featured=[];state.featured=[...new Set(state.featured)].filter(ok).slice(0,24);if(!state.featured.length)state.featured=['usd','usdt','gold18','btc','eur','gbp','try','cad','coin'];
 if(state.theme!=='dark')state.theme='light';if(state.unit!=='rial')state.unit='toman';state.privacy=!!state.privacy;if(!state.user||!state.user.remote)state.user=null;
 if(!['all','currency','gold','crypto','global','watch'].includes(state.filter))state.filter='all';state.query=''}
 sanitizeState();
@@ -3222,7 +3265,7 @@ function spark(a){
 }
 function lineChart(values,color='#d7ff61',fill=true){return chartSVG(values.map((v,i)=>[i,v]),color,fill)}
 function chartGeometry(points){const n=points.length,min=Math.min(...points.map(p=>p[1])),max=Math.max(...points.map(p=>p[1])),span=(max-min)||Math.max(Math.abs(min)*.01,1),t0=points[0][0],t1=points.at(-1)[0];return points.map((p,i)=>[8+(p[0]-t0)/(t1-t0||1)*624,168-(p[1]-min+span*.05)/(span*1.1)*150])}
-function smoothPath(p){if(p.length<2)return '';let d=`M${p[0]}`;for(let i=1;i<p.length;i++){const a=p[i-1],b=p[i],dx=(b[0]-a[0])/3;d+=` C${a[0]+dx},${a[1]} ${b[0]-dx},${b[1]} ${b[0]},${b[1]}`}return d}
+function smoothPath(p){if(p.length<2)return '';let d=`M${p[0][0]},${p[0][1]}`;for(let i=1;i<p.length;i++){d+=` L${p[i][0]},${p[i][1]}`}return d}
 function chartSVG(points,color,fill=true){if(points.length<2)return '';const p=chartGeometry(points),d=smoothPath(p),gid='chart-'+uid();return `<svg style="direction:ltr" viewBox="0 0 640 180" preserveAspectRatio="none" role="img" aria-label="تاریخچه واقعی قیمت؛ زمان از چپ به راست"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop stop-color="${color}" stop-opacity=".24"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${fill?`<path d="${d} L${p.at(-1)[0]},180 L${p[0][0]},180 Z" fill="url(#${gid})"/>`:''}<path d="${d}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" vector-effect="non-scaling-stroke"/><g class="crosshair" visibility="hidden"><line y1="0" y2="180" stroke="${color}" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/><circle r="3" fill="${color}"/></g></svg>`}
 function paintChart(box, points, color, formatter) {
   points = points.filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1])).sort((a, b) => a[0] - b[0]);
@@ -3399,14 +3442,7 @@ function renderSnapshots(box, range) {
       const elapsed = Math.max(0, Math.min(1, (t - hTime) / duration));
 
       const baseUnit = h.buyPrice + elapsed * (currentUnitVal - h.buyPrice);
-
-      const days = Math.floor(t / 86400);
-      const seed = ((h.assetId.charCodeAt(0) * 31 + days * 19) % 100) / 100;
-      const wave = Math.sin(days * 0.42 + (a.name.charCodeAt(0) || 1)) * 0.035 + (seed - 0.5) * 0.02;
-      const envelope = Math.sin(elapsed * Math.PI);
-      const unitValAtT = Math.max(0, baseUnit * (1 + wave * envelope));
-
-      valAtT += h.qty * unitValAtT;
+      valAtT += h.qty * Math.max(0, baseUnit);
     }
 
     if (i === count) {
@@ -3418,7 +3454,20 @@ function renderSnapshots(box, range) {
 
   paintChart(box, points, 'var(--primary)', money);
 }
-function renderPositions(){const box=$('#positions');if(!box)return;box.innerHTML=safeLedger().positions.map(p=>{const a=asset(p.assetId),value=p.qty*quoteToman(a),pl=value-p.cost,t=assetTitles(a);return `<article class="holding"><div><b>${t.isCrypto?`${escapeHtml(t.title)} <span style="font-size:11px;font-weight:500;color:var(--muted)">(${escapeHtml(t.sub)})</span>`:escapeHtml(t.title)}</b><div class="table-note">موجودی: ${qtyFmt.format(p.qty)} · میانگین خرید: ${money(p.cost/p.qty)}</div><div class="table-note">${Object.entries(p.wallets).filter(([w,q])=>q>1e-10).map(([w,q])=>escapeHtml(w)+': '+qtyFmt.format(q)).join(' · ')}</div></div><div class="holding-right"><b>${value>0?money(value):'—'}</b><small>سود/زیان باز: ${value>0?money(pl):'نامشخص'}</small></div></article>`}).join('')}
+function assetQtyUnit(a) {
+  if (!a) return '';
+  const id = String(a.id || '').toLowerCase();
+  const name = String(a.name || '');
+  if (id === 'gold18' || id === 'gold24' || id === 'melted' || id.startsWith('gold') || id === 'silver999' || name.includes('عیار') || (a.cat === 'gold' && !id.includes('coin') && id !== 'bahar' && id !== 'gram')) {
+    return 'گرم';
+  }
+  if (id === 'coin' || id === 'bahar' || id === 'halfcoin' || id === 'quartercoin' || id === 'gramcoin') {
+    return 'عدد';
+  }
+  return a.symbol || '';
+}
+
+function renderPositions(){const box=$('#positions');if(!box)return;box.innerHTML=safeLedger().positions.map(p=>{const a=asset(p.assetId),value=p.qty*quoteToman(a),pl=value-p.cost,t=assetTitles(a),u=assetQtyUnit(a);return `<article class="holding"><div><b>${t.isCrypto?`${escapeHtml(t.title)} <span style="font-size:11px;font-weight:500;color:var(--muted)">(${escapeHtml(t.sub)})</span>`:escapeHtml(t.title)}</b><div class="table-note">موجودی: ${qtyFmt.format(p.qty)} ${u} · میانگین خرید: ${money(p.cost/p.qty)}</div><div class="table-note">${Object.entries(p.wallets).filter(([w,q])=>q>1e-10).map(([w,q])=>escapeHtml(w)+': '+qtyFmt.format(q)).join(' · ')}</div></div><div class="holding-right"><b>${value>0?money(value):'—'}</b><small>سود/زیان باز: ${value>0?money(pl):'نامشخص'}</small></div></article>`}).join('')}
 function updateSummary(){
   const positions=safeLedger().positions, v=totalValue(), p=pnl(), missing=positions.some(p=>!(asset(p.assetId).price>0)||asset(p.assetId).currency!=='IRT'&&!(asset('usdt').price>0));
   if ($('#homeValue')) $('#homeValue').innerHTML = missing ? 'ارزش در دسترس نیست' : money(v);
@@ -3979,7 +4028,7 @@ function renderFeatured(){if(fd)return;$('#featuredGrid').innerHTML=state.featur
 function featuredPicker(){
   const MAX=24;
   let sel=state.featured.slice();
-  openModal('ارزهای منتخب',`<p class="muted" style="font-size:11.5px;margin:0 0 10px">هر ارزی را خواستی تیک بزن (تا ${fmt.format(MAX)} ارز). انتخاب‌شده: <b id="featCount"></b></p><div class="asset-picker"><input id="featSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی" style="margin-bottom:8px;height:40px"><div class="asset-picker-list" id="featList">${assets.map(a=>{const t=assetTitles(a);return `<button type="button" class="asset-option" role="checkbox" aria-checked="${sel.includes(a.id)}" data-feat="${a.id}" data-search="${normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+getCryptoFullName(a)+' '+a.id)}">${assetIcon(a)}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="check-box"></span></button>`}).join('')}</div></div><div class="form-actions" style="margin-top:14px"><button class="btn btn-dark" type="button" id="featSave">ذخیره</button><button class="btn btn-soft" type="button" id="featCancel">انصراف</button></div>`);
+  openModal('ارزهای منتخب',`<p class="muted" style="font-size:11.5px;margin:0 0 10px">هر ارزی را خواستی تیک بزن (تا ${fmt.format(MAX)} ارز). انتخاب‌شده: <b id="featCount"></b></p><div class="asset-picker"><input id="featSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی" style="margin-bottom:8px;height:40px"><div class="asset-picker-list" id="featList">${sortAssetsStandard(assets).map(a=>{const t=assetTitles(a);return `<button type="button" class="asset-option" role="checkbox" aria-checked="${sel.includes(a.id)}" data-feat="${a.id}" data-search="${normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+getCryptoFullName(a)+' '+a.id)}">${assetIcon(a)}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="check-box"></span></button>`}).join('')}</div></div><div class="form-actions" style="margin-top:14px"><button class="btn btn-dark" type="button" id="featSave">ذخیره</button><button class="btn btn-soft" type="button" id="featCancel">انصراف</button></div>`);
   const count=()=>{$('#featCount').textContent=fmt.format(sel.length)+' از '+fmt.format(MAX)};
   count();
   $('#featList').onclick=e=>{
@@ -4556,6 +4605,7 @@ function applyPrices(items){let n=0,added=0,sig=0;const now=Date.now()/1000;
       n++;
     }
   }
+  if (added) assets = sortAssetsStandard(assets);
   return {n,added,sig};
 }
 function savePriceCache(items){
@@ -4624,33 +4674,16 @@ function paintLivePrices(){document.querySelectorAll('[data-detail]').forEach(el
 let chartReq=0;const RANGE_LABEL={'1H':'۶۰ دقیقه قبل','1D':'ابتدای روز','3D':'۳ روز قبل','1W':'یک هفته قبل','1M':'یک ماه قبل','1Y':'یک سال قبل'};
 async function loadChart(a,r){const req=++chartReq,box=$('#detailChart');box.innerHTML='<span class="muted">در حال دریافت تاریخچه…</span>';const pts=await getHistory(a.id,r);if(req!==chartReq||!$('#detailChart'))return;detailState={id:a.id,range:r,points:pts};drawDetail();}
 let detailState=null;
-function drawDetail(){if(!detailState||!$('#detailChart'))return;const a=asset(detailState.id),pts=withCurrent(detailState.points,a);paintChart($('#detailChart'),pts,a.color||'#7357ff',n=>quote(a,n));$('#detailNote').textContent=pts.length>=2?'تاریخچهٔ واقعی قیمت · منحنی نرم بین نقاط ثبت‌شده':'';$('#detailRangeStart').textContent=pts.length?new Date(pts[0][0]*1000).toLocaleString('fa-IR',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—';const cap=$('.detail-chart-caption');if(cap)cap.style.direction='ltr';const end=cap?.lastElementChild;if(end)end.textContent=pts.length?new Date(pts.at(-1)[0]*1000).toLocaleTimeString('fa-IR',{hour:'2-digit',minute:'2-digit'}):'—';}
+function drawDetail(){if(!detailState||!$('#detailChart'))return;const a=asset(detailState.id),pts=withCurrent(detailState.points,a);paintChart($('#detailChart'),pts,a.color||'#7357ff',n=>quote(a,n));$('#detailNote').textContent=pts.length>=2?'تاریخچهٔ واقعی قیمت':'';$('#detailRangeStart').textContent=pts.length?new Date(pts[0][0]*1000).toLocaleString('fa-IR',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}):'—';const cap=$('.detail-chart-caption');if(cap)cap.style.direction='ltr';const end=cap?.lastElementChild;if(end)end.textContent=pts.length?new Date(pts.at(-1)[0]*1000).toLocaleTimeString('fa-IR',{hour:'2-digit',minute:'2-digit'}):'—';}
 const histories=new Map(),historyBusy=new Map();
 async function getHistory(id,range='1D'){const key=id+':'+range,old=histories.get(key);if(old&&Date.now()-old.at<60000)return old.points;if(historyBusy.has(key))return historyBusy.get(key);const job=api(`/api/history?id=${encodeURIComponent(id)}&range=${range}`).then(j=>{const points=Array.isArray(j.points)?j.points.filter(p=>p.length===2&&p.every(Number.isFinite)).sort((a,b)=>a[0]-b[0]):[];if(!points.length&&old?.points?.length)return old.points;histories.set(key,{at:Date.now(),points});return points}).catch(()=>old?.points||[]).finally(()=>historyBusy.delete(key));historyBusy.set(key,job);return job;}
 function withCurrent(points, a) {
   if (!a || !(a.price > 0)) return points || [];
   const now = a.updatedAt || Math.floor(Date.now() / 1000);
   if (!points || points.length < 2) {
-    const pts = [];
     const ch = Number.isFinite(a.change) ? a.change : 0;
     const open = a.price / (1 + ch / 100);
-    const span = 86400;
-    let seed = 0;
-    const idStr = String(a.id || a.symbol || '');
-    for (let j = 0; j < idStr.length; j++) seed = (seed * 31 + idStr.charCodeAt(j)) & 0xffffff;
-    const phase1 = (seed % 100) / 100 * Math.PI * 2;
-    const phase2 = ((seed >> 4) % 100) / 100 * Math.PI * 2;
-    const ampl = Math.abs(a.price - open) * 0.28 + a.price * 0.005;
-
-    for (let i = 0; i <= 24; i++) {
-      const f = i / 24;
-      const t = now - Math.floor((1 - f) * span);
-      const wave = Math.sin(f * Math.PI * 2 + phase1) * 0.6 + Math.sin(f * Math.PI * 4 + phase2) * 0.4;
-      const baseTrend = open + f * (a.price - open);
-      const p = (i === 0) ? open : (i === 24) ? a.price : Math.max(0, baseTrend + wave * ampl);
-      pts.push([t, p]);
-    }
-    return pts;
+    return [[now - 86400, open], [now, a.price]];
   }
   const last = points.at(-1);
   if (now > last[0]) {
@@ -4826,7 +4859,7 @@ function openConverterAssetModal(side) {
   const listItems = [
     { id: 'toman', name: 'تومان ایران', symbol: 'IRT / تومان', cat: 'domestic' },
     { id: 'rial', name: 'ریال ایران', symbol: 'IRR / ریال', cat: 'domestic' },
-    ...assets
+    ...sortAssetsStandard(assets)
   ];
 
   openModal(side === 'from' ? 'انتخاب ارز مبدأ' : 'انتخاب ارز مقصد', `
@@ -5024,47 +5057,8 @@ function renderMarket(){
   } else if (marketSort === 'name') {
     filtered.sort((a, b) => a.name.localeCompare(b.name, 'fa'));
   } else {
-    // Default: Pinned top assets first (دلار، بیت‌کوین، تتر، یورو، طلا ۱۸، سکه و...) then trading volume
-    const PINNED_ORDER = [
-      'usd',        // دلار آمریکا
-      'btc',        // بیت‌کوین
-      'usdt',       // تتر
-      'eur',        // یورو
-      'gold18',     // طلای ۱۸ عیار
-      'coin',       // سکه امامی
-      'bahar',      // سکه بهار آزادی
-      'halfcoin',   // نیم‌سکه
-      'quartercoin',// ربع‌سکه
-      'gram',       // طلای آب‌شده / مثقال
-      'eth',        // اتریوم
-      'sol',        // سولانا
-      'gbp',        // پوند انگلیس
-      'aed',        // درهم امارات
-      'try',        // لیر ترکیه
-      'bnb',        // بایننس کوین
-      'xrp',        // ریپل
-      'doge',       // دوج‌کوین
-      'gold24',     // طلای ۲۴ عیار
-      'silver',     // انس نقره
-      'silver999',  // نقره ۹۹۹
-      'sui',        // سویی
-      'ton',        // تون‌کوین
-      'pepe',       // پپه
-      'near',       // نیر پروتکل
-      'shib',       // شیبا اینو
-      'trx',        // ترون
-      'ada',        // کاردانو
-      'avax',       // آوالانچ
-      'link'        // چین‌لینک
-    ];
-    filtered.sort((a, b) => {
-      const idxA = PINNED_ORDER.indexOf(a.id);
-      const idxB = PINNED_ORDER.indexOf(b.id);
-      if (idxA !== -1 && idxB !== -1) return idxA - idxB;
-      if (idxA !== -1) return -1;
-      if (idxB !== -1) return 1;
-      return (b.vol || 0) - (a.vol || 0);
-    });
+    // اول ارزها، تتر، طلا و بیت‌کوین و سپس سایر رمزارزها
+    filtered = sortAssetsStandard(filtered);
   }
 
   const list = filtered.slice(0, marketLimit);
@@ -5214,7 +5208,7 @@ function renderPortfolio(){
         <div class="holding-meta">
           <div class="holding-title" dir="rtl">${a.name}</div>
           <div class="holding-sub-row">
-            <span class="holding-qty-badge" dir="ltr"><b>${qtyFmt.format(h.qty)}</b> <span class="holding-qty-sym">${a.symbol}</span></span>
+            <span class="holding-qty-badge" dir="auto"><b>${qtyFmt.format(h.qty)}</b> <span class="holding-qty-sym">${assetQtyUnit(a)}</span></span>
           </div>
         </div>
       </div>
@@ -6459,7 +6453,7 @@ function setupDragToScroll() {
   });
 }
 function assetPicker(selected='gold18',hid='buyAsset'){
-  return `<div class="asset-picker"><input id="assetSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی"><div class="asset-picker-list" id="assetPickerList" role="radiogroup" aria-label="انتخاب دارایی">${assets.map(a=>{const t=assetTitles(a);return `<button type="button" class="asset-option" role="radio" aria-checked="${a.id===selected}" data-pick-asset="${a.id}" data-search="${normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+getCryptoFullName(a)+' '+a.id)}">${assetIcon(a)}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="radio-dot"></span></button>`}).join('')}</div><input id="${hid}" type="hidden" value="${selected}"></div>`;
+  return `<div class="asset-picker"><input id="assetSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی"><div class="asset-picker-list" id="assetPickerList" role="radiogroup" aria-label="انتخاب دارایی">${sortAssetsStandard(assets).map(a=>{const t=assetTitles(a);return `<button type="button" class="asset-option" role="radio" aria-checked="${a.id===selected}" data-pick-asset="${a.id}" data-search="${normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+getCryptoFullName(a)+' '+a.id)}">${assetIcon(a)}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="radio-dot"></span></button>`}).join('')}</div><input id="${hid}" type="hidden" value="${selected}"></div>`;
 }
 function wireAssetPicker(){
   const search=$('#assetSearch'),list=$('#assetPickerList');
@@ -6921,7 +6915,7 @@ function updatePrivacyUI(){
 function togglePrivacy(){state.privacy=!state.privacy;persist();renderAll();updatePrivacyUI();}
 if ($('#privacyBtn')) $('#privacyBtn').onclick=togglePrivacy;
 if ($('#themeBtn')) $('#themeBtn').onclick=()=>{state.theme=state.theme==='dark'?'light':'dark';persist();renderAll()};
-if ($('#backupBtn')) $('#backupBtn').onclick=()=>download('darayi-backup.json',{version:6,exportedAt:new Date().toISOString(),state,snapshots});if ($('#exportBtn')) $('#exportBtn').onclick=$('#backupBtn').onclick;$('#importBtn').onclick=()=>$('#importFile').click();$('#importFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{const d=JSON.parse(await f.text()),s=d.state||d;if(!Array.isArray(s.holdings)||!Array.isArray(s.watch))throw Error('invalid');const oldState=state;state={...state,...s,user:state.user};sanitizeState();try{ledger()}catch(e){state=oldState;throw e}if(Array.isArray(d.snapshots))snapshots=d.snapshots.filter(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite));persist();renderAll();toast('پشتیبان بازیابی شد')}catch{toast('فایل پشتیبان معتبر نیست')}e.target.value=''};$('#clearData').onclick=()=>{askConfirm('همهٔ خریدها، هشدارها و تنظیمات ذخیره‌شده حذف شوند؟',()=>{try{localStorage.removeItem('darayi-v5')}catch{}snapshots=[];try{localStorage.removeItem('darayi-valuations-v1')}catch{};state={holdings:[],watch:[],alerts:[],featured:['usd','gold18','btc','usdt','eur','sol'],theme:'light',unit:'toman',privacy:false,filter:'all',query:''};renderAll();toast('اطلاعات این دستگاه پاک شد')})};
+if ($('#backupBtn')) $('#backupBtn').onclick=()=>download('darayi-backup.json',{version:6,exportedAt:new Date().toISOString(),state,snapshots});if ($('#exportBtn')) $('#exportBtn').onclick=$('#backupBtn').onclick;$('#importBtn').onclick=()=>$('#importFile').click();$('#importFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{const d=JSON.parse(await f.text()),s=d.state||d;if(!Array.isArray(s.holdings)||!Array.isArray(s.watch))throw Error('invalid');const oldState=state;state={...state,...s,user:state.user};sanitizeState();try{ledger()}catch(e){state=oldState;throw e}if(Array.isArray(d.snapshots))snapshots=d.snapshots.filter(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite));persist();renderAll();toast('پشتیبان بازیابی شد')}catch{toast('فایل پشتیبان معتبر نیست')}e.target.value=''};$('#clearData').onclick=()=>{askConfirm('همهٔ خریدها، هشدارها و تنظیمات ذخیره‌شده حذف شوند؟',()=>{try{localStorage.removeItem('darayi-v5')}catch{}snapshots=[];try{localStorage.removeItem('darayi-valuations-v1')}catch{};state={holdings:[],watch:[],alerts:[],featured:['usd','usdt','gold18','btc','eur','gbp','try','cad','coin'],theme:'light',unit:'toman',privacy:false,filter:'all',query:''};renderAll();toast('اطلاعات این دستگاه پاک شد')})};
 const cardObserver=new MutationObserver(()=>{hydrateSparks()});['#marketGrid','#featuredGrid','#winners','#losers'].forEach(sel=>{const el=$(sel);if(el)cardObserver.observe(el,{childList:true});});loadPriceCache();loadCryptoIconsOnce();setupFeaturedDrag();setupDragToScroll();renderAll();
 let splashPending = false;
 try { splashPending = !sessionStorage.getItem('darayi_splashed') && !!document.getElementById('coin-splash'); } catch (e) {}

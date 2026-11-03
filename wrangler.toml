@@ -15,7 +15,7 @@ database_name = "darayi-db"
 database_id = "d899a07a-a59f-4cf0-aa83-b14d67e02e8f"
 
 [triggers]
-crons = ["* * * * *"]
+crons = ["*/5 * * * *", "17 3 * * *"]
 
 [vars]
 APP_URL = "https://darayi.clearworks.workers.dev"

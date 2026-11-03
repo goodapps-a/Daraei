@@ -2,7 +2,7 @@
 // اصلاح‌شده و بهینه‌سازی‌شده برای پلن رایگان کلادفلر و رفع تمام باگ‌های دریافت قیمت
 
 export const ASSETS = {
-  usd: 'دلار آمریکا', eur: 'یورو', gbp: 'پوند انگلیس', aed: 'درهم امارات', try: 'لیر ترکیه',
+  usd: 'دلار آمریکا', eur: 'یورو', gbp: 'پوند انگلیس', aed: 'درهم امارات', try: 'لیر ترکیه', cad: 'دلار کانادا',
   gold18: 'طلای ۱۸ عیار', gold24: 'طلای ۲۴ عیار', coin: 'سکه امامی', halfcoin: 'نیم‌سکه', gram: 'طلای آب‌شده',
   btc: 'بیت‌کوین', eth: 'اتریوم', usdt: 'تتر', sol: 'سولانا', bnb: 'بایننس کوین', xrp: 'ریپل',
   silver: 'نقره جهانی', sp500: 'شاخص S&P 500',
@@ -213,11 +213,18 @@ const json = (o, status = 200, h = {}) => new Response(JSON.stringify(o), { stat
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 const isEmail = (e) => typeof e === 'string' && e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
 
+const inMemoryRateLimits = new Map();
 async function rateLimit(env, key, limit, windowS) {
-  if (!env.DB) return;
-  const win = Math.floor(nowS() / windowS);
-  const r = await env.DB.prepare('INSERT INTO rate_limits(k,n,win) VALUES(?,1,?) ON CONFLICT(k) DO UPDATE SET n=CASE WHEN win=excluded.win THEN n+1 ELSE 1 END, win=excluded.win RETURNING n').bind(key, win).first();
-  if (r && r.n > limit) throw new HttpError(429, 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کن.');
+  const now = nowS();
+  const cur = inMemoryRateLimits.get(key);
+  if (!cur || now >= cur.resetAt) {
+    inMemoryRateLimits.set(key, { count: 1, resetAt: now + windowS });
+    return;
+  }
+  cur.count++;
+  if (cur.count > limit) {
+    throw new HttpError(429, 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کن.');
+  }
 }
 
 // ---------- ارسال ایمیل (Gmail Apps Script / Resend / Cloudflare) ----------
@@ -269,7 +276,7 @@ async function currentUser(req, env) {
   const u = await env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(h, now).first();
   if (u) {
     u.isAdmin = (u.email && u.email.toLowerCase() === 'a.h.sh.t1381@gmail.com');
-    sessionUserCache.set(h, { user: u, exp: now + 60 });
+    sessionUserCache.set(h, { user: u, exp: now + 300 });
   }
   return u;
 }
@@ -485,7 +492,7 @@ async function loadData(env, uid) {
   const alerts = al.results.map((a) => ({ id: a.id.slice(uid.length + 1), assetId: a.asset_id, direction: a.direction, price: a.price, currency: a.currency, attempts: a.attempts, triggeredAt: a.triggered_at ? a.triggered_at * 1000 : null }));
   const res = !d ? { exists: false, updatedAt: 0, data: { holdings: [], watch: [], featured: [], alerts, settings: {} } }
                  : { exists: true, updatedAt: d.updated_at, data: { holdings: JSON.parse(d.holdings), watch: JSON.parse(d.watch), featured: JSON.parse(d.featured), alerts, settings: JSON.parse(d.settings) } };
-  userDataCache.set(uid, { val: res, exp: now + 120 });
+  userDataCache.set(uid, { val: res, exp: now + 300 });
   return res;
 }
 function validateTransactions(records) {
@@ -525,6 +532,7 @@ async function saveData(env, uid, body) {
   const out = await env.DB.batch(stmts);
   if (!out[0].meta.changes) throw new HttpError(409, 'اطلاعات روی دستگاه دیگری تغییر کرده است.');
   userDataCache.delete(uid);
+  hasActiveAlertsCache = null;
   return loadData(env, uid);
 }
 async function deleteAccount(env, user) {
@@ -541,7 +549,7 @@ const kvGet = async (env, k) => env.DB ? env.DB.prepare('SELECT v,updated_at FRO
 const kvPut = async (env, k, v, t) => env.DB ? env.DB.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at').bind(k, JSON.stringify(v), t).run() : null;
 const getPrices = async (env) => {
   const t = nowS();
-  if (inMemoryPrices && (t - inMemoryPricesTime < 180)) {
+  if (inMemoryPrices && (t - inMemoryPricesTime < 300)) {
     return inMemoryPrices;
   }
   if (!env.DB) return inMemoryPrices || { updatedAt: 0, items: {} };
@@ -897,33 +905,21 @@ export async function refreshPrices(env, force = false) {
 
     await Promise.allSettled([domestic(), cryptoFeed()]);
 
-    const histDue = t - (feeds.histAt || 0) >= 7200;
-    if (histDue) feeds.histAt = t;
-    const shouldSaveD1 = force || !feeds.lastD1Save || (t - (feeds.lastD1Save || 0) >= 600);
-    if (shouldSaveD1) feeds.lastD1Save = t;
+    const shouldSaveD1 = force || (t - (feeds.lastD1Save || 0) >= 14400);
     const data = { items, feeds, updatedAt: fresh.size ? t : prev.updatedAt || t, checkedAt: t };
     inMemoryPrices = data;
     inMemoryPricesTime = t;
 
     if (env.DB && shouldSaveD1) {
-      const stmts = [env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('prices',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at").bind(JSON.stringify(data), t)];
-      if (histDue) {
-        const ids = [...fresh].filter(id => !items[id].crypto && items[id].t);
-        for (let i = 0; i < ids.length; i += 30) {
-          const part = ids.slice(i, i + 30);
-          stmts.push(env.DB.prepare('INSERT OR IGNORE INTO price_history_v2(asset_id,t,price) VALUES ' + part.map(() => '(?,?,?)').join(',')).bind(...part.flatMap(id => [id, items[id].t, items[id].price])));
-        }
-      }
+      feeds.lastD1Save = t;
       try {
-        await env.DB.batch(stmts);
-      } catch (e) {
-        console.error('save batch failed, saving top items', e?.message);
-        // بهینه‌سازی ذخیره‌سازی برای جلوگیری از رد شدن در D1
         const compactItems = {};
         for (const [id, val] of Object.entries(items)) {
-          if (!val.crypto || (val.vol || 0) > 10000) compactItems[id] = val;
+          if (!val.crypto || (val.vol || 0) > 10000 || ASSETS[id]) compactItems[id] = val;
         }
         await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('prices',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at").bind(JSON.stringify({ ...data, items: compactItems }), t).run();
+      } catch (e) {
+        console.error('save prices to D1 failed:', e?.message);
       }
     }
     return { items, updated: [...fresh] };
@@ -940,7 +936,7 @@ async function archiveHistory(id, range) {
   try {
     const r = await fetch('https://nerkh.jahankhahan.shop/data/rates.json', {
       headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0 (personal portfolio app)' },
-      signal: AbortSignal.timeout(8000),
+      signal: AbortSignal.timeout(12000),
       cf: { cacheTtl: 3600, cacheEverything: true }
     });
     if (!r.ok) return [];
@@ -961,8 +957,7 @@ async function archiveHistory(id, range) {
       out.push([Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600, Number(v)]);
     }
     return out;
-  } catch (e) {
-    console.error('archiveHistory extract failed:', e.message);
+  } catch {
     return [];
   }
 }
@@ -975,10 +970,6 @@ async function history(env, url) {
 
   // ۱. تاریخچه رمزارزها
   if (it?.crypto) {
-    const key = 'h:' + id + ':' + range;
-    const row = await kvGet(env, key).catch(() => null);
-    const t = nowS();
-    if (row && t - row.updated_at < 90) return json({ id, range, currency: 'USDT', points: JSON.parse(row.v) });
     const [iv, lim] = KL[range], base = it.sym;
     for (const name of [...new Set([it.src, 'kucoin', 'okx', 'gate', 'binance'])]) {
       const src = SOURCES[name];
@@ -987,18 +978,16 @@ async function history(env, url) {
         const pair = name === it.src ? it.pair : name === 'binance' ? base + 'USDT' : name === 'gate' ? base + '_USDT' : base + '-USDT';
         const points = (await src.klines(pair, iv, lim)).filter(p => Number.isFinite(p[0]) && p[1] > 0).sort((a, b) => a[0] - b[0]);
         if (points.length >= 2) {
-          await kvPut(env, key, points, t).catch(() => {});
-          return json({ id, range, currency: 'USDT', source: name, points });
+          return json({ id, range, currency: 'USDT', source: name, points }, 200, { 'cache-control': 'public, max-age=120, stale-while-revalidate=300' });
         }
       } catch {}
     }
-    if (row) return json({ id, range, currency: 'USDT', points: JSON.parse(row.v), stale: true });
     return json({ id, range, currency: 'USDT', points: [], unavailable: true });
   }
 
   // ۲. تاریخچه طلا، سکه و ارزهای داخلی
   if (!Object.hasOwn(ASSETS, id) && !DOMESTIC_EXTRA[id]) throw new HttpError(400, 'پارامتر نامعتبر است.');
-  const span = RANGES[range], bucket = Math.max(60, Math.floor(span / 288));
+  const span = RANGES[range];
   const t = nowS();
   const curPrice = it?.price || 0;
   const curChange = Number.isFinite(it?.change) ? it.change : 0;
@@ -1010,8 +999,7 @@ async function history(env, url) {
     for (let i = 0; i <= count; i++) {
       const frac = i / count;
       const ptT = t - Math.floor((1 - frac) * spanSec);
-      const wave = Math.sin(frac * Math.PI) * 0.0025;
-      const p = openPrice + frac * (curPrice - openPrice) + curPrice * wave;
+      const p = openPrice + frac * (curPrice - openPrice);
       pts.push([ptT, Math.max(0, p)]);
     }
     pts[pts.length - 1] = [t, curPrice];
@@ -1019,27 +1007,19 @@ async function history(env, url) {
   };
 
   if (range === '1H') {
-    return json({ id, range, currency: it?.unit || 'IRT', points: generateIntraday(3600, 15) });
-  }
-
-  let points = [];
-  if (env.DB) {
-    try {
-      const r = await env.DB.prepare('SELECT MAX(t) AS t, AVG(price) AS price FROM price_history_v2 WHERE asset_id=? AND t>=? GROUP BY CAST(t*1.0/? AS INTEGER) ORDER BY t').bind(id, t - span, bucket).all();
-      points = r.results.map(p => [p.t, p.price]);
-    } catch {}
-  }
-  if (!points.length || points.at(-1)[0] - points[0][0] < span * 0.7) {
-    try {
-      const old = await archiveHistory(id, range);
-      if (old.length) points = [...old.filter(p => !points.length || p[0] < points[0][0]), ...points];
-    } catch (e) {
-      console.error('archive failed', e.message);
-    }
+    return json({ id, range, currency: it?.unit || 'IRT', points: generateIntraday(3600, 15) }, 200, { 'cache-control': 'public, max-age=60' });
   }
 
   if (range === '1D' && curPrice > 0) {
-    return json({ id, range, currency: it?.unit || 'IRT', points: generateIntraday(86400, 24) });
+    return json({ id, range, currency: it?.unit || 'IRT', points: generateIntraday(86400, 24) }, 200, { 'cache-control': 'public, max-age=120' });
+  }
+
+  let points = [];
+  try {
+    const old = await archiveHistory(id, range);
+    if (old.length) points = old;
+  } catch (e) {
+    console.error('archive failed', e.message);
   }
 
   if (curPrice > 0) {
@@ -1059,16 +1039,31 @@ async function history(env, url) {
 }
 
 let lastAlertCheckTime = 0;
+let hasActiveAlertsCache = null;
+let hasActiveAlertsCacheTime = 0;
+
 export async function checkAlerts(env, items) {
   if (!env.DB) return 0;
   if (!(env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET || env.RESEND_API_KEY && env.MAIL_FROM || env.EMAIL && env.MAIL_FROM)) return 0;
   const t = nowS();
-  if (t - lastAlertCheckTime < 300) return 0;
+  if (t - lastAlertCheckTime < 600) return 0;
   lastAlertCheckTime = t;
+
+  if (hasActiveAlertsCache === false && (t - hasActiveAlertsCacheTime < 1800)) {
+    return 0;
+  }
+
   try {
-    const alertCount = await env.DB.prepare('SELECT count(*) AS c FROM alerts WHERE triggered_at IS NULL').first();
-    if (!alertCount || !alertCount.c) return 0;
+    const alertExists = await env.DB.prepare('SELECT 1 FROM alerts WHERE triggered_at IS NULL LIMIT 1').first();
+    if (!alertExists) {
+      hasActiveAlertsCache = false;
+      hasActiveAlertsCacheTime = t;
+      return 0;
+    }
+    hasActiveAlertsCache = true;
+    hasActiveAlertsCacheTime = t;
   } catch { return 0; }
+
   let sent = 0;
   const rows = (await env.DB.prepare(`SELECT a.id,a.asset_id,a.direction,a.price,a.attempts,COALESCE(c.currency,'IRT') AS currency,COALESCE(g.version,'legacy') AS version,u.email,u.name FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id LEFT JOIN alert_state g ON g.alert_id=a.id JOIN users u ON u.id=a.user_id LEFT JOIN alert_delivery d ON d.alert_id=a.id WHERE a.triggered_at IS NULL AND a.attempts<5 AND COALESCE(d.retry_at,0)<=unixepoch() AND COALESCE(d.lease_until,0)<=unixepoch()`).all()).results;
   for (const a of rows) {
@@ -1107,29 +1102,22 @@ export async function checkAlerts(env, items) {
 export async function runCron(env) {
   const { items } = await refreshPrices(env);
   const sent = await checkAlerts(env, items);
-  const t = nowS();
-  // اجرای پاکسازی دوره‌ای دیتابیس فقط یک‌بار در شبانه‌روز برای کاهش مصرف کوئری‌های D1
-  if (env.DB && (t - lastCronCleanupTime > 86400)) {
-    lastCronCleanupTime = t;
-    try {
-      await env.DB.batch([
-        env.DB.prepare('DELETE FROM alert_delivery WHERE NOT EXISTS(SELECT 1 FROM alerts WHERE id=alert_id)'),
-        env.DB.prepare('DELETE FROM alert_units WHERE NOT EXISTS(SELECT 1 FROM alerts WHERE id=alert_id)'),
-        env.DB.prepare('DELETE FROM alert_state WHERE NOT EXISTS(SELECT 1 FROM alerts WHERE id=alert_id)'),
-        env.DB.prepare('DELETE FROM sessions WHERE expires_at<?').bind(t),
-        env.DB.prepare('DELETE FROM otp_codes WHERE expires_at<?').bind(t),
-        env.DB.prepare('DELETE FROM oauth_states WHERE expires_at<?').bind(t),
-        env.DB.prepare('DELETE FROM price_history_v2 WHERE t<?').bind(t - 400 * 86400),
-        env.DB.prepare("DELETE FROM rate_limits WHERE ((k LIKE 'put:%' OR k LIKE 'key:%') AND win<?) OR ((k NOT LIKE 'put:%' AND k NOT LIKE 'key:%') AND win<?)").bind(Math.floor(t / 60) - 60, Math.floor(t / 900) - 4)
-      ]);
-    } catch {}
-  }
   return { sent };
 }
 
 export async function refreshMeta(env) {
   if (env.DB) {
-    try { await env.DB.prepare("DELETE FROM kv WHERE k LIKE 'h:%' AND updated_at<?").bind(nowS() - 86400).run(); } catch {}
+    const t = nowS();
+    try {
+      await env.DB.batch([
+        env.DB.prepare('DELETE FROM sessions WHERE expires_at<?').bind(t),
+        env.DB.prepare('DELETE FROM otp_codes WHERE expires_at<?').bind(t),
+        env.DB.prepare('DELETE FROM oauth_states WHERE expires_at<?').bind(t),
+        env.DB.prepare("DELETE FROM kv WHERE k LIKE 'h:%' AND updated_at<?").bind(t - 86400)
+      ]);
+    } catch (e) {
+      console.error('cleanup failed', e?.message);
+    }
   }
 }
 
@@ -1163,9 +1151,8 @@ async function route(req, env, url, ctx) {
           await refreshPrices(env, manual);
         } catch (e) {
           console.error('refresh failed', e?.message);
-          if (env.DB) {
-            try { await kvPut(env, 'last-error', { m: String(e?.message).slice(0, 160) }, nowS()); } catch {}
-          }
+          inMemoryLastError = String(e?.message).slice(0, 160);
+          inMemoryLastErrorTime = nowS();
         }
       })();
       if (manual || empty) {
@@ -1176,17 +1163,7 @@ async function route(req, env, url, ctx) {
       }
     }
     const out = publicPrices(prices);
-    const now = nowS();
-    if (env.DB) {
-      if (!inMemoryLastError || (now - inMemoryLastErrorTime > 300)) {
-        try {
-          const le = await kvGet(env, 'last-error');
-          inMemoryLastError = le ? JSON.parse(le.v).m : '';
-          inMemoryLastErrorTime = now;
-        } catch {}
-      }
-      if (inMemoryLastError) out.feeds = { ...(out.feeds || {}), lastError: inMemoryLastError };
-    }
+    if (inMemoryLastError) out.feeds = { ...(out.feeds || {}), lastError: inMemoryLastError };
     const headers = {
       'access-control-allow-origin': '*',
       'cache-control': manual ? 'no-store' : 'public, max-age=15, stale-while-revalidate=30'
@@ -1248,7 +1225,7 @@ function requireAdmin(user) {
   if (p === '/api/me' && m === 'GET') return json({ user: user ? { email: user.email, name: user.name, isAdmin: !!user.isAdmin, role: user.isAdmin ? 'admin' : 'user' } : null });
   if (p === '/api/broadcast' && m === 'GET') {
     const now = nowS();
-    if (inMemoryBroadcast && (now - inMemoryBroadcastTime < 60)) {
+    if (inMemoryBroadcast && (now - inMemoryBroadcastTime < 600)) {
       return json({ ok: true, message: inMemoryBroadcast.msg });
     }
     let msg = '';
