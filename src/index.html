@@ -3129,10 +3129,10 @@ if(!Array.isArray(state.holdings))state.holdings=[];state.holdings=state.holding
 if(!Array.isArray(state.watch))state.watch=[];state.watch=[...new Set(state.watch)].filter(ok);
 if(!Array.isArray(state.alerts))state.alerts=[];state.alerts=state.alerts.filter(a=>a&&ok(a.assetId)&&Number(a.price)>0&&(a.direction==='above'||a.direction==='below')).map(a=>({id:typeof a.id==='string'&&/^[A-Za-z0-9_-]{1,40}$/.test(a.id)?a.id.slice(0,40):uid(),assetId:a.assetId,direction:a.direction,price:Number(a.price),currency:['IRT','USD','USDT'].includes(a.currency)?a.currency:'IRT',attempts:Number(a.attempts)||0,triggeredAt:Number(a.triggeredAt)||null}));
 if(!Array.isArray(state.featured))state.featured=[];state.featured=[...new Set(state.featured)].filter(ok).slice(0,24);if(!state.featured.length)state.featured=['usd','usdt','gold18','btc','eur','gbp','try','cad','coin'];
-if(state.theme!=='dark')state.theme='light';if(state.unit!=='rial')state.unit='toman';state.privacy=!!state.privacy;if(!state.user||!state.user.remote)state.user=null;
+if(state.theme!=='dark')state.theme='light';if(state.unit!=='rial')state.unit='toman';state.privacy=!!state.privacy;if(!state.user||typeof state.user!=='object'||!state.user.email)state.user=null;else state.user.remote=true;
 if(!['all','currency','gold','crypto','global','watch'].includes(state.filter))state.filter='all';state.query=''}
 sanitizeState();
-function persist(){try{localStorage.setItem('darayi-v5',JSON.stringify({...state,user:null}));}catch{if(!(state.user&&state.user.remote))toast('ذخیره‌سازی مرورگر در دسترس نیست.')}scheduleSync()}function asset(id){return assets.find(a=>a.id===id)||{id,name:String(id).toUpperCase(),en:'',symbol:String(id).toUpperCase(),cat:'crypto',icon:(String(id)[0]||'?').toUpperCase(),price:0,change:0,color:'#8a8f88',source:'نمونه'}}function displayPrice(n){return fmtP((Number(n)||0)*(state.unit==='rial'?10:1))+(state.unit==='rial'?' ریال':' تومان')}function catName(c){return({currency:'ارز',gold:'طلا و سکه',crypto:'رمزارز',global:'جهانی'})[c]||c}function toast(t){const el=$('#toast');el.textContent=t;el.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.classList.remove('show'),2400)}
+function persist(){try{localStorage.setItem('darayi-v5',JSON.stringify(state));}catch{if(!(state.user&&state.user.remote))toast('ذخیره‌سازی مرورگر در دسترس نیست.')}scheduleSync()}function asset(id){return assets.find(a=>a.id===id)||{id,name:String(id).toUpperCase(),en:'',symbol:String(id).toUpperCase(),cat:'crypto',icon:(String(id)[0]||'?').toUpperCase(),price:0,change:0,color:'#8a8f88',source:'نمونه'}}function displayPrice(n){return fmtP((Number(n)||0)*(state.unit==='rial'?10:1))+(state.unit==='rial'?' ریال':' تومان')}function catName(c){return({currency:'ارز',gold:'طلا و سکه',crypto:'رمزارز',global:'جهانی'})[c]||c}function toast(t){const el=$('#toast');el.textContent=t;el.classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>el.classList.remove('show'),2400)}
 
 function countDecimals(val) {
   if (!Number.isFinite(val) || Math.floor(val) === val) return 0;
@@ -3261,13 +3261,14 @@ function quality(a){
 }
 const sparkSvgCache = new Map();
 function spark(a){
-  if (!a || (a.cat !== 'crypto' && a.id !== 'usdt')) {
-    return `<span data-spark="${a ? a.id : ''}" aria-hidden="true"></span>`;
+  if (!a || !a.id) {
+    return `<span data-spark="" aria-hidden="true"></span>`;
   }
+  const label = (a.cat === 'crypto' || a.id === 'usdt') ? 'نمودار ۲۴ ساعت' : 'نمودار هفتگی';
   if (sparkSvgCache.has(a.id)) {
-    return `<span data-spark="${a.id}" aria-label="نمودار ۲۴ ساعت">${sparkSvgCache.get(a.id)}</span>`;
+    return `<span data-spark="${a.id}" aria-label="${label}">${sparkSvgCache.get(a.id)}</span>`;
   }
-  return `<span data-spark="${a.id}" aria-label="نمودار ۲۴ ساعت"></span>`;
+  return `<span data-spark="${a.id}" aria-label="${label}"></span>`;
 }
 function lineChart(values,color='#d7ff61',fill=true){return chartSVG(values.map((v,i)=>[i,v]),color,fill)}
 function chartGeometry(points){const n=points.length,min=Math.min(...points.map(p=>p[1])),max=Math.max(...points.map(p=>p[1])),span=(max-min)||Math.max(Math.abs(min)*.01,1),t0=points[0][0],t1=points.at(-1)[0];return points.map((p,i)=>[8+(p[0]-t0)/(t1-t0||1)*624,168-(p[1]-min+span*.05)/(span*1.1)*150])}
@@ -4058,11 +4059,20 @@ function featuredPicker(){
     toast('ارزهای منتخب ذخیره شد');
   };
 }
-const api=async(path,opt={})=>{const r=await fetch(path,{credentials:'same-origin',...opt,headers:{...(opt.body?{'content-type':'application/json'}:{}),...(opt.headers||{})}});if(!(r.headers.get('content-type')||'').includes('json'))throw new Error('no_api');const j=await r.json();if(!r.ok){const e=new Error(j.error||'خطا');e.status=r.status;throw e}return j};
+const api=async(path,opt={})=>{
+  const authHeaders={};
+  if(state.user?.token)authHeaders['authorization']='Bearer '+state.user.token;
+  if(state.user?.email)authHeaders['x-auth-email']=state.user.email;
+  const r=await fetch(path,{credentials:'same-origin',...opt,headers:{...(opt.body?{'content-type':'application/json'}:{}),...authHeaders,...(opt.headers||{})}});
+  if(!(r.headers.get('content-type')||'').includes('json'))throw new Error('no_api');
+  const j=await r.json();
+  if(!r.ok){const e=new Error(j.error||'خطا');e.status=r.status;throw e}
+  return j;
+};
 let applying=false,syncTimer=0,syncDirty=false,syncWarned=false,remoteRevision=0,syncVersion=0,syncJob=null,syncConflict=false;
 const payload=()=>({baseRevision:remoteRevision,holdings:state.holdings,watch:state.watch,featured:state.featured,alerts:state.alerts.map(({id,assetId,direction,price,currency})=>({id,assetId,direction,price,currency})),settings:{theme:state.theme,unit:state.unit,privacy:state.privacy,filter:state.filter}});
 function scheduleSync(){if(!(state.user&&state.user.remote)||applying)return;syncDirty=true;syncVersion++;clearTimeout(syncTimer);syncTimer=setTimeout(pushRemote,700)}
-async function pushRemote(){if(!state.user?.remote||!syncDirty||syncConflict||syncJob)return;const version=syncVersion,body=JSON.stringify(payload());syncJob=true;try{const j=await api('/api/me/data',{method:'PUT',body});remoteRevision=j.updatedAt;syncDirty=syncVersion!==version;syncWarned=false;mergeTriggered(j.data.alerts);if(syncDirty)syncTimer=setTimeout(pushRemote,700)}catch(e){if(e.status===401){state.user=null;renderAll();toast('نشست تمام شد؛ دوباره وارد شو.');return}if(e.status===409){syncConflict=true;try{const j=await api('/api/me/data');showConflict(j)}catch{toast('برای بررسی تعارض، اتصال را برقرار کن.');syncConflict=false}return}if(!syncWarned){syncWarned=true;toast('همگام‌سازی انجام نشد؛ اطلاعات روی دستگاه حفظ شد.')}syncTimer=setTimeout(pushRemote,15000)}finally{syncJob=null;updateTrust()}}
+async function pushRemote(){if(!state.user?.remote||!syncDirty||syncConflict||syncJob)return;const version=syncVersion,body=JSON.stringify(payload());syncJob=true;try{const j=await api('/api/me/data',{method:'PUT',body});remoteRevision=j.updatedAt;syncDirty=syncVersion!==version;syncWarned=false;mergeTriggered(j.data.alerts);if(syncDirty)syncTimer=setTimeout(pushRemote,700)}catch(e){if(e.status===401){return}if(e.status===409){syncConflict=true;try{const j=await api('/api/me/data');showConflict(j)}catch{toast('برای بررسی تعارض، اتصال را برقرار کن.');syncConflict=false}return}if(!syncWarned){syncWarned=true;toast('همگام‌سازی انجام نشد؛ اطلاعات روی دستگاه حفظ شد.')}syncTimer=setTimeout(pushRemote,15000)}finally{syncJob=null;updateTrust()}}
 function showConflict(j){const local=structuredClone(payload()),remote=j.data;openModal('تغییر هم‌زمان اطلاعات',`<p>اطلاعات حساب روی دستگاه دیگری تغییر کرده است. نسخهٔ دلخواه را انتخاب کن. تغییرات تا انتخاب تو روی این دستگاه حفظ می‌شوند.</p><div class="settings-card"><b>این دستگاه: ${fmt.format(local.holdings.length)} معامله، ${fmt.format(local.alerts.length)} هشدار</b><br><b>حساب: ${fmt.format(remote.holdings.length)} معامله، ${fmt.format(remote.alerts.length)} هشدار</b><div style="max-height:220px;overflow:auto">${local.holdings.map(h=>{const r=remote.holdings.find(x=>x.id===h.id);return !r||JSON.stringify(r)!==JSON.stringify(h)?'<p>'+escapeHtml(asset(h.assetId).name)+' · '+escapeHtml(h.date||'')+' · مقدار '+fmt.format(h.qty)+' · '+money(h.buyPrice)+'</p>':''}).join('')}</div></div><div class="form-actions"><button class="btn btn-dark" id="confLocal">نسخهٔ این دستگاه جایگزین حساب شود</button><button class="btn btn-soft" id="confRemote">نسخهٔ حساب جایگزین این دستگاه شود</button></div><button class="link-btn" id="confBackup">پشتیبان نسخهٔ این دستگاه</button>`);$('#confBackup').onclick=()=>download('darayi-before-sync.json',{version:6,state});$('#confLocal').onclick=()=>{remoteRevision=j.updatedAt;syncConflict=false;syncDirty=true;closeModal();pushRemote()};$('#confRemote').onclick=()=>{remoteRevision=j.updatedAt;syncDirty=false;syncConflict=false;applyRemote(remote);closeModal()};}
 async function pollRemote(){if(!state.user?.remote||syncDirty||syncJob||syncConflict)return;try{const j=await api('/api/me/data');if(j.updatedAt!==remoteRevision){remoteRevision=j.updatedAt;applyRemote(j.data)}else mergeTriggered(j.data.alerts)}catch{}}
 function mergeTriggered(list){let ch=false;for(const a of state.alerts){const r=list.find(x=>x.id===a.id);if(r&&((r.triggeredAt||null)!==a.triggeredAt||(r.attempts||0)!==(a.attempts||0))){a.triggeredAt=r.triggeredAt||null;a.attempts=r.attempts||0;ch=true}}if(ch){applying=true;persist();applying=false;renderAlertsPreview()}}
@@ -4070,7 +4080,7 @@ function applyRemote(d){applying=true;state.holdings=d.holdings;state.watch=d.wa
 async function afterLogin(){try{const j=await api('/api/me/data');remoteRevision=j.updatedAt||0;if(!j.exists){syncDirty=true;await pushRemote();return}const local=payload(),remote=j.data;const sig=x=>JSON.stringify([x.holdings,x.watch,x.featured,x.alerts.map(({id,assetId,direction,price,currency})=>({id,assetId,direction,price,currency:currency||'IRT'}))]);if((state.holdings.length||state.watch.length||state.alerts.length)&&sig(local)!==sig(remote)){syncConflict=true;showConflict(j)}else applyRemote(remote)}catch{toast('دریافت اطلاعات حساب انجام نشد؛ اطلاعات این دستگاه حفظ شد.')}}
 async function checkSession(welcome){const q=new URLSearchParams(location.search),ae=q.get('auth_error');if(ae||q.get('login_token'))history.replaceState(null,'',location.pathname);
 if(ae)toast(({denied:'ورود با گوگل لغو شد.',state:'ورود منقضی شد؛ دوباره تلاش کن.',token:'ورود با گوگل ناموفق بود.',claims:'حساب گوگل تأیید نشد.',invalid:'درخواست ورود نامعتبر بود.'})[ae]||'ورود ناموفق بود.');
-try{const j=await api('/api/me');if(j.user){const isAdm = !!j.user.isAdmin || String(j.user.email||'').toLowerCase() === 'a.h.sh.t1381@gmail.com'; state.user={name:j.user.name||j.user.email.split('@')[0],email:j.user.email,role:j.user.role||(isAdm?'admin':'user'),isAdmin:isAdm,remote:true};renderAll();await afterLogin();if(welcome)toast('خوش آمدی '+state.user.name)}}catch{}}
+try{const j=await api('/api/me');if(j.user){const isAdm = !!j.user.isAdmin || String(j.user.email||'').toLowerCase() === 'a.h.sh.t1381@gmail.com'; state.user={name:j.user.name||j.user.email.split('@')[0],email:j.user.email,role:j.user.role||(isAdm?'admin':'user'),isAdmin:isAdm,token:j.token||state.user?.token||null,remote:true};persist();renderAll();await afterLogin();if(welcome)toast('خوش آمدی '+state.user.name)}else if(state.user&&state.user.remote){renderAll();}}catch{if(state.user&&state.user.remote)renderAll();}}
 const faDigits=v=>String(v).replace(/[۰-۹]/g,d=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d));
 const emailRe=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const eyeSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>`;
@@ -4090,7 +4100,7 @@ function authWire(go){
   $$('#modalBody input').forEach(i=>i.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();go()}}));
 }
 const authErr=(m,t)=>{m.className='auth-msg err';m.textContent=t};
-async function authCall(path,body,btn,msg){btn.disabled=true;msg.className='auth-msg';msg.textContent='لطفاً صبر کن…';try{const j=await api(path,{method:'POST',body:JSON.stringify(body)});msg.textContent='';return j}catch(e){authErr(msg,e.message==='no_api'?'سرور در دسترس نیست؛ ورود فقط در نسخهٔ منتشرشده کار می‌کند.':e.message);return null}finally{btn.disabled=false}}
+async function authCall(path,body,btn,msg){btn.disabled=true;msg.className='auth-msg';msg.textContent='لطفاً صبر کن…';try{const j=await api(path,{method:'POST',body:JSON.stringify(body)});if(j&&(j.user||j.token)){const u=j.user||{email:body?.email||state.user?.email||''};const isAdm=!!u.isAdmin||String(u.email||'').toLowerCase()==='a.h.sh.t1381@gmail.com';if(u.email){state.user={name:u.name||u.email.split('@')[0],email:u.email,role:u.role||(isAdm?'admin':'user'),isAdmin:isAdm,token:j.token||state.user?.token||null,remote:true};persist();}}msg.textContent='';return j}catch(e){authErr(msg,e.message==='no_api'?'سرور در دسترس نیست؛ ورود فقط در نسخهٔ منتشرشده کار می‌کند.':e.message);return null}finally{btn.disabled=false}}
 const authDone=async(t)=>{
   closeModal();
   await checkSession(true);
@@ -4283,6 +4293,9 @@ function handleGoogleSignIn(prefillEmail = '') {
     try {
       const res = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password: email }) });
       if (res && res.user) {
+        const isAdm = !!res.user.isAdmin || String(res.user.email || '').toLowerCase() === 'a.h.sh.t1381@gmail.com';
+        state.user = { name: res.user.name || email.split('@')[0], email: res.user.email || email, role: res.user.role || (isAdm ? 'admin' : 'user'), isAdmin: isAdm, token: res.token || null, remote: true };
+        persist();
         authDone('با موفقیت وارد شدید');
         return;
       }
@@ -4543,6 +4556,7 @@ function loginForm() {
     state.user = null;
     clearTimeout(syncTimer);
     syncDirty = false;
+    persist();
     renderAll();
     closeModal();
     toast('از حساب خارج شدی');
@@ -4553,6 +4567,7 @@ function loginForm() {
       await api('/api/me', { method: 'DELETE' });
       state.user = null;
       syncDirty = false;
+      persist();
       renderAll();
       toast('حساب با موفقیت حذف شد');
     } catch {
@@ -4597,7 +4612,10 @@ function applyPrices(items){let n=0,added=0,sig=0;const now=Date.now()/1000;
         a.en = cleanDisplayName(sy, a.en);
       }
       if(a.cat==='crypto'&&a.id!=='usdt'&&(i.currency||'IRT')==='USDT'&&a.updatedAt>i.updatedAt)continue;
-      Object.assign(a,{price:i.price,change:i.change,currency:i.currency||'IRT',updatedAt:i.updatedAt,stale:!!i.stale||now-i.updatedAt>(i.currency==='USDT'?150:1800),vol:i.volume||0,pair:i.pair,source:'live'});
+      const nextChange = (Number.isFinite(i.change) && (i.change !== 0 || a.price !== i.price || !Number.isFinite(a.change)))
+        ? i.change
+        : (Number.isFinite(a.change) ? a.change : i.change);
+      Object.assign(a,{price:i.price,change:nextChange,currency:i.currency||'IRT',updatedAt:i.updatedAt,stale:!!i.stale||now-i.updatedAt>(i.currency==='USDT'?150:1800),vol:i.volume||0,pair:i.pair,source:'live'});
       n++;
     }
   }
@@ -4609,7 +4627,11 @@ function savePriceCache(items){
     const o = JSON.parse(localStorage.getItem(PRICE_CACHE) || '{}') || {};
     for(const [id,i] of Object.entries(items || {})){
       if (i && i.price > 0) {
-        o[id] = [i.price, i.change, i.updatedAt, i.currency, i.kind, i.name, i.symbol, i.cat, i.volume, i.pair];
+        const prevArr = o[id];
+        const chg = (Number.isFinite(i.change) && i.change !== 0)
+          ? i.change
+          : (Array.isArray(prevArr) && prevArr[0] === i.price && Number.isFinite(prevArr[1]) && prevArr[1] !== 0 ? prevArr[1] : i.change);
+        o[id] = [i.price, chg, i.updatedAt, i.currency, i.kind, i.name, i.symbol, i.cat, i.volume, i.pair];
       }
     }
     localStorage.setItem(PRICE_CACHE, JSON.stringify(o));
@@ -4617,7 +4639,10 @@ function savePriceCache(items){
 }
 function loadPriceCache(){
   try{
-    const o = JSON.parse(localStorage.getItem(PRICE_CACHE) || '{}') || {}, items = {};
+    const o3 = JSON.parse(localStorage.getItem('darayi-prices-v3') || '{}') || {};
+    const o4 = JSON.parse(localStorage.getItem(PRICE_CACHE) || '{}') || {};
+    const o = { ...o3, ...o4 };
+    const items = {};
     for(const [id,v] of Object.entries(o)){
       if (Array.isArray(v) && v[0] > 0 && v[2] > 0) {
         items[id] = {price:v[0], change:v[1], updatedAt:v[2], currency:v[3], kind:v[4], name:v[5], symbol:v[6], cat:v[7], volume:v[8], pair:v[9], stale:true};
@@ -4629,7 +4654,7 @@ function loadPriceCache(){
 }
 let lastPriceFetchTime = Date.now();
 async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);sparkSvgCache.clear();}
-state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();}lastPriceSig=sig;snapshot();updateTrust();hydrateSparks();if(manual)toast(n?'دریافت انجام شد؛ زمان هر قیمت روی کارت مشخص است.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
+state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();}lastPriceSig=sig;snapshot();updateTrust();hydrateSparks();if(manual)toast(n?'دریافت انجام شد؛ زمان هر قیمت روی کارت مشخص است.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();hydrateSparks();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
 async function syncCrypto(){const buttons=[$('#syncNow'),$('#refreshBtn')];buttons.forEach(b=>b.disabled=true);try{await loadPrices(true)}finally{buttons.forEach(b=>b.disabled=false)}}
 let ws=null,wsTimer=0,wsAttempt=0,lastWs=0,wsPaint=0;
 const NON_CRYPTO_SYMS=new Set(['USD','EUR','GBP','TRY','CAD','AED','CNY','AUD','CHF','SAR','QAR','KWD','OMR','IQD','AFN','RUB','INR','JPY','BRL','AEUR','USDT','USDC','FDUSD','DAI']);
@@ -4642,7 +4667,7 @@ function validateClientHistory(rawPoints, range, a) {
   if (!span || !Array.isArray(rawPoints) || rawPoints.length < 2) return [];
   const now = Math.floor(Date.now() / 1000);
   const isDomestic = Boolean(a && a.cat !== 'crypto' && a.id !== 'usdt');
-  if (isDomestic && range !== '1W' && range !== '1M' && range !== '1Y') return [];
+  if (isDomestic && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
 
   const cleaned = [];
   for (const p of rawPoints) {
@@ -4668,31 +4693,31 @@ function validateClientHistory(rawPoints, range, a) {
   const refPrice = (a && a.price > 0) ? a.price : 0;
 
   if (isDomestic) {
-    const minTs = now - span - 43200;
+    const minTs = now - span - 86400;
     const pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 600);
-    const minReq = range === '1W' ? 4 : range === '1M' ? 15 : 200;
+    const minReq = range === '3D' ? 3 : range === '1W' ? 3 : range === '1M' ? 12 : 180;
     if (pts.length < minReq) return [];
     const firstTs = pts[0][0], lastTs = pts[pts.length - 1][0];
-    const maxStartLag = range === '1W' ? 3 * 86400 : range === '1M' ? 5 * 86400 : 12 * 86400;
-    const maxGap = range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
+    const maxStartLag = range === '3D' ? 2.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 15 * 86400;
+    const maxGap = range === '3D' ? 3.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
     if (firstTs > (now - span) + maxStartLag) return [];
-    if (now - lastTs > 4 * 86400) return [];
+    if (now - lastTs > 5 * 86400) return [];
     for (let i = 1; i < pts.length; i++) {
       if (pts[i][0] - pts[i - 1][0] > maxGap) return [];
       const ratio = pts[i][1] / pts[i - 1][1];
       if (ratio > 1.35 || ratio < 0.65) return [];
     }
-    if (refPrice > 0 && Math.abs(pts[pts.length - 1][1] - refPrice) / refPrice > 0.12) return [];
+    if (refPrice > 0 && Math.abs(pts[pts.length - 1][1] - refPrice) / refPrice > 0.15) return [];
     return pts;
   }
 
   const cfg = {
-    '1H': { step: 60, minPts: 45, maxStale: 900, maxGap: 600, minCov: 0.82 },
-    '1D': { step: 300, minPts: 20, maxStale: 7200, maxGap: 10800, minCov: 0.85 },
-    '3D': { step: 3600, minPts: 55, maxStale: 14400, maxGap: 21600, minCov: 0.85 },
-    '1W': { step: 14400, minPts: 35, maxStale: 28800, maxGap: 43200, minCov: 0.85 },
-    '1M': { step: 86400, minPts: 26, maxStale: 129600, maxGap: 172800, minCov: 0.85 },
-    '1Y': { step: 86400, minPts: 330, maxStale: 172800, maxGap: 259200, minCov: 0.88 }
+    '1H': { step: 60, minPts: 40, maxStale: 1800, maxGap: 900, minCov: 0.78 },
+    '1D': { step: 300, minPts: 18, maxStale: 10800, maxGap: 14400, minCov: 0.80 },
+    '3D': { step: 3600, minPts: 48, maxStale: 21600, maxGap: 28800, minCov: 0.80 },
+    '1W': { step: 14400, minPts: 32, maxStale: 43200, maxGap: 57600, minCov: 0.80 },
+    '1M': { step: 86400, minPts: 24, maxStale: 172800, maxGap: 259200, minCov: 0.80 },
+    '1Y': { step: 86400, minPts: 300, maxStale: 259200, maxGap: 345600, minCov: 0.85 }
   }[range];
   if (!cfg) return [];
 
@@ -4701,12 +4726,12 @@ function validateClientHistory(rawPoints, range, a) {
   if (pts.length < cfg.minPts) return [];
   const firstTs = pts[0][0], lastTs = pts[pts.length - 1][0];
   const actualSpan = lastTs - firstTs;
-  if (actualSpan < span * cfg.minCov || actualSpan > span * 1.08) return [];
+  if (actualSpan < span * cfg.minCov || actualSpan > span * 1.12) return [];
   if (now - lastTs > cfg.maxStale) return [];
   for (let i = 1; i < pts.length; i++) {
     if (pts[i][0] - pts[i - 1][0] > cfg.maxGap) return [];
   }
-  if (refPrice > 0 && Math.abs(pts[pts.length - 1][1] - refPrice) / refPrice > 0.05) return [];
+  if (refPrice > 0 && Math.abs(pts[pts.length - 1][1] - refPrice) / refPrice > 0.08) return [];
   return pts;
 }
 async function loadChart(a,r){const req=++chartReq,box=$('#detailChart');box.innerHTML='<span class="muted">در حال دریافت و راستی‌آزمایی تاریخچه…</span>';const pts=await getHistory(a.id,r);if(req!==chartReq||!$('#detailChart'))return;detailState={id:a.id,range:r,points:pts};drawDetail();}
@@ -4761,7 +4786,7 @@ function drawDetail(){
 const histories=new Map(),historyBusy=new Map();
 async function getHistory(id,range='1D'){
   const a=asset(id);
-  if(a&&a.cat!=='crypto'&&a.id!=='usdt'&&range!=='1W'&&range!=='1M'&&range!=='1Y')return [];
+  if(a&&a.cat!=='crypto'&&a.id!=='usdt'&&range!=='3D'&&range!=='1W'&&range!=='1M'&&range!=='1Y')return [];
   const key=id+':'+range,old=histories.get(key);
   if(old&&old.points?.length>=2&&Date.now()-old.at<60000){
     const validOld=validateClientHistory(old.points,range,a);
@@ -4772,8 +4797,22 @@ async function getHistory(id,range='1D'){
   const job=api(`/api/history?id=${encodeURIComponent(id)}&range=${range}`).then(j=>{
     const raw=Array.isArray(j.points)?j.points:[];
     const points=validateClientHistory(raw,range,asset(id));
-    if(points.length>=2)histories.set(key,{at:Date.now(),points});
-    else histories.delete(key);
+    if(points.length>=2){
+      histories.set(key,{at:Date.now(),points});
+      const curA=asset(id);
+      if(curA&&!(curA.price>0)){
+        const lastPt=points.at(-1),firstPt=points[0];
+        curA.price=lastPt[1];
+        curA.updatedAt=lastPt[0];
+        if(!Number.isFinite(curA.change)&&firstPt[1]>0){
+          curA.change=+(((lastPt[1]-firstPt[1])/firstPt[1])*100).toFixed(2);
+        }
+        curA.stale=(Date.now()/1000-lastPt[0])>(curA.currency==='USDT'?300:3600);
+        paintLivePrices();
+      }
+    } else {
+      histories.delete(key);
+    }
     return points;
   }).catch(()=>[]).finally(()=>historyBusy.delete(key));
   historyBusy.set(key,job);
@@ -4786,7 +4825,7 @@ function withCurrent(points, a, range = '1D') {
   if (!a || !(a.price > 0) || !a.updatedAt || isStale(a)) return valid;
   const now = Math.floor(a.updatedAt);
   const last = valid.at(-1);
-  const maxDiff = (a.cat === 'crypto' || a.id === 'usdt') ? 0.05 : 0.12;
+  const maxDiff = (a.cat === 'crypto' || a.id === 'usdt') ? 0.08 : 0.15;
   if (Math.abs(a.price - last[1]) / last[1] > maxDiff) return [];
   if (now > last[0]) {
     return validateClientHistory([...valid, [now, a.price]], range, a);
@@ -4798,9 +4837,45 @@ function withCurrent(points, a, range = '1D') {
   return valid;
 }
 let sparkActive=0;const sparkQueue=[];const sparkSeen=new Set();
-function drainSparks(){while(sparkActive<4&&sparkQueue.length){const id=sparkQueue.shift();sparkActive++;const a=asset(id);if(!a||(a.cat!=='crypto'&&a.id!=='usdt')){document.querySelectorAll('[data-spark="'+id+'"]').forEach(el=>{el.innerHTML='';});sparkActive--;sparkSeen.delete(id);continue;}getHistory(id,'1D').then(points=>{const curA=asset(id),p=withCurrent(points,curA,'1D');if(p.length>=2){const chg=p[0][1]>0?((p.at(-1)[1]-p[0][1])/p[0][1])*100:(curA.change||0);const svg=chartSVG(p,chg>=0?'#16865b':'#d84b55',false);sparkSvgCache.set(id,svg);document.querySelectorAll('[data-spark="'+id+'"]').forEach(el=>{el.innerHTML=svg;});}else{document.querySelectorAll('[data-spark="'+id+'"]').forEach(el=>{el.innerHTML='';});}}).finally(()=>{sparkActive--;sparkSeen.delete(id);drainSparks()})}}
+function drainSparks(){
+  while(sparkActive<4&&sparkQueue.length){
+    const id=sparkQueue.shift();
+    sparkActive++;
+    const a=asset(id);
+    if(!a||!a.id){
+      sparkActive--;
+      sparkSeen.delete(id);
+      continue;
+    }
+    const isCryptoOrUsdt=(a.cat==='crypto'||a.id==='usdt');
+    const targetRange=isCryptoOrUsdt?'1D':'1W';
+    getHistory(id,targetRange).then(async points=>{
+      let usedRange=targetRange;
+      let curA=asset(id);
+      let p=withCurrent(points,curA,usedRange);
+      if(p.length<2&&isCryptoOrUsdt){
+        usedRange='1W';
+        const fallbackPts=await getHistory(id,'1W');
+        curA=asset(id);
+        p=withCurrent(fallbackPts,curA,'1W');
+      }
+      if(p.length>=2){
+        const chg=Number.isFinite(curA.change)&&usedRange==='1D'?curA.change:(p[0][1]>0?((p.at(-1)[1]-p[0][1])/p[0][1])*100:0);
+        const svg=chartSVG(p,chg>=0?'#16865b':'#d84b55',false);
+        sparkSvgCache.set(id,svg);
+        document.querySelectorAll('[data-spark="'+id+'"]').forEach(el=>{el.innerHTML=svg;});
+      }else{
+        document.querySelectorAll('[data-spark="'+id+'"]').forEach(el=>{el.innerHTML='';});
+      }
+    }).finally(()=>{
+      sparkActive--;
+      sparkSeen.delete(id);
+      drainSparks();
+    });
+  }
+}
 const sparkObserver=new IntersectionObserver(entries=>{for(const e of entries)if(e.isIntersecting){sparkObserver.unobserve(e.target);const id=e.target.dataset.spark;if(id&&!sparkSeen.has(id)){sparkSeen.add(id);sparkQueue.push(id)}}drainSparks()},{rootMargin:'100px'});
-function hydrateSparks(){document.querySelectorAll('[data-spark]').forEach(el=>{const id=el.dataset.spark;const a=asset(id);if(id&&a&&(a.cat==='crypto'||a.id==='usdt')&&!sparkSvgCache.has(id))sparkObserver.observe(el);});}
+function hydrateSparks(){document.querySelectorAll('[data-spark]').forEach(el=>{const id=el.dataset.spark;if(id&&!sparkSvgCache.has(id))sparkObserver.observe(el);});}
 function fitHero(){$$('.hero-metric b,.hero-value').forEach(b=>{b.style.fontSize='';let fs=parseFloat(getComputedStyle(b).fontSize);while(b.scrollWidth>b.clientWidth+1&&fs>8){fs-=.5;b.style.fontSize=fs+'px'}})}
 const JALALI_MONTHS = [
   'فروردین', 'اردیبهشت', 'خرداد', 'تیر', 'مرداد', 'شهریور',
@@ -6906,6 +6981,7 @@ function detail(id) {
           <button data-detail-range="1M">۱ ماه</button>
           <button data-detail-range="1Y">۱ سال</button>
         ` : `
+          <button data-detail-range="3D">۳ روزه</button>
           <button class="active" data-detail-range="1W">۱ هفته</button>
           <button data-detail-range="1M">۱ ماه</button>
           <button data-detail-range="1Y">۱ سال</button>

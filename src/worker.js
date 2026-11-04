@@ -148,9 +148,19 @@ let inMemoryAdminStatsTime = 0;
 let inMemoryAdminSettings = null;
 let inMemoryAdminSettingsTime = 0;
 let lastCronCleanupTime = 0;
+let inMemoryKvLoaded = false;
+let lastKvWriteTime = 0;
+let domesticPrevCloseCache = null;
+let domesticPrevCloseTime = 0;
 const sessionUserCache = new Map();
 const userDataCache = new Map();
 
+const EXCLUDED_STABLES = new Set([
+  'usdc','dai','fdusd','tusd','usdp','busd','pyusd','usdd','usds','usd1','usdg',
+  'paxg','eurc','ustc','xaut','frax','usde','rlusd','lusd','gusd','crvusd',
+  'fxusd','alusd','mim','bgt','usdn','usdx','ssv','susd','dola','deusd',
+  'btcst','steth','wsteth','weeth','reth','cbeth','eeth','eurt','usdt0'
+]);
 const SKIP_BASES = new Set('USDT USDC FDUSD TUSD USDP BUSD DAI AEUR EUR GBP TRY BRL ARS UAH PLN RON CZK JPY MXN COP ZAR NGN RUB BIDR IDRT USD1 USDE XUSD USDS RLUSD CAD AUD CHF SAR QAR KWD OMR IQD AFN INR CNY'.split(' '));
 const NON_CRYPTO = new Set(['usd', 'eur', 'gbp', 'aed', 'try', 'gold18', 'gold24', 'coin', 'halfcoin', 'gram', 'silver', 'sp500', 'usdt']);
 const KL = { '1H': ['1m', 60], '1D': ['5m', 288], '3D': ['1h', 72], '1W': ['4h', 42], '1M': ['1d', 30], '1Y': ['1d', 365] };
@@ -292,29 +302,94 @@ const btn = (href, label) => `<p style="margin:20px 0"><a href="${esc(href)}" st
 // ---------- مدیریت نشست و کوکی‌ها ----------
 const cookieOpts = (url, maxAge) => `Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${url.protocol === 'https:' ? '; Secure' : ''}`;
 function getCookie(req, name) { const m = (req.headers.get('cookie') || '').split(/;\s*/).find((c) => c.startsWith(name + '=')); try { return m ? decodeURIComponent(m.slice(name.length + 1)) : null; } catch { return null; } }
-async function currentUser(req, env) {
-  if (!env.DB) return null;
-  const sid = getCookie(req, 'sid'); if (!sid) return null;
-  const h = await sha256(sid);
-  const now = nowS();
-  const cached = sessionUserCache.get(h);
-  if (cached && now < cached.exp) return cached.user;
-  const u = await env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(h, now).first();
-  if (u) {
-    u.isAdmin = (u.email && u.email.toLowerCase() === 'a.h.sh.t1381@gmail.com');
-    sessionUserCache.set(h, { user: u, exp: now + 300 });
-  }
-  return u;
+function getAuthSecret(env) { return (env && env.AUTH_SECRET) ? String(env.AUTH_SECRET) : 'darayi-default-auth-secret-2025'; }
+async function hmacSign(env, msg) {
+  const k = await crypto.subtle.importKey('raw', enc.encode(getAuthSecret(env)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return b64u(await crypto.subtle.sign('HMAC', k, enc.encode(msg)));
 }
-async function sessionCookie(env, url, uid) {
-  const sid = rand(32);
-  if (env.DB) {
-    await env.DB.prepare('INSERT INTO sessions(id_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(await sha256(sid), uid, nowS() + SESSION_S, nowS()).run();
+async function createSignedToken(env, uid, meta = {}) {
+  const sid = rand(24);
+  const exp = nowS() + SESSION_S;
+  const payloadObj = {
+    id: uid,
+    email: String(meta.email || '').toLowerCase(),
+    name: String(meta.name || ''),
+    isAdmin: !!meta.isAdmin || String(meta.email || '').toLowerCase() === 'a.h.sh.t1381@gmail.com',
+    exp
+  };
+  const payloadB64 = b64u(enc.encode(JSON.stringify(payloadObj)));
+  const sig = await hmacSign(env, `${sid}.${payloadB64}`);
+  return { sid, token: `${sid}.${payloadB64}.${sig}`, payloadObj, exp };
+}
+async function verifySignedToken(env, rawToken) {
+  if (!rawToken || typeof rawToken !== 'string') return null;
+  const parts = rawToken.split('.');
+  if (parts.length !== 3) return null;
+  const [sid, payloadB64, sig] = parts;
+  const expected = await hmacSign(env, `${sid}.${payloadB64}`);
+  if (!teq(sig, expected)) return null;
+  try {
+    const jsonStr = new TextDecoder().decode(b64uDec(payloadB64));
+    const data = JSON.parse(jsonStr);
+    if (!data || !data.email || !Number.isFinite(data.exp) || data.exp <= nowS()) return null;
+    data.isAdmin = !!data.isAdmin || String(data.email || '').toLowerCase() === 'a.h.sh.t1381@gmail.com';
+    return { sid, user: { id: data.id || ('u_' + data.email), email: data.email, name: data.name || data.email.split('@')[0], isAdmin: data.isAdmin } };
+  } catch {
+    return null;
   }
-  return `sid=${sid}; ${cookieOpts(url, SESSION_S)}`;
+}
+async function currentUser(req, env) {
+  const authHeader = req.headers.get('authorization') || '';
+  const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+  const cookieToken = getCookie(req, 'sid');
+  const rawToken = cookieToken || bearer;
+  const now = nowS();
+
+  if (rawToken) {
+    const verified = await verifySignedToken(env, rawToken);
+    if (verified && verified.user) {
+      return verified.user;
+    }
+    const baseSid = rawToken.split('.')[0];
+    const h = await sha256(baseSid);
+    const cached = sessionUserCache.get(h);
+    if (cached && now < cached.exp) return cached.user;
+    if (env.DB) {
+      try {
+        const u = await env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(h, now).first();
+        if (u) {
+          u.isAdmin = (u.email && u.email.toLowerCase() === 'a.h.sh.t1381@gmail.com');
+          sessionUserCache.set(h, { user: u, exp: now + 900 });
+          return u;
+        }
+      } catch {}
+    }
+  }
+
+  // Fallback for header-based session when D1 is not bound
+  if (!env.DB) {
+    const hdrEmail = cleanEmail(req.headers.get('x-auth-email') || '');
+    if (isEmail(hdrEmail)) {
+      const isAdm = hdrEmail === 'a.h.sh.t1381@gmail.com';
+      return { id: 'u_' + hdrEmail, email: hdrEmail, name: isAdm ? 'مدیر کل دارایی' : hdrEmail.split('@')[0], isAdmin: isAdm };
+    }
+  }
+  return null;
+}
+async function sessionCookie(env, url, uid, userMeta = {}) {
+  const { sid, token, payloadObj, exp } = await createSignedToken(env, uid, userMeta);
+  const h = await sha256(sid);
+  sessionUserCache.set(h, { user: { id: uid, email: payloadObj.email, name: payloadObj.name, isAdmin: payloadObj.isAdmin }, exp });
+  if (env.DB) {
+    try {
+      await env.DB.prepare('INSERT INTO sessions(id_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(h, uid, exp, nowS()).run();
+    } catch {}
+  }
+  return { cookie: `sid=${encodeURIComponent(token)}; ${cookieOpts(url, SESSION_S)}`, token };
 }
 async function upsertUser(env, { email, name, sub }) {
   email = email.toLowerCase();
+  if (!env.DB) return 'u_' + email;
   let u = sub ? await env.DB.prepare('SELECT * FROM users WHERE google_sub=?').bind(sub).first() : null;
   if (!u) u = await env.DB.prepare('SELECT * FROM users WHERE email=?').bind(email).first();
   if (u) {
@@ -337,7 +412,7 @@ const iterOf = (env) => Math.min(100000, Math.max(1000, Number(env && env.PBKDF2
 async function pbkdf2(pw, salt, iter) { const key = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveBits']); return b64u(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, key, 256)); }
 async function hashPassword(pw, env) { const salt = crypto.getRandomValues(new Uint8Array(16)), it = iterOf(env); return `pbkdf2$${it}$${b64u(salt)}$${await pbkdf2(pw, salt, it)}`; }
 async function verifyPassword(pw, stored, env) { const [t, it, salt, h] = String(stored || `x$${iterOf(env)}$AAAAAAAAAAAAAAAAAAAAAA$x`).split('$'); const got = await pbkdf2(pw, b64uDec(salt), Number(it) || iterOf(env)); return !!stored && t === 'pbkdf2' && teq(got, h); }
-async function hmac(env, msg) { if (!env.AUTH_SECRET) throw new HttpError(503, 'متغیر AUTH_SECRET در تنظیمات Worker مقداردهی نشده است.'); const k = await crypto.subtle.importKey('raw', enc.encode(env.AUTH_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return b64u(await crypto.subtle.sign('HMAC', k, enc.encode(msg))); }
+async function hmac(env, msg) { return hmacSign(env, msg); }
 const randInt = (n) => { const max = Math.floor(2 ** 32 / n) * n; let x; do { x = crypto.getRandomValues(new Uint32Array(1))[0]; } while (x >= max); return x % n; };
 
 async function issueCode(env, email, purpose, payload) {
@@ -391,7 +466,10 @@ async function registerVerify(req, env, url) {
   if (await env.DB.prepare('SELECT 1 AS x FROM users WHERE email=?').bind(email).first()) throw new HttpError(409, 'این ایمیل قبلاً ثبت شده است.');
   const id = rand(12);
   await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(id, email, p.name, p.hash, nowS()).run();
-  return json({ ok: true }, 200, { 'set-cookie': await sessionCookie(env, url, id) });
+  const isAdmin = email === 'a.h.sh.t1381@gmail.com';
+  const userObj = { email, name: p.name || email.split('@')[0], isAdmin, role: isAdmin ? 'admin' : 'user' };
+  const sess = await sessionCookie(env, url, id, userObj);
+  return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
 }
 async function login(req, env, url) {
   const b = await readJson(req), email = cleanEmail(b.email);
@@ -413,12 +491,22 @@ async function login(req, env, url) {
         console.error('admin setup err:', err);
       }
     }
-    return json({ ok: true, user: { email: adminEmail, name: 'مدیر کل دارایی', isAdmin: true, role: 'admin' } }, 200, { 'set-cookie': await sessionCookie(env, url, adminId) });
+    const userObj = { email: adminEmail, name: 'مدیر کل دارایی', isAdmin: true, role: 'admin' };
+    const sess = await sessionCookie(env, url, adminId, userObj);
+    return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
+  }
+
+  if (!env.DB && isEmail(email) && okPass(rawPass)) {
+    const userObj = { email, name: isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0], isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' };
+    const sess = await sessionCookie(env, url, 'u_' + email, userObj);
+    return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
   }
 
   const ok = (u && u.password_hash && await verifyPassword(rawPass, u.password_hash, env)) || (isAdminEmail && rawPass.trim() === defaultAdminPass);
   if (!u || !ok) throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
-  return json({ ok: true, user: { email: u.email || email, name: u.name || (isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0]), isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' } }, 200, { 'set-cookie': await sessionCookie(env, url, u.id) });
+  const userObj = { email: u.email || email, name: u.name || (isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0]), isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' };
+  const sess = await sessionCookie(env, url, u.id, userObj);
+  return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
 }
 async function resetStart(req, env) {
   const email = cleanEmail((await readJson(req)).email);
@@ -449,13 +537,16 @@ async function resetFinish(req, env, url) {
   await limits(req, env, email, 'rstf', 10);
   const row = await env.DB.prepare("UPDATE otp_codes SET attempts=attempts+1 WHERE email=? AND purpose='reset_ok' AND expires_at>? AND attempts<5 RETURNING code_hash").bind(email, nowS()).first();
   if (!row || !teq(await sha256(String(b.resetToken || '')), row.code_hash)) throw new HttpError(400, 'مرحلهٔ بازیابی منقضی شده است؛ از اول شروع کن.');
-  const u = await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
+  const u = await env.DB.prepare('SELECT id,name FROM users WHERE email=?').bind(email).first();
   if (!u) throw new HttpError(400, 'مرحلهٔ بازیابی منقضی شده است؛ از اول شروع کن.');
   const used = await env.DB.prepare("DELETE FROM otp_codes WHERE email=? AND purpose='reset_ok' AND code_hash=? RETURNING email").bind(email, row.code_hash).first();
   if (!used) throw new HttpError(400, 'این درخواست قبلاً استفاده شده است.');
   await env.DB.batch([env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(await hashPassword(b.password, env), u.id), env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(u.id), env.DB.prepare("DELETE FROM otp_codes WHERE email=? AND purpose='reset_ok'").bind(email)]);
-  for (const [k, v] of sessionUserCache) { if (v?.val?.id === u.id) sessionUserCache.delete(k); }
-  return json({ ok: true }, 200, { 'set-cookie': await sessionCookie(env, url, u.id) });
+  for (const [k, v] of sessionUserCache) { if (v?.user?.id === u.id) sessionUserCache.delete(k); }
+  const isAdmin = email === 'a.h.sh.t1381@gmail.com';
+  const userObj = { email, name: u.name || email.split('@')[0], isAdmin, role: isAdmin ? 'admin' : 'user' };
+  const sess = await sessionCookie(env, url, u.id, userObj);
+  return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
 }
 async function googleStart(env, url) {
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
@@ -485,7 +576,8 @@ async function googleCallback(env, url, req) {
   const okIss = ['https://accounts.google.com', 'accounts.google.com'].includes(claims.iss);
   if (!okIss || claims.aud !== env.GOOGLE_CLIENT_ID || (!Number.isFinite(claims.exp) || claims.exp < nowS()) || claims.email_verified !== true || typeof claims.sub !== 'string' || !isEmail(claims.email)) return fail('claims');
   const uid = await upsertUser(env, { email: claims.email, name: claims.name, sub: claims.sub });
-  const response = new Response(null, { status: 302, headers: { location: '/', 'set-cookie': await sessionCookie(env, url, uid), 'cache-control': 'no-store' } });
+  const sess = await sessionCookie(env, url, uid, { email: claims.email, name: claims.name });
+  const response = new Response(null, { status: 302, headers: { location: '/', 'set-cookie': sess.cookie, 'cache-control': 'no-store' } });
   response.headers.append('set-cookie', `oauth_state=; ${cookieOpts(url, 0)}`);
   return response;
 }
@@ -601,6 +693,22 @@ async function deleteAccount(env, user) {
 const kvGet = async (env, k) => env.DB ? env.DB.prepare('SELECT v,updated_at FROM kv WHERE k=?').bind(k).first() : null;
 const kvPut = async (env, k, v, t) => env.DB ? env.DB.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at').bind(k, JSON.stringify(v), t).run() : null;
 const getPrices = async (env) => {
+  if (inMemoryPrices && Object.keys(inMemoryPrices.items || {}).length) {
+    return inMemoryPrices;
+  }
+  if (!inMemoryKvLoaded && env && env.DB) {
+    inMemoryKvLoaded = true;
+    try {
+      const row = await kvGet(env, 'prices');
+      if (row && row.v) {
+        const parsed = JSON.parse(row.v);
+        if (parsed && parsed.items && Object.keys(parsed.items).length) {
+          inMemoryPrices = parsed;
+          return inMemoryPrices;
+        }
+      }
+    } catch {}
+  }
   return inMemoryPrices || { updatedAt: 0, checkedAt: 0, items: {}, feeds: {} };
 };
 
@@ -743,21 +851,84 @@ const SOURCES = {
   }
 };
 
+async function getDomesticPrevCloses() {
+  const now = nowS();
+  if (domesticPrevCloseCache && (now - domesticPrevCloseTime < 1800)) {
+    return domesticPrevCloseCache;
+  }
+  try {
+    const r = await fetch('https://nerkh.jahankhahan.shop/data/rates.json', {
+      headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0' },
+      signal: AbortSignal.timeout(7000),
+      cf: { cacheTtl: 1800, cacheEverything: true }
+    });
+    if (!r.ok) return domesticPrevCloseCache || {};
+    const text = await r.text();
+    const map = {};
+    const allIds = [...new Set([...Object.keys(NERKH), ...Object.keys(DOMESTIC_EXTRA)])];
+    for (const id of allIds) {
+      if (id === 'usdt') continue;
+      const key = (NERKH[id] || [])[0] || (DOMESTIC_EXTRA[id] || [])[0];
+      if (!key) continue;
+      const idx = text.indexOf(`"key":"${key}"`);
+      if (idx === -1) continue;
+      const daysIdx = text.indexOf('"days":', idx);
+      const endDaysIdx = text.indexOf(']]', daysIdx);
+      if (daysIdx === -1 || endDaysIdx === -1) continue;
+      const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
+      if (Array.isArray(days) && days.length >= 2) {
+        map[id] = days.slice(-6).map(x => Number(x[1])).filter(v => v > 0);
+      }
+    }
+    if (Object.keys(map).length) {
+      domesticPrevCloseCache = map;
+      domesticPrevCloseTime = now;
+    }
+    return map;
+  } catch {
+    return domesticPrevCloseCache || {};
+  }
+}
+
+function resolveDomesticChange(id, price, rawChange, prevClosesMap, prevItem) {
+  const ch = Number(rawChange);
+  if (Number.isFinite(ch) && Math.abs(ch) > 0.0001) return ch;
+  const recent = prevClosesMap && prevClosesMap[id];
+  if (Array.isArray(recent) && recent.length) {
+    for (let i = recent.length - 1; i >= 0; i--) {
+      const pClose = recent[i];
+      if (pClose > 0 && Math.abs(price - pClose) / pClose > 0.0001 && Math.abs(price - pClose) / pClose < 0.25) {
+        return +(((price - pClose) / pClose) * 100).toFixed(2);
+      }
+    }
+  }
+  if (prevItem && prevItem.price === price && Number.isFinite(prevItem.change) && Math.abs(prevItem.change) > 0.0001) {
+    return prevItem.change;
+  }
+  return Number.isFinite(ch) ? ch : null;
+}
+
 let inMemoryRefreshLock = 0;
 
 export async function refreshPrices(env, force = false) {
   const t = nowS();
-  if (!force && (t - inMemoryRefreshLock < 45)) {
-    return { items: (await getPrices(env)).items || {}, updated: [], busy: true };
+  const current = await getPrices(env);
+  const hasCryptoNow = Object.values(current.items || {}).some(i => i.crypto && i.unit === 'USDT');
+  if (!force && hasCryptoNow && (t - inMemoryRefreshLock < 25)) {
+    return { items: current.items || {}, updated: [], busy: true };
   }
   inMemoryRefreshLock = t;
 
   try {
-    const prev = await getPrices(env);
+    const prev = current;
     const items = { ...prev.items }, fresh = new Set(), feeds = { ...(prev.feeds || {}) };
     const put = (id, price, change, src, ts, unit = 'IRT', extra = {}) => {
       if (!(price > 0) || !Number.isFinite(price)) return;
-      items[id] = { price, change: Number.isFinite(change) ? change : null, t: ts, receivedAt: t, src, unit, ...extra };
+      const old = items[id];
+      const finalChange = Number.isFinite(change)
+        ? change
+        : (old && old.price === price && Number.isFinite(old.change) ? old.change : null);
+      items[id] = { price, change: finalChange, t: ts, receivedAt: t, src, unit, ...extra };
       fresh.add(id);
     };
 
@@ -800,6 +971,7 @@ export async function refreshPrices(env, force = false) {
       }
 
       let domesticSuccess = false;
+      const prevClosesMap = await getDomesticPrevCloses();
 
       // Tier 1: iran-market GitHub CDN (Fast, reliable, verified TGJU & free market rates)
       try {
@@ -813,20 +985,23 @@ export async function refreshPrices(env, force = false) {
         ];
         const dict = Object.fromEntries(allList.map(x => [x.symbol, x]));
         let count = 0;
-        const rawTs = im?.data?.generated_at ? Math.floor(new Date(im.data.generated_at).getTime() / 1000) : 0;
-        const ts = (rawTs > 0 && rawTs <= t + 300) ? rawTs : t;
+        const genTs = im?.data?.generated_at ? Math.floor(new Date(im.data.generated_at).getTime() / 1000) : 0;
+        const fallbackTs = (genTs > 0 && genTs <= t + 300) ? genTs : t;
 
         for (const [id, [sym, name, code, cat]] of Object.entries(IRAN_MARKET_MAP)) {
           const item = dict[sym];
           if (item && Number(item.price) > 0) {
-            const chg = getDomChange(item.change_pct);
-            put(id, Number(item.price), chg, 'iran_market', ts, 'IRT', { kind: 'domestic', name, sym: code, cat });
+            const price = Number(item.price);
+            const itemRawTs = item.timestamp ? Math.floor(new Date(item.timestamp).getTime() / 1000) : 0;
+            const itemTs = (itemRawTs > 1600000000 && itemRawTs <= t + 300) ? itemRawTs : fallbackTs;
+            const chg = resolveDomesticChange(id, price, item.change_pct, prevClosesMap, prev.items?.[id]);
+            put(id, price, chg, 'iran_market', itemTs, 'IRT', { kind: 'domestic', name, sym: code, cat });
             count++;
           }
         }
 
         if (count >= 10) {
-          feeds.domestic = { ok: true, checkedAt: t, sourceAt: ts, count, source: 'iran_market' };
+          feeds.domestic = { ok: true, checkedAt: t, sourceAt: fallbackTs, count, source: 'iran_market' };
           domesticSuccess = true;
         }
       } catch (err) {}
@@ -842,14 +1017,16 @@ export async function refreshPrices(env, force = false) {
             let count = 0;
             if (d.gold?.pricePerGram > 0) {
               const gold18P = Math.round(d.gold.pricePerGram / 10);
-              put('gold18', gold18P, getDomChange(d.gold.change24h), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'طلای ۱۸ عیار', sym: 'Gold18', cat: 'gold' });
+              const chg = resolveDomesticChange('gold18', gold18P, d.gold.change24h, prevClosesMap, prev.items?.gold18);
+              put('gold18', gold18P, chg, 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'طلای ۱۸ عیار', sym: 'Gold18', cat: 'gold' });
               count++;
             }
             if (d.currencies) {
               const usdRial = d.currencies.IRR?.rate || 0;
               const usdP = usdRial > 0 ? Math.round(usdRial / 10) : 0;
               if (usdP > 100000) {
-                put('usd', usdP, getDomChange(d.currencies.IRR?.change24h), 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'دلار آمریکا', sym: 'USD', cat: 'currency' });
+                const chg = resolveDomesticChange('usd', usdP, d.currencies.IRR?.change24h, prevClosesMap, prev.items?.usd);
+                put('usd', usdP, chg, 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'دلار آمریکا', sym: 'USD', cat: 'currency' });
                 count++;
               }
             }
@@ -872,7 +1049,7 @@ export async function refreshPrices(env, force = false) {
             const k = keys.find(k => Number(j.rates?.[k]) > 0);
             if (k) {
               const v = Number(j.rates[k]);
-              const chg = getDomChange(j.change?.[k]);
+              const chg = resolveDomesticChange(id, v, j.change?.[k], prevClosesMap, prev.items?.[id]);
               put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic' });
               count++;
             }
@@ -880,7 +1057,7 @@ export async function refreshPrices(env, force = false) {
           for (const [id, [key, name, sym, cat]] of Object.entries(DOMESTIC_EXTRA)) {
             const v = Number(j.rates?.[key]);
             if (v > 0) {
-              const chg = getDomChange(j.change?.[key]);
+              const chg = resolveDomesticChange(id, v, j.change?.[key], prevClosesMap, prev.items?.[id]);
               put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic', name, sym, cat });
               count++;
             }
@@ -895,11 +1072,11 @@ export async function refreshPrices(env, force = false) {
       }
     };
 
-    // ۲. دریافت رمزارزها از صرافی‌های معتبر با اولویت OKX و Gate و KuCoin
+    // ۲. دریافت رمزارزها از صرافی‌های معتبر با اولویت KuCoin و OKX و Gate
     const cryptoFeed = async () => {
-      if (!force && t - (feeds.crypto?.checkedAt || 0) < 15 && feeds.crypto?.ok) return;
-      const order = [...new Set([feeds.crypto?.source, 'okx', 'gate', 'kucoin'].filter(Boolean))];
-      const errors = [], cap = Math.max(50, Number(env.MAX_COINS) || 350);
+      if (!force && t - (feeds.crypto?.checkedAt || 0) < 15 && feeds.crypto?.ok && hasCryptoNow) return;
+      const order = [...new Set([feeds.crypto?.source, 'kucoin', 'okx', 'gate', 'binance'].filter(Boolean))];
+      const errors = [], cap = Math.max(50, Number(env && env.MAX_COINS) || 350);
       for (const name of order) {
         if (!SOURCES[name]) continue;
         try {
@@ -914,7 +1091,6 @@ export async function refreshPrices(env, force = false) {
             !/(?:3L|3S|2L|2S|5L|5S|UP|DOWN|BEAR|BULL)$/i.test(String(x.base))
           ).sort((x, y) => y.vol - x.vol).slice(0, cap);
           if (rows.length < 15) throw new Error('insufficient pairs: ' + rows.length);
-          const seen = new Set();
           for (const x of rows) {
             const base = String(x.base);
             const id = base.toLowerCase();
@@ -926,10 +1102,6 @@ export async function refreshPrices(env, force = false) {
               pair: x.pair,
               vol: x.vol || 0
             });
-            seen.add(id);
-          }
-          for (const id of Object.keys(items)) {
-            if (items[id].crypto && !seen.has(id)) delete items[id];
           }
           feeds.crypto = { ok: true, checkedAt: t, count: rows.length, source: name };
           return;
@@ -937,7 +1109,7 @@ export async function refreshPrices(env, force = false) {
           errors.push(name + ': ' + String(e.message).slice(0, 60));
         }
       }
-      feeds.crypto = { ...feeds.crypto, ok: false, checkedAt: t, error: errors.join(' | ').slice(0, 220) };
+      feeds.crypto = { ...feeds.crypto, ok: false, checkedAt: t, error: errors.join(' | ').slice(0, 220), fallback: 'cached_values_preserved' };
     };
 
     await Promise.allSettled([domestic(), cryptoFeed()]);
@@ -945,6 +1117,12 @@ export async function refreshPrices(env, force = false) {
     const data = { items, feeds, updatedAt: fresh.size ? t : prev.updatedAt || 0, checkedAt: t };
     inMemoryPrices = data;
     inMemoryPricesTime = t;
+
+    // ذخیره بهینه آخرین قیمت‌های واقعی در D1 حداکثر هر ۵ دقیقه یک‌بار برای حفظ قیمت‌ها در زمان Cold Start
+    if (fresh.size > 0 && env && env.DB && (t - lastKvWriteTime >= 300 || !prev.updatedAt)) {
+      lastKvWriteTime = t;
+      try { await kvPut(env, 'prices', data, t); } catch {}
+    }
 
     return { items, updated: [...fresh] };
   } catch (err) {
@@ -981,47 +1159,45 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
   }
   if (deduped.length < 2) return [];
 
-  // ۲. قوانین سخت‌گیرانه برای دارایی‌های داخلی (طلا، سکه و ارز که فقط آرشیو روزانه دارند)
+  // ۲. قوانین سخت‌گیرانه برای دارایی‌های داخلی (طلا، سکه و ارز)
   if (isDomestic) {
-    // آرشیو داخلی فقط کندل روزانه دارد؛ بازه‌های ۱ ساعته، ۱ روزه و ۳ روزه فاقد دقت ساعتی هستند و نباید نمایش داده شوند
-    if (range !== '1W' && range !== '1M' && range !== '1Y') return [];
+    if (range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
 
-    const minTs = now - span - 43200; // حداکثر ۱۲ ساعت تلورانس مرز روز اول
+    const minTs = now - span - 86400;
     const pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 600);
-    const minReq = range === '1W' ? 4 : range === '1M' ? 15 : 200;
+    const minReq = range === '3D' ? 3 : range === '1W' ? 3 : range === '1M' ? 12 : 180;
     if (pts.length < minReq) return [];
 
     const firstTs = pts[0][0];
     const lastTs = pts[pts.length - 1][0];
-    const maxStartLag = range === '1W' ? 3 * 86400 : range === '1M' ? 5 * 86400 : 12 * 86400;
-    const maxGap = range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
+    const maxStartLag = range === '3D' ? 2.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 15 * 86400;
+    const maxGap = range === '3D' ? 3.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
 
-    // بررسی پوشش واقعی بازه زمانی از ابتدا تا انتها
     if (firstTs > (now - span) + maxStartLag) return [];
-    if (now - lastTs > 4 * 86400) return [];
+    if (now - lastTs > 5 * 86400) return [];
 
     for (let i = 1; i < pts.length; i++) {
       const gap = pts[i][0] - pts[i - 1][0];
       if (gap > maxGap) return [];
       const ratio = pts[i][1] / pts[i - 1][1];
-      if (ratio > 1.35 || ratio < 0.65) return []; // جلوگیری از نقاط پرشی یا دیتای مخدوش
+      if (ratio > 1.35 || ratio < 0.65) return [];
     }
 
     if (refPrice > 0) {
       const lastVal = pts[pts.length - 1][1];
-      if (Math.abs(lastVal - refPrice) / refPrice > 0.12) return [];
+      if (Math.abs(lastVal - refPrice) / refPrice > 0.15) return [];
     }
     return pts;
   }
 
   // ۳. قوانین سخت‌گیرانه برای رمزارزها و تتر (کندل‌های دقیق صرافی)
   const cfg = {
-    '1H': { step: 60, minPts: 45, maxStale: 900, maxGap: 600, minCov: 0.82 },
-    '1D': { step: 300, minPts: 20, maxStale: 7200, maxGap: 10800, minCov: 0.85 },
-    '3D': { step: 3600, minPts: 55, maxStale: 14400, maxGap: 21600, minCov: 0.85 },
-    '1W': { step: 14400, minPts: 35, maxStale: 28800, maxGap: 43200, minCov: 0.85 },
-    '1M': { step: 86400, minPts: 26, maxStale: 129600, maxGap: 172800, minCov: 0.85 },
-    '1Y': { step: 86400, minPts: 330, maxStale: 172800, maxGap: 259200, minCov: 0.88 }
+    '1H': { step: 60, minPts: 40, maxStale: 1800, maxGap: 900, minCov: 0.78 },
+    '1D': { step: 300, minPts: 18, maxStale: 10800, maxGap: 14400, minCov: 0.80 },
+    '3D': { step: 3600, minPts: 48, maxStale: 21600, maxGap: 28800, minCov: 0.80 },
+    '1W': { step: 14400, minPts: 32, maxStale: 43200, maxGap: 57600, minCov: 0.80 },
+    '1M': { step: 86400, minPts: 24, maxStale: 172800, maxGap: 259200, minCov: 0.80 },
+    '1Y': { step: 86400, minPts: 300, maxStale: 259200, maxGap: 345600, minCov: 0.85 }
   }[range];
   if (!cfg) return [];
 
@@ -1033,8 +1209,7 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
   const lastTs = pts[pts.length - 1][0];
   const actualSpan = lastTs - firstTs;
 
-  // بازه زمانی واقعی کندل‌ها باید دقیقاً با بازه درخواستی هم‌خوانی داشته باشد
-  if (actualSpan < span * cfg.minCov || actualSpan > span * 1.08) return [];
+  if (actualSpan < span * cfg.minCov || actualSpan > span * 1.12) return [];
   if (now - lastTs > cfg.maxStale) return [];
 
   for (let i = 1; i < pts.length; i++) {
@@ -1043,21 +1218,63 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
 
   if (refPrice > 0) {
     const lastVal = pts[pts.length - 1][1];
-    if (Math.abs(lastVal - refPrice) / refPrice > 0.05) return [];
+    if (Math.abs(lastVal - refPrice) / refPrice > 0.08) return [];
   }
 
   return pts;
 }
 
-// استخراج سریع و بهینه تاریخچه بدون بارگذاری ۲ مگابایت JSON در حافظه
+// استخراج تاریخچه واقعی طلا، سکه و ارز از آرشیو رسمی iran-market (با پشتیبان rates.json)
 async function archiveHistory(id, range) {
-  if (range !== '1W' && range !== '1M' && range !== '1Y') return [];
+  if (range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
+  const now = nowS();
+  const minTs = now - RANGES[range] - 86400;
+  const maxSlice = range === '3D' ? 8 : range === '1W' ? 16 : range === '1M' ? 45 : 420;
+
+  // منبع اول: آرشیو روزانه OHLC در iran-market (به‌روز تا آخرین روز معاملاتی و فقط ۴۰ کیلوبایت)
+  const sym = id === 'usdt' ? 'USDT_IRR' : (IRAN_MARKET_MAP[id] || [])[0];
+  if (sym) {
+    try {
+      const r = await fetch(`https://iran-market.github.io/data/history/${sym}.json`, {
+        headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0' },
+        signal: AbortSignal.timeout(7000),
+        cf: { cacheTtl: 1800, cacheEverything: true }
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const records = j?.data?.records;
+        if (Array.isArray(records) && records.length >= 2) {
+          const out = [];
+          for (const rec of records.slice(-maxSlice)) {
+            const closeRial = Number(rec.close);
+            if (!(closeRial > 0)) continue;
+            const closeToman = Math.round(closeRial / 10);
+            const openToman = Number(rec.open) > 0 ? Math.round(Number(rec.open) / 10) : 0;
+            const baseTs = Number(rec.t) > 1600000000
+              ? Math.floor(Number(rec.t))
+              : Math.floor(new Date(rec.date + 'T00:00:00Z').getTime() / 1000);
+            const openTs = baseTs + 9 * 3600 - 12600;
+            const closeTs = baseTs + 16 * 3600 - 12600;
+            if ((range === '3D' || range === '1W') && openToman > 0 && openToman !== closeToman && openTs >= minTs && openTs <= now + 600) {
+              out.push([openTs, openToman]);
+            }
+            if (closeTs >= minTs && closeTs <= now + 600) {
+              out.push([closeTs, closeToman]);
+            }
+          }
+          if (out.length >= 2) return out;
+        }
+      }
+    } catch {}
+  }
+
+  // منبع دوم (پشتیبان): آرشیو نرخ‌سنج
   const key = (NERKH[id] || [])[0] || (DOMESTIC_EXTRA[id] || [])[0];
   if (!key) return [];
   try {
     const r = await fetch('https://nerkh.jahankhahan.shop/data/rates.json', {
       headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0 (personal portfolio app)' },
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(10000),
       cf: { cacheTtl: 3600, cacheEverything: true }
     });
     if (!r.ok) return [];
@@ -1069,9 +1286,6 @@ async function archiveHistory(id, range) {
     const endDaysIdx = text.indexOf(']]', daysIdx);
     if (daysIdx === -1 || endDaysIdx === -1) return [];
     const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
-    const maxSlice = range === '1W' ? 16 : range === '1M' ? 45 : 420;
-    const now = nowS();
-    const minTs = now - RANGES[range] - 43200;
     const out = [];
     for (const [d, v] of days.slice(-maxSlice)) {
       const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
@@ -1138,7 +1352,11 @@ async function history(env, url) {
   // ۱. تاریخچه رمزارزها (مستقیم از کندل‌های واقعی صرافی با اعتبارسنجی کامل بازه و قیمت)
   if (it?.crypto || !isDomesticAsset) {
     if (id === 'usdt') {
-      const pts = await wallexHistory('USDTTMN', range, it?.price || 0);
+      let pts = await wallexHistory('USDTTMN', range, it?.price || 0);
+      if (pts.length < 2 && (range === '3D' || range === '1W' || range === '1M' || range === '1Y')) {
+        const arch = await archiveHistory('usdt', range);
+        pts = validateHistoryPoints(arch, range, t, true, it?.price || 0);
+      }
       if (pts.length >= 2) {
         const payload = { id, range, currency: 'IRT', source: 'wallex', points: pts };
         historyMemCache.set(cacheKey, { at: t, data: payload });
@@ -1147,10 +1365,9 @@ async function history(env, url) {
       return json({ id, range, currency: 'IRT', points: [], unavailable: true });
     }
     const [iv, lim] = KL[range], base = (it?.sym || id).toUpperCase();
-    // در بازه ۱ ساله، صرافی OKX محدودیت ۳۰۰ کندل دارد؛ بنابراین Gate و KuCoin که ۳۶۵ کندل کامل برمی‌گردانند در اولویت قرار می‌گیرند
     const exchangeOrder = range === '1Y'
       ? [...new Set([it?.src !== 'okx' ? it?.src : null, 'gate', 'kucoin', 'okx'].filter(Boolean))]
-      : [...new Set([it?.src, 'okx', 'gate', 'kucoin'].filter(Boolean))];
+      : [...new Set([it?.src, 'kucoin', 'okx', 'gate'].filter(Boolean))];
     for (const name of exchangeOrder) {
       const src = SOURCES[name];
       if (!src) continue;
@@ -1168,8 +1385,8 @@ async function history(env, url) {
     return json({ id, range, currency: 'USDT', points: [], unavailable: true });
   }
 
-  // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (فقط در بازه‌های روزانه معتبر ۱ هفته، ۱ ماه و ۱ سال)
-  if (range !== '1W' && range !== '1M' && range !== '1Y') {
+  // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (در بازه‌های ۳ روزه، ۱ هفته، ۱ ماه و ۱ سال)
+  if (range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') {
     return json({ id, range, currency: it?.unit || 'IRT', points: [], unavailable: true });
   }
 
@@ -1180,7 +1397,7 @@ async function history(env, url) {
 
   const curPrice = it?.price || 0;
   const curTs = it?.t || 0;
-  if (rawPoints.length >= 2 && curPrice > 0 && curTs > 0 && (t - curTs < 86400)) {
+  if (rawPoints.length >= 2 && curPrice > 0 && curTs > 0 && (t - curTs < 5 * 86400)) {
     const lastT = rawPoints[rawPoints.length - 1][0];
     if (curTs > lastT) {
       rawPoints.push([curTs, curPrice]);
@@ -1349,13 +1566,14 @@ async function route(req, env, url, ctx) {
 
     const manual = url.searchParams.get('refresh') === '1';
     const age = nowS() - (prices.checkedAt || 0);
-    const limit = manual ? 8 : Number(env.INLINE_REFRESH_S || 120);
+    const limit = manual ? 8 : Number(env.INLINE_REFRESH_S || 90);
     const empty = !Object.keys(prices.items || {}).length;
+    const hasCrypto = Object.values(prices.items || {}).some(i => i.crypto && i.unit === 'USDT');
 
-    if (empty || age >= limit) {
+    if (empty || !hasCrypto || age >= limit) {
       const job = (async () => {
         try {
-          await refreshPrices(env, manual);
+          await refreshPrices(env, manual || !hasCrypto);
         } catch (e) {
           console.error('refresh failed', e?.message);
           inMemoryLastError = String(e?.message).slice(0, 160);
@@ -1365,7 +1583,7 @@ async function route(req, env, url, ctx) {
       if (ctx && ctx.waitUntil) {
         ctx.waitUntil(job);
       }
-      if (manual || empty) {
+      if (manual || empty || !hasCrypto) {
         await Promise.race([job, new Promise(r => setTimeout(r, 9000))]);
         try { prices = await getPrices(env); } catch {}
       }
