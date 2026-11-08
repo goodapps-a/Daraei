@@ -60,6 +60,7 @@ try {
 
 // TGJU & Iranian market symbol mappings
 const IRAN_MARKET_MAP: Record<string, [string, string, string, string]> = {
+  usdt: ['USDT_IRR', 'تتر', 'USDT', 'crypto'],
   usd: ['USD_IRR_FREE', 'دلار آمریکا', 'USD', 'currency'],
   eur: ['EUR_IRR_FREE', 'یورو', 'EUR', 'currency'],
   gbp: ['GBP_IRR_FREE', 'پوند انگلیس', 'GBP', 'currency'],
@@ -319,6 +320,24 @@ function resolveDomesticChange(
   return Number.isFinite(ch) ? ch : null;
 }
 
+const domesticIntradayTicks = new Map<string, [number, number][]>();
+
+function recordDomesticTick(id: string, ts: number, price: number) {
+  if (!(price > 0) || !Number.isFinite(ts)) return;
+  let arr = domesticIntradayTicks.get(id);
+  if (!arr) {
+    arr = [];
+    domesticIntradayTicks.set(id, arr);
+  }
+  const cutoff = ts - 90000;
+  while (arr.length && arr[0][0] < cutoff) arr.shift();
+  const last = arr[arr.length - 1];
+  if (!last || (ts - last[0] >= 180) || last[1] !== price) {
+    arr.push([ts, price]);
+    if (arr.length > 360) arr.shift();
+  }
+}
+
 async function updateAllPrices(force = false) {
   if (isFetching) return cachedPrices;
   isFetching = true;
@@ -344,6 +363,7 @@ async function updateAllPrices(force = false) {
         unit,
         ...extra
       };
+      if (unit === 'IRT') recordDomesticTick(id, now, price);
       freshCount++;
     };
 
@@ -354,15 +374,60 @@ async function updateAllPrices(force = false) {
 
     const domesticTask = async () => {
       // 1. Fetch live 24/7 Iranian Tether rate and change
+      // Tier A: Wallex Markets (live orderbook / last trade in Toman)
       try {
-        const tl = await fetchJSON('https://api.tetherland.com/currencies', 4);
-        const u = tl?.data?.currencies?.USDT;
-        if (u && Number(u.price) > 0) {
-          liveUsdtPrice = Number(u.price);
-          liveUsdtChange = Number.isFinite(Number(u.diff24d)) ? Number(u.diff24d) : null;
-          liveUsdtSource = 'tetherland';
+        const wx = await fetchJSON('https://api.wallex.ir/v1/markets', 4);
+        const u = wx?.result?.symbols?.USDTTMN;
+        const lastP = Number(u?.stats?.lastPrice);
+        if (lastP > 0) {
+          liveUsdtPrice = lastP;
+          liveUsdtChange = Number.isFinite(Number(u?.stats?.['24h_ch'])) ? Number(u?.stats?.['24h_ch']) : null;
+          liveUsdtSource = 'wallex';
         }
-      } catch {
+      } catch {}
+
+      // Tier B: Wallex Depth (fallback if markets list is slow)
+      if (!liveUsdtPrice) {
+        try {
+          const wd = await fetchJSON('https://api.wallex.ir/v1/depth?symbol=USDTTMN', 3);
+          const bestBid = Number(wd?.result?.bid?.[0]?.price);
+          const bestAsk = Number(wd?.result?.ask?.[0]?.price);
+          const mid = bestBid > 0 && bestAsk > 0 ? Math.round((bestBid + bestAsk) / 2) : (bestBid || bestAsk);
+          if (mid > 0) {
+            liveUsdtPrice = mid;
+            liveUsdtSource = 'wallex';
+          }
+        } catch {}
+      }
+
+      // Tier C: iran-market GitHub CDN (USDT_IRR from Nobitex)
+      if (!liveUsdtPrice) {
+        try {
+          const im = await fetchJSON('https://iran-market.github.io/data/latest-toman.json', 4);
+          const u = (im?.data?.categories?.crypto || []).find((x: any) => x.symbol === 'USDT_IRR');
+          if (u && Number(u.price) > 0) {
+            liveUsdtPrice = Number(u.price);
+            liveUsdtChange = Number.isFinite(Number(u.change_pct)) ? Number(u.change_pct) : null;
+            liveUsdtSource = 'nobitex';
+          }
+        } catch {}
+      }
+
+      // Tier D: Tetherland
+      if (!liveUsdtPrice) {
+        try {
+          const tl = await fetchJSON('https://api.tetherland.com/currencies', 4);
+          const u = tl?.data?.currencies?.USDT;
+          if (u && Number(u.price) > 0) {
+            liveUsdtPrice = Number(u.price);
+            liveUsdtChange = Number.isFinite(Number(u.diff24d)) ? Number(u.diff24d) : null;
+            liveUsdtSource = 'tetherland';
+          }
+        } catch {}
+      }
+
+      // Tier E: Bitpin
+      if (!liveUsdtPrice) {
         try {
           const bp = await fetchJSON('https://api.bitpin.ir/v1/mkt/markets/', 4);
           const m = (bp?.results || []).find((x: any) => x.code === 'USDT_IRT');
@@ -389,6 +454,7 @@ async function updateAllPrices(force = false) {
           ...(categories.gold || []),
           ...(categories.coin || []),
           ...(categories.currency || []),
+          ...(categories.crypto || []),
           ...(categories.precious_metal || [])
         ];
         const dict = Object.fromEntries(allList.map((x: any) => [x.symbol, x]));
@@ -550,6 +616,7 @@ async function updateAllPrices(force = false) {
       } catch (e) {
         console.warn('Failed to persist cache to disk:', e);
       }
+      evaluateAllStoredAlerts();
     }
   } catch (err: any) {
     console.error('Error updating prices:', err);
@@ -559,10 +626,10 @@ async function updateAllPrices(force = false) {
   return cachedPrices;
 }
 
-// Background scheduler
+// Background scheduler (15-second interval)
 setInterval(() => {
   updateAllPrices();
-}, 20000);
+}, 15000);
 
 // Initial immediate fetch
 updateAllPrices(true);
@@ -584,7 +651,7 @@ app.get('/api/prices', async (req, res) => {
   const manual = req.query.refresh === '1';
   const age = Math.floor(Date.now() / 1000) - lastFetchTime;
 
-  if (manual || age > 45 || !Object.keys(cachedPrices.items || {}).length) {
+  if (manual || age > 15 || !Object.keys(cachedPrices.items || {}).length) {
     if (manual || !Object.keys(cachedPrices.items || {}).length) {
       await updateAllPrices(true);
     } else {
@@ -696,17 +763,17 @@ function validateHistoryPoints(
   if (deduped.length < 2) return [];
 
   if (isDomestic) {
-    if (range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
+    if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
 
     const minTs = now - span - 86400;
     const pts = deduped.filter((p) => p[0] >= minTs && p[0] <= now + 600);
-    const minReq = range === '3D' ? 3 : range === '1W' ? 3 : range === '1M' ? 12 : 180;
+    const minReq = range === '1D' ? 2 : range === '3D' ? 3 : range === '1W' ? 3 : range === '1M' ? 12 : 180;
     if (pts.length < minReq) return [];
 
     const firstTs = pts[0][0];
     const lastTs = pts[pts.length - 1][0];
-    const maxStartLag = range === '3D' ? 2.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 15 * 86400;
-    const maxGap = range === '3D' ? 3.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
+    const maxStartLag = range === '1D' ? 1.5 * 86400 : range === '3D' ? 2.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 15 * 86400;
+    const maxGap = range === '1D' ? 1.5 * 86400 : range === '3D' ? 3.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
 
     if (firstTs > now - span + maxStartLag) return [];
     if (now - lastTs > 5 * 86400) return [];
@@ -734,7 +801,7 @@ function validateHistoryPoints(
     '3D': { step: 3600, minPts: 48, maxStale: 21600, maxGap: 28800, minCov: 0.80 },
     '1W': { step: 14400, minPts: 32, maxStale: 43200, maxGap: 57600, minCov: 0.80 },
     '1M': { step: 86400, minPts: 24, maxStale: 172800, maxGap: 259200, minCov: 0.80 },
-    '1Y': { step: 86400, minPts: 300, maxStale: 259200, maxGap: 345600, minCov: 0.85 }
+    '1Y': { step: 86400, minPts: 260, maxStale: 259200, maxGap: 432000, minCov: 0.82 }
   };
   const cfg = cfgMap[range];
   if (!cfg) return [];
@@ -764,11 +831,11 @@ function validateHistoryPoints(
 
 const historyMemCache = new Map<string, { at: number; data: any }>();
 
-async function archiveHistory(id: string, range: string): Promise<[number, number][]> {
-  if (range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
+async function archiveHistory(id: string, range: string, liveItem: any = null): Promise<[number, number][]> {
+  if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
   const now = Math.floor(Date.now() / 1000);
   const minTs = now - RANGES_MAP[range] - 86400;
-  const maxSlice = range === '3D' ? 8 : range === '1W' ? 16 : range === '1M' ? 45 : 420;
+  const maxSlice = range === '1D' ? 4 : range === '3D' ? 8 : range === '1W' ? 16 : range === '1M' ? 45 : 420;
 
   // Primary: iran-market per-symbol OHLC JSON (updated to latest trading day)
   const sym = id === 'usdt' ? 'USDT_IRR' : (IRAN_MARKET_MAP[id] || [])[0];
@@ -777,25 +844,68 @@ async function archiveHistory(id: string, range: string): Promise<[number, numbe
       const j = await fetchJSON(`https://iran-market.github.io/data/history/${sym}.json`, 7);
       const records = j?.data?.records;
       if (Array.isArray(records) && records.length >= 2) {
-        const out: [number, number][] = [];
-        for (const rec of records.slice(-maxSlice)) {
-          const closeRial = Number(rec.close);
-          if (!(closeRial > 0)) continue;
-          const closeToman = Math.round(closeRial / 10);
-          const openToman = Number(rec.open) > 0 ? Math.round(Number(rec.open) / 10) : 0;
-          const baseTs = Number(rec.t) > 1600000000
-            ? Math.floor(Number(rec.t))
-            : Math.floor(new Date(rec.date + 'T00:00:00Z').getTime() / 1000);
-          const openTs = baseTs + 9 * 3600 - 12600;
-          const closeTs = baseTs + 16 * 3600 - 12600;
-          if ((range === '3D' || range === '1W') && openToman > 0 && openToman !== closeToman && openTs >= minTs && openTs <= now + 600) {
-            out.push([openTs, openToman]);
+        if (range === '1D') {
+          const out: [number, number][] = [];
+          const curPrice = Number(liveItem?.price) || 0;
+          const curChange = Number(liveItem?.change);
+          if (curPrice > 0 && Number.isFinite(curChange) && curChange > -95) {
+            const startPrice = Math.round(curPrice / (1 + curChange / 100));
+            if (startPrice > 0) out.push([now - 86400, startPrice]);
           }
-          if (closeTs >= minTs && closeTs <= now + 600) {
-            out.push([closeTs, closeToman]);
+          for (const rec of records.slice(-3)) {
+            const closeRial = Number(rec.close);
+            if (!(closeRial > 0)) continue;
+            const closeToman = Math.round(closeRial / 10);
+            const openToman = Number(rec.open) > 0 ? Math.round(Number(rec.open) / 10) : closeToman;
+            const highToman = Number(rec.high) > 0 ? Math.round(Number(rec.high) / 10) : Math.max(openToman, closeToman);
+            const lowToman = Number(rec.low) > 0 ? Math.round(Number(rec.low) / 10) : Math.min(openToman, closeToman);
+            const baseTs = Number(rec.t) > 1600000000
+              ? Math.floor(Number(rec.t))
+              : Math.floor(new Date(rec.date + 'T00:00:00Z').getTime() / 1000);
+            const openTs = baseTs + 9 * 3600 - 12600;
+            const mid1Ts = baseTs + 11.5 * 3600 - 12600;
+            const mid2Ts = baseTs + 14 * 3600 - 12600;
+            const closeTs = baseTs + 16.5 * 3600 - 12600;
+            const pts: [number, number][] = closeToman >= openToman
+              ? [[openTs, openToman], [mid1Ts, lowToman], [mid2Ts, highToman], [closeTs, closeToman]]
+              : [[openTs, openToman], [mid1Ts, highToman], [mid2Ts, lowToman], [closeTs, closeToman]];
+            for (const [ts, val] of pts) {
+              if (ts >= now - 129600 && ts <= now + 300 && val > 0) {
+                out.push([ts, val]);
+              }
+            }
           }
+          const ticks = domesticIntradayTicks.get(id) || [];
+          for (const [ts, val] of ticks) {
+            if (ts >= now - 86400 && ts <= now + 300 && val > 0) {
+              out.push([ts, val]);
+            }
+          }
+          if (curPrice > 0) {
+            out.push([now, curPrice]);
+          }
+          if (out.length >= 2) return out;
+        } else {
+          const out: [number, number][] = [];
+          for (const rec of records.slice(-maxSlice)) {
+            const closeRial = Number(rec.close);
+            if (!(closeRial > 0)) continue;
+            const closeToman = Math.round(closeRial / 10);
+            const openToman = Number(rec.open) > 0 ? Math.round(Number(rec.open) / 10) : 0;
+            const baseTs = Number(rec.t) > 1600000000
+              ? Math.floor(Number(rec.t))
+              : Math.floor(new Date(rec.date + 'T00:00:00Z').getTime() / 1000);
+            const openTs = baseTs + 9 * 3600 - 12600;
+            const closeTs = baseTs + 16 * 3600 - 12600;
+            if ((range === '3D' || range === '1W') && openToman > 0 && openToman !== closeToman && openTs >= minTs && openTs <= now + 600) {
+              out.push([openTs, openToman]);
+            }
+            if (closeTs >= minTs && closeTs <= now + 600) {
+              out.push([closeTs, closeToman]);
+            }
+          }
+          if (out.length >= 2) return out;
         }
-        if (out.length >= 2) return out;
       }
     } catch {}
   }
@@ -814,6 +924,14 @@ async function archiveHistory(id: string, range: string): Promise<[number, numbe
     if (daysIdx === -1 || endDaysIdx === -1) return [];
     const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
     const out: [number, number][] = [];
+    if (range === '1D' && liveItem?.price > 0) {
+      const curPrice = Number(liveItem.price);
+      const curChange = Number(liveItem.change);
+      const startPrice = Number.isFinite(curChange) && curChange > -95
+        ? Math.round(curPrice / (1 + curChange / 100))
+        : (days.length >= 2 ? Number(days[days.length - 2][1]) : curPrice);
+      if (startPrice > 0) out.push([now - 86400, startPrice]);
+    }
     for (const [d, v] of days.slice(-maxSlice)) {
       const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
       if (!m || !(v > 0)) continue;
@@ -822,6 +940,9 @@ async function archiveHistory(id: string, range: string): Promise<[number, numbe
       if (ts >= minTs && ts <= now + 600) {
         out.push([ts, Number(v)]);
       }
+    }
+    if (range === '1D' && liveItem?.price > 0) {
+      out.push([now, Number(liveItem.price)]);
     }
     return out;
   } catch {
@@ -833,13 +954,13 @@ async function wallexHistory(symbol: string, range: string, refPrice = 0): Promi
   const now = Math.floor(Date.now() / 1000);
   const cfg: Record<string, [string, number]> = {
     '1H': ['1', 3600],
-    '1D': ['60', 86400],
+    '1D': ['15', 86400],
     '3D': ['60', 259200],
-    '1W': ['240', 604800],
+    '1W': ['60', 604800],
     '1M': ['1D', 2592000],
     '1Y': ['1D', 31536000]
   };
-  const [res, span] = cfg[range] || ['60', 86400];
+  const [res, span] = cfg[range] || ['15', 86400];
   try {
     const j = await fetchJSON(`https://api.wallex.ir/v1/udf/history?symbol=${symbol}&resolution=${res}&from=${now - span}&to=${now}`, 5);
     if (j?.s === 'ok' && Array.isArray(j.t) && Array.isArray(j.c) && j.t.length >= 2) {
@@ -890,8 +1011,8 @@ app.get('/api/history', async (req, res) => {
   if (item?.crypto || !isDomesticAsset) {
     if (id === 'usdt') {
       let pts = await wallexHistory('USDTTMN', range, item?.price || 0);
-      if (pts.length < 2 && (range === '3D' || range === '1W' || range === '1M' || range === '1Y')) {
-        const arch = await archiveHistory('usdt', range);
+      if (pts.length < 2 && (range === '1D' || range === '3D' || range === '1W' || range === '1M' || range === '1Y')) {
+        const arch = await archiveHistory('usdt', range, item);
         pts = validateHistoryPoints(arch, range, now, true, item?.price || 0);
       }
       if (pts.length >= 2) {
@@ -923,15 +1044,15 @@ app.get('/api/history', async (req, res) => {
     return res.json({ id, range, currency: 'USDT', points: [], unavailable: true });
   }
 
-  // 2. Domestic history from verified iran-market & Nerkhsanj daily archive (3D, 1W, 1M, 1Y)
-  if (range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') {
+  // 2. Domestic history from verified iran-market & Nerkhsanj archive (1D, 3D, 1W, 1M, 1Y)
+  if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') {
     return res.json({ id, range, currency: item?.unit || 'IRT', points: [], unavailable: true });
   }
 
   try {
     const curPrice = item?.price || 0;
     const curTs = item?.t || 0;
-    const rawPoints = await archiveHistory(id, range);
+    const rawPoints = await archiveHistory(id, range, item);
 
     if (rawPoints.length >= 2 && curPrice > 0 && curTs > 0 && (now - curTs < 5 * 86400)) {
       const lastT = rawPoints[rawPoints.length - 1][0];
@@ -1640,12 +1761,73 @@ app.get('/api/crypto-icons', (req, res) => {
   res.json({ ok: true, icons: CRYPTO_ICONS });
 });
 
+function evaluateAlertsForRecord(alerts: any[], ownerEmail?: string): boolean {
+  if (!Array.isArray(alerts) || !cachedPrices.items) return false;
+  let changed = false;
+  const usdtIrt = Number(cachedPrices.items.usdt?.price) || 0;
+  for (const al of alerts) {
+    if (!al || !al.assetId || !(al.price > 0) || al.triggeredAt) continue;
+    const item = cachedPrices.items[al.assetId];
+    if (!item || !(item.price > 0)) continue;
+    let cur = Number(item.price);
+    const itemCur = item.unit || 'IRT';
+    const targetCur = al.currency || 'IRT';
+    if (targetCur === 'IRT' && itemCur === 'USDT') {
+      if (!(usdtIrt > 0)) continue;
+      cur = cur * usdtIrt;
+    } else if (targetCur === 'USD' && itemCur === 'IRT') {
+      if (!(usdtIrt > 0)) continue;
+      cur = cur / usdtIrt;
+    }
+    const hit = (al.direction === 'above' && cur >= al.price) ||
+                (al.direction === 'below' && cur <= al.price);
+    if (hit) {
+      al.triggeredAt = Date.now();
+      changed = true;
+      systemAuditLogs.unshift({
+        id: Date.now(),
+        time: 'هم‌اکنون',
+        type: 'system',
+        msg: `هدف قیمتی دارایی ${al.assetId} محقق شد؛ ایمیل و اعلان هشدار به ${ownerEmail || 'کاربر'} ارسال گردید.`
+      });
+      if (systemAuditLogs.length > 40) systemAuditLogs.pop();
+    }
+  }
+  return changed;
+}
+
+function evaluateAllStoredAlerts() {
+  let anyChanged = false;
+  for (const [email, rec] of Object.entries(userStore)) {
+    if (rec?.data?.alerts && evaluateAlertsForRecord(rec.data.alerts, email)) {
+      rec.updatedAt = Math.floor(Date.now() / 1000);
+      rec.revision = (Number(rec.revision) || 1) + 1;
+      anyChanged = true;
+    }
+  }
+  if (mockUserData?.data?.alerts && evaluateAlertsForRecord(mockUserData.data.alerts, 'کاربر')) {
+    mockUserData.updatedAt = Math.floor(Date.now() / 1000);
+    mockUserData.revision = (Number(mockUserData.revision) || 1) + 1;
+    anyChanged = true;
+  }
+  if (anyChanged) saveAuthSessionToDisk();
+}
+
 app.get('/api/me/data', (req, res) => {
   const u = resolveReqUser(req);
   const email = u?.email;
   const userRecord = email ? userStore[email] : null;
-  res.json(userRecord || mockUserData || {
+  const target = userRecord || mockUserData;
+  if (target?.data?.alerts) {
+    if (evaluateAlertsForRecord(target.data.alerts, email || 'کاربر')) {
+      target.updatedAt = Math.floor(Date.now() / 1000);
+      target.revision = (Number(target.revision) || 1) + 1;
+      saveAuthSessionToDisk();
+    }
+  }
+  res.json(target || {
     exists: false,
+    revision: 0,
     updatedAt: 0,
     data: {
       holdings: [],
@@ -1661,8 +1843,16 @@ app.put('/api/me/data', (req, res) => {
   const u = resolveReqUser(req);
   const email = u?.email;
   const body = req.body || {};
+  const prevRec = email ? userStore[email] : mockUserData;
+  const nextRev = (Number(prevRec?.revision) || 0) + 1;
+
+  if (Array.isArray(body.alerts)) {
+    evaluateAlertsForRecord(body.alerts, email || 'کاربر');
+  }
+
   const updated = {
     exists: true,
+    revision: nextRev,
     updatedAt: Math.floor(Date.now() / 1000),
     data: body
   };
@@ -1678,28 +1868,26 @@ app.put('/api/me/data', (req, res) => {
   mockUserData = updated;
   saveAuthSessionToDisk();
 
-  // Check alert conditions and log simulated email alerts
-  if (Array.isArray(body.alerts) && cachedPrices.items) {
-    for (const al of body.alerts) {
-      const item = cachedPrices.items[al.assetId];
-      if (item && item.price > 0 && !al.triggeredAt) {
-        const hit = (al.direction === 'above' && item.price >= al.price) ||
-                    (al.direction === 'below' && item.price <= al.price);
-        if (hit) {
-          al.triggeredAt = Math.floor(Date.now() / 1000);
-          systemAuditLogs.unshift({
-            id: Date.now(),
-            time: 'هم‌اکنون',
-            type: 'system',
-            msg: `هدف قیمتی دارایی ${al.assetId} محقق شد؛ ایمیل و اعلان هشدار به ${email || 'کاربر'} ارسال گردید.`
-          });
-          if (systemAuditLogs.length > 40) systemAuditLogs.pop();
-        }
+  res.json(updated);
+});
+
+app.post('/api/me/alerts/:id/retry', (req, res) => {
+  const u = resolveReqUser(req);
+  const email = u?.email;
+  const alertId = String(req.params.id || '');
+  const target = (email ? userStore[email] : null) || mockUserData;
+  if (target?.data?.alerts && Array.isArray(target.data.alerts)) {
+    for (const al of target.data.alerts) {
+      if (String(al.id) === alertId) {
+        al.triggeredAt = 0;
       }
     }
+    evaluateAlertsForRecord(target.data.alerts, email || 'کاربر');
+    target.updatedAt = Math.floor(Date.now() / 1000);
+    target.revision = (Number(target.revision) || 1) + 1;
+    saveAuthSessionToDisk();
   }
-
-  res.json(updated);
+  res.json({ ok: true });
 });
 
 // PWA Static Assets

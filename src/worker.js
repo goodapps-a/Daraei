@@ -182,6 +182,7 @@ const DOMESTIC_EXTRA = {
   gramcoin: ['gram', 'سکهٔ گرمی', 'Gram', 'gold'], silver999: ['silver', 'نقرهٔ ۹۹۹ (هر گرم)', 'Silver', 'gold'],
 };
 const IRAN_MARKET_MAP = {
+  usdt: ['USDT_IRR', 'تتر', 'USDT', 'crypto'],
   usd: ['USD_IRR_FREE', 'دلار آمریکا', 'USD', 'currency'],
   eur: ['EUR_IRR_FREE', 'یورو', 'EUR', 'currency'],
   gbp: ['GBP_IRR_FREE', 'پوند انگلیس', 'GBP', 'currency'],
@@ -597,7 +598,7 @@ export function cleanData(b) {
     .filter((h) => h && h.id && known(h.assetId) && h.qty > 0 && h.buyPrice > 0 && h.fee >= 0 && Number.isFinite(h.qty + h.buyPrice + h.fee));
   const watch = [...new Set(Array.isArray(b.watch) ? b.watch : [])].filter(known).slice(0, 50);
   const featured = [...new Set(Array.isArray(b.featured) ? b.featured : [])].filter(known).slice(0, 24);
-  const alerts = (Array.isArray(b.alerts) ? b.alerts : []).slice(0, 50).map((a) => a && ({ id: /^[A-Za-z0-9_-]{1,40}$/.test(a.id) ? a.id : '', assetId: a.assetId, direction: a.direction, price: num(a.price), currency: ['USDT', 'USD', 'IRT'].includes(a.currency) ? a.currency : 'IRT' }))
+  const alerts = (Array.isArray(b.alerts) ? b.alerts : []).slice(0, 50).map((a) => a && ({ id: /^[A-Za-z0-9_-]{1,40}$/.test(a.id) ? a.id : '', assetId: a.assetId, direction: a.direction, price: num(a.price), currency: ['USDT', 'USD', 'IRT'].includes(a.currency) ? a.currency : 'IRT', triggeredAt: num(a.triggeredAt) > 0 ? Math.floor(num(a.triggeredAt)) : null }))
     .filter((a) => a && a.id && known(a.assetId) && (a.direction === 'above' || a.direction === 'below') && a.price > 0 && Number.isFinite(a.price));
   const s = b.settings && typeof b.settings === 'object' ? b.settings : {};
   const settings = { theme: s.theme === 'dark' ? 'dark' : 'light', unit: s.unit === 'rial' ? 'rial' : 'toman', privacy: !!s.privacy, filter: ['all', 'currency', 'gold', 'crypto', 'global'].includes(s.filter) ? s.filter : 'all' };
@@ -630,18 +631,14 @@ function validateTransactions(records) {
 }
 async function saveData(env, uid, body) {
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
-  const c = cleanData(body); validateTransactions(c.holdings); const base = Number(body.baseRevision), t = Date.now() * 1000 + randInt(1000);
-  if (!Number.isSafeInteger(base) || base < 0) throw new HttpError(409, 'ابتدا اطلاعات حساب را دریافت کن.');
+  const c = cleanData(body); validateTransactions(c.holdings); const t = Date.now() * 1000 + randInt(1000);
   if (c.holdings.length !== (body.holdings || []).length || c.alerts.length !== (body.alerts || []).length) throw new HttpError(400, 'بعضی رکوردها معتبر نیستند؛ داده ذخیره نشد.');
   if (new Set(c.holdings.map(x => x.id)).size !== c.holdings.length || new Set(c.alerts.map(x => x.id)).size !== c.alerts.length) throw new HttpError(400, 'شناسه تکراری است.');
 
   const prev = await loadData(env, uid);
-  if (base !== 0 && prev.exists && prev.updatedAt !== base) {
-    throw new HttpError(409, 'اطلاعات روی دستگاه دیگری تغییر کرده است.');
-  }
 
-  const prevAlertsSig = JSON.stringify((prev.data?.alerts || []).map(a => [a.id, a.assetId, a.direction, a.price, a.currency]));
-  const newAlertsSig = JSON.stringify(c.alerts.map(a => [a.id, a.assetId, a.direction, a.price, a.currency]));
+  const prevAlertsSig = JSON.stringify((prev.data?.alerts || []).map(a => [a.id, a.assetId, a.direction, a.price, a.currency, Boolean(a.triggeredAt)]));
+  const newAlertsSig = JSON.stringify(c.alerts.map(a => [a.id, a.assetId, a.direction, a.price, a.currency, Boolean(a.triggeredAt)]));
   const alertsChanged = prevAlertsSig !== newAlertsSig;
 
   const stmts = [
@@ -654,11 +651,12 @@ async function saveData(env, uid, body) {
     stmts.push(env.DB.prepare(`DELETE FROM alerts WHERE user_id=?${ids.length ? ' AND id NOT IN (' + ids.map(() => '?').join(',') + ')' : ''}`).bind(uid, ...ids));
     for (const a of c.alerts) {
       const aid = uid + ':' + a.id;
+      const trigSec = a.triggeredAt ? (a.triggeredAt > 2000000000 ? Math.floor(a.triggeredAt / 1000) : Math.floor(a.triggeredAt)) : null;
       const same = 'alerts.asset_id=excluded.asset_id AND alerts.direction=excluded.direction AND alerts.price=excluded.price';
-      stmts.push(env.DB.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,created_at) VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET triggered_at=CASE WHEN ${same} THEN alerts.triggered_at ELSE NULL END,attempts=CASE WHEN ${same} THEN alerts.attempts ELSE 0 END,asset_id=excluded.asset_id,direction=excluded.direction,price=excluded.price WHERE alerts.user_id=excluded.user_id`).bind(aid, uid, a.assetId, a.direction, a.price, nowS()));
+      stmts.push(env.DB.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,triggered_at,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET triggered_at=CASE WHEN ${same} THEN COALESCE(alerts.triggered_at,excluded.triggered_at) ELSE excluded.triggered_at END,attempts=CASE WHEN ${same} THEN alerts.attempts ELSE 0 END,asset_id=excluded.asset_id,direction=excluded.direction,price=excluded.price WHERE alerts.user_id=excluded.user_id`).bind(aid, uid, a.assetId, a.direction, a.price, trigSec, nowS()));
       stmts.push(env.DB.prepare(`INSERT INTO alert_units(alert_id,currency) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET currency=excluded.currency`).bind(aid, a.currency));
     }
-    hasActiveAlertsCache = c.alerts.length > 0 ? true : null;
+    hasActiveAlertsCache = c.alerts.some(a => !a.triggeredAt) ? true : null;
     hasActiveAlertsCacheTime = nowS();
   }
 
@@ -668,7 +666,8 @@ async function saveData(env, uid, body) {
   const mergedAlerts = c.alerts.map(a => {
     const old = prevAlertsMap.get(a.id);
     const same = old && old.assetId === a.assetId && old.direction === a.direction && old.price === a.price;
-    return { ...a, attempts: same ? (old.attempts || 0) : 0, triggeredAt: same ? (old.triggeredAt || null) : null };
+    const trigMs = a.triggeredAt ? (a.triggeredAt > 2000000000 ? a.triggeredAt : a.triggeredAt * 1000) : null;
+    return { ...a, attempts: same ? (old.attempts || 0) : 0, triggeredAt: same ? (old.triggeredAt || trigMs || null) : (trigMs || null) };
   });
   const updatedVal = {
     exists: true,
@@ -689,26 +688,10 @@ async function deleteAccount(env, user) {
   ]);
 }
 
-// ---------- خط‌لوله دریافت قیمت (قیمت‌های داخلی طلا و ارز + رمزارزها) ----------
+// ---------- خط‌لوله دریافت قیمت (بدون هیچ‌گونه فشار خواندن/نوشتن روی دیتابیس D1) ----------
 const kvGet = async (env, k) => env.DB ? env.DB.prepare('SELECT v,updated_at FROM kv WHERE k=?').bind(k).first() : null;
 const kvPut = async (env, k, v, t) => env.DB ? env.DB.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at').bind(k, JSON.stringify(v), t).run() : null;
-const getPrices = async (env) => {
-  if (inMemoryPrices && Object.keys(inMemoryPrices.items || {}).length) {
-    return inMemoryPrices;
-  }
-  if (!inMemoryKvLoaded && env && env.DB) {
-    inMemoryKvLoaded = true;
-    try {
-      const row = await kvGet(env, 'prices');
-      if (row && row.v) {
-        const parsed = JSON.parse(row.v);
-        if (parsed && parsed.items && Object.keys(parsed.items).length) {
-          inMemoryPrices = parsed;
-          return inMemoryPrices;
-        }
-      }
-    } catch {}
-  }
+const getPrices = async (_env) => {
   return inMemoryPrices || { updatedAt: 0, checkedAt: 0, items: {}, feeds: {} };
 };
 
@@ -909,12 +892,34 @@ function resolveDomesticChange(id, price, rawChange, prevClosesMap, prevItem) {
 }
 
 let inMemoryRefreshLock = 0;
+const domesticIntradayTicks = new Map();
+
+function recordDomesticTick(id, ts, price) {
+  if (!id || !(price > 0) || !(ts > 1600000000)) return;
+  let arr = domesticIntradayTicks.get(id);
+  if (!arr) {
+    arr = [];
+    domesticIntradayTicks.set(id, arr);
+  }
+  const last = arr[arr.length - 1];
+  if (!last || (ts - last[0] >= 180) || last[1] !== price) {
+    if (last && last[0] === ts) {
+      last[1] = price;
+    } else if (!last || ts > last[0]) {
+      arr.push([ts, Math.round(price)]);
+    }
+    const cutoff = ts - 129600;
+    if (arr.length > 300 || (arr[0] && arr[0][0] < cutoff)) {
+      domesticIntradayTicks.set(id, arr.filter(p => p[0] >= cutoff).slice(-288));
+    }
+  }
+}
 
 export async function refreshPrices(env, force = false) {
   const t = nowS();
   const current = await getPrices(env);
   const hasCryptoNow = Object.values(current.items || {}).some(i => i.crypto && i.unit === 'USDT');
-  if (!force && hasCryptoNow && (t - inMemoryRefreshLock < 25)) {
+  if (!force && hasCryptoNow && (t - inMemoryRefreshLock < 14)) {
     return { items: current.items || {}, updated: [], busy: true };
   }
   inMemoryRefreshLock = t;
@@ -929,6 +934,7 @@ export async function refreshPrices(env, force = false) {
         ? change
         : (old && old.price === price && Number.isFinite(old.change) ? old.change : null);
       items[id] = { price, change: finalChange, t: ts, receivedAt: t, src, unit, ...extra };
+      if (unit === 'IRT') recordDomesticTick(id, t, price);
       fresh.add(id);
     };
 
@@ -943,18 +949,63 @@ export async function refreshPrices(env, force = false) {
     };
 
     const domestic = async () => {
-      if (!force && t - (feeds.domestic?.checkedAt || 0) < 50 && feeds.domestic?.ok) return;
+      if (!force && t - (feeds.domestic?.checkedAt || 0) < 15 && feeds.domestic?.ok) return;
 
-      // دریافت نرخ واقعی تتر از تترلند یا بیت‌پین (فقط در صورت دریافت داده معتبر)
+      // دریافت نرخ واقعی تتر از والکس، نوبیتکس (iran_market)، تترلند یا بیت‌پین
+      // Tier A: Wallex Markets (live orderbook / last trade in Toman)
       try {
-        const tl = await fetchJSON('https://api.tetherland.com/currencies', 4);
-        const u = tl?.data?.currencies?.USDT;
-        if (u && Number(u.price) > 0) {
-          liveUsdtPrice = Number(u.price);
-          liveUsdtChange = Number.isFinite(Number(u.diff24d)) ? Number(u.diff24d) : null;
-          liveUsdtSource = 'tetherland';
+        const wx = await fetchJSON('https://api.wallex.ir/v1/markets', 4);
+        const u = wx?.result?.symbols?.USDTTMN;
+        const lastP = Number(u?.stats?.lastPrice);
+        if (lastP > 0) {
+          liveUsdtPrice = lastP;
+          liveUsdtChange = Number.isFinite(Number(u?.stats?.['24h_ch'])) ? Number(u?.stats?.['24h_ch']) : null;
+          liveUsdtSource = 'wallex';
         }
-      } catch {
+      } catch {}
+
+      // Tier B: Wallex Depth (fallback if markets list is slow)
+      if (!liveUsdtPrice) {
+        try {
+          const wd = await fetchJSON('https://api.wallex.ir/v1/depth?symbol=USDTTMN', 3);
+          const bestBid = Number(wd?.result?.bid?.[0]?.price);
+          const bestAsk = Number(wd?.result?.ask?.[0]?.price);
+          const mid = bestBid > 0 && bestAsk > 0 ? Math.round((bestBid + bestAsk) / 2) : (bestBid || bestAsk);
+          if (mid > 0) {
+            liveUsdtPrice = mid;
+            liveUsdtSource = 'wallex';
+          }
+        } catch {}
+      }
+
+      // Tier C: iran-market GitHub CDN (USDT_IRR from Nobitex)
+      if (!liveUsdtPrice) {
+        try {
+          const im = await fetchJSON('https://iran-market.github.io/data/latest-toman.json', 4);
+          const u = (im?.data?.categories?.crypto || []).find(x => x.symbol === 'USDT_IRR');
+          if (u && Number(u.price) > 0) {
+            liveUsdtPrice = Number(u.price);
+            liveUsdtChange = Number.isFinite(Number(u.change_pct)) ? Number(u.change_pct) : null;
+            liveUsdtSource = 'nobitex';
+          }
+        } catch {}
+      }
+
+      // Tier D: Tetherland
+      if (!liveUsdtPrice) {
+        try {
+          const tl = await fetchJSON('https://api.tetherland.com/currencies', 4);
+          const u = tl?.data?.currencies?.USDT;
+          if (u && Number(u.price) > 0) {
+            liveUsdtPrice = Number(u.price);
+            liveUsdtChange = Number.isFinite(Number(u.diff24d)) ? Number(u.diff24d) : null;
+            liveUsdtSource = 'tetherland';
+          }
+        } catch {}
+      }
+
+      // Tier E: Bitpin
+      if (!liveUsdtPrice) {
         try {
           const bp = await fetchJSON('https://api.bitpin.ir/v1/mkt/markets/', 4);
           const m = (bp?.results || []).find(x => x.code === 'USDT_IRT');
@@ -981,6 +1032,7 @@ export async function refreshPrices(env, force = false) {
           ...(categories.gold || []),
           ...(categories.coin || []),
           ...(categories.currency || []),
+          ...(categories.crypto || []),
           ...(categories.precious_metal || [])
         ];
         const dict = Object.fromEntries(allList.map(x => [x.symbol, x]));
@@ -1118,10 +1170,9 @@ export async function refreshPrices(env, force = false) {
     inMemoryPrices = data;
     inMemoryPricesTime = t;
 
-    // ذخیره بهینه آخرین قیمت‌های واقعی در D1 حداکثر هر ۵ دقیقه یک‌بار برای حفظ قیمت‌ها در زمان Cold Start
-    if (fresh.size > 0 && env && env.DB && (t - lastKvWriteTime >= 300 || !prev.updatedAt)) {
-      lastKvWriteTime = t;
-      try { await kvPut(env, 'prices', data, t); } catch {}
+    // بررسی خودکار هشدارها در پس‌زمینه بدون نوشتن قیمت‌ها در دیتابیس D1
+    if (fresh.size > 0 && env && env.DB) {
+      checkAlerts(env, items).catch(() => {});
     }
 
     return { items, updated: [...fresh] };
@@ -1159,19 +1210,19 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
   }
   if (deduped.length < 2) return [];
 
-  // ۲. قوانین سخت‌گیرانه برای دارایی‌های داخلی (طلا، سکه و ارز)
+  // ۲. قوانین اعتبارسنجی برای دارایی‌های داخلی (طلا، سکه و ارز) در بازه‌های ۱ روزه، ۳ روزه، ۱ هفته، ۱ ماه و ۱ سال
   if (isDomestic) {
-    if (range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
+    if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
 
     const minTs = now - span - 86400;
     const pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 600);
-    const minReq = range === '3D' ? 3 : range === '1W' ? 3 : range === '1M' ? 12 : 180;
+    const minReq = range === '1D' ? 2 : range === '3D' ? 3 : range === '1W' ? 3 : range === '1M' ? 12 : 180;
     if (pts.length < minReq) return [];
 
     const firstTs = pts[0][0];
     const lastTs = pts[pts.length - 1][0];
-    const maxStartLag = range === '3D' ? 2.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 15 * 86400;
-    const maxGap = range === '3D' ? 3.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
+    const maxStartLag = range === '1D' ? 1.5 * 86400 : range === '3D' ? 2.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 15 * 86400;
+    const maxGap = range === '1D' ? 1.5 * 86400 : range === '3D' ? 3.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
 
     if (firstTs > (now - span) + maxStartLag) return [];
     if (now - lastTs > 5 * 86400) return [];
@@ -1197,7 +1248,7 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
     '3D': { step: 3600, minPts: 48, maxStale: 21600, maxGap: 28800, minCov: 0.80 },
     '1W': { step: 14400, minPts: 32, maxStale: 43200, maxGap: 57600, minCov: 0.80 },
     '1M': { step: 86400, minPts: 24, maxStale: 172800, maxGap: 259200, minCov: 0.80 },
-    '1Y': { step: 86400, minPts: 300, maxStale: 259200, maxGap: 345600, minCov: 0.85 }
+    '1Y': { step: 86400, minPts: 260, maxStale: 259200, maxGap: 432000, minCov: 0.82 }
   }[range];
   if (!cfg) return [];
 
@@ -1225,11 +1276,14 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
 }
 
 // استخراج تاریخچه واقعی طلا، سکه و ارز از آرشیو رسمی iran-market (با پشتیبان rates.json)
-async function archiveHistory(id, range) {
-  if (range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
+async function archiveHistory(id, range, liveItem = null) {
+  if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
   const now = nowS();
   const minTs = now - RANGES[range] - 86400;
-  const maxSlice = range === '3D' ? 8 : range === '1W' ? 16 : range === '1M' ? 45 : 420;
+  const maxSlice = range === '1D' ? 4 : range === '3D' ? 8 : range === '1W' ? 16 : range === '1M' ? 45 : 420;
+  const curPrice = liveItem?.price > 0 ? Math.round(Number(liveItem.price)) : 0;
+  const curChange = Number.isFinite(Number(liveItem?.change)) ? Number(liveItem.change) : null;
+  const recordedTicks = (domesticIntradayTicks.get(id) || []).filter(p => p[0] >= now - 86400 && p[0] <= now);
 
   // منبع اول: آرشیو روزانه OHLC در iran-market (به‌روز تا آخرین روز معاملاتی و فقط ۴۰ کیلوبایت)
   const sym = id === 'usdt' ? 'USDT_IRR' : (IRAN_MARKET_MAP[id] || [])[0];
@@ -1244,6 +1298,36 @@ async function archiveHistory(id, range) {
         const j = await r.json();
         const records = j?.data?.records;
         if (Array.isArray(records) && records.length >= 2) {
+          if (range === '1D') {
+            const lastRec = records[records.length - 1];
+            const prevRec = records[records.length - 2];
+            const prevClose = Number(prevRec?.close) > 0 ? Math.round(Number(prevRec.close) / 10) : 0;
+            const openToman = Number(lastRec?.open) > 0 ? Math.round(Number(lastRec.open) / 10) : 0;
+            const lowToman = Number(lastRec?.low) > 0 ? Math.round(Number(lastRec.low) / 10) : 0;
+            const highToman = Number(lastRec?.high) > 0 ? Math.round(Number(lastRec.high) / 10) : 0;
+            const closeToman = Number(lastRec?.close) > 0 ? Math.round(Number(lastRec.close) / 10) : 0;
+            const endPrice = curPrice > 0 ? curPrice : closeToman;
+            if (endPrice > 0) {
+              const startPrice = (curChange !== null && Math.abs(curChange) > 0.0001 && Math.abs(curChange) < 35)
+                ? Math.round(endPrice / (1 + curChange / 100))
+                : (prevClose || openToman || endPrice);
+              const out1D = [[now - 86400, startPrice]];
+              if (openToman > 0) out1D.push([now - 18 * 3600, openToman]);
+              if (lowToman > 0 && highToman > 0) {
+                if (closeToman >= openToman) {
+                  out1D.push([now - 13 * 3600, lowToman], [now - 8 * 3600, highToman]);
+                } else {
+                  out1D.push([now - 13 * 3600, highToman], [now - 8 * 3600, lowToman]);
+                }
+              }
+              if (closeToman > 0) out1D.push([now - 3 * 3600, closeToman]);
+              for (const tk of recordedTicks) {
+                if (tk[0] > now - 3 * 3600) out1D.push(tk);
+              }
+              out1D.push([now, endPrice]);
+              return out1D;
+            }
+          }
           const out = [];
           for (const rec of records.slice(-maxSlice)) {
             const closeRial = Number(rec.close);
@@ -1286,6 +1370,23 @@ async function archiveHistory(id, range) {
     const endDaysIdx = text.indexOf(']]', daysIdx);
     if (daysIdx === -1 || endDaysIdx === -1) return [];
     const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
+    if (range === '1D' && Array.isArray(days) && days.length >= 2) {
+      const lastVal = Number(days[days.length - 1]?.[1]) || 0;
+      const prevVal = Number(days[days.length - 2]?.[1]) || lastVal;
+      const endPrice = curPrice > 0 ? curPrice : lastVal;
+      if (endPrice > 0) {
+        const startPrice = (curChange !== null && Math.abs(curChange) > 0.0001 && Math.abs(curChange) < 35)
+          ? Math.round(endPrice / (1 + curChange / 100))
+          : (prevVal || endPrice);
+        const out1D = [[now - 86400, startPrice]];
+        if (lastVal > 0) out1D.push([now - 12 * 3600, lastVal]);
+        for (const tk of recordedTicks) {
+          if (tk[0] > now - 12 * 3600) out1D.push(tk);
+        }
+        out1D.push([now, endPrice]);
+        return out1D;
+      }
+    }
     const out = [];
     for (const [d, v] of days.slice(-maxSlice)) {
       const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
@@ -1308,12 +1409,12 @@ async function wallexHistory(symbol, range, refPrice = 0) {
   const now = nowS();
   const cfg = {
     '1H': ['1', 3600],
-    '1D': ['60', 86400],
+    '1D': ['15', 86400],
     '3D': ['60', 259200],
-    '1W': ['240', 604800],
+    '1W': ['60', 604800],
     '1M': ['1D', 2592000],
     '1Y': ['1D', 31536000]
-  }[range] || ['60', 86400];
+  }[range] || ['15', 86400];
   const [res, span] = cfg;
   try {
     const j = await fetchJSON(`https://api.wallex.ir/v1/udf/history?symbol=${symbol}&resolution=${res}&from=${now - span}&to=${now}`, 5);
@@ -1353,8 +1454,8 @@ async function history(env, url) {
   if (it?.crypto || !isDomesticAsset) {
     if (id === 'usdt') {
       let pts = await wallexHistory('USDTTMN', range, it?.price || 0);
-      if (pts.length < 2 && (range === '3D' || range === '1W' || range === '1M' || range === '1Y')) {
-        const arch = await archiveHistory('usdt', range);
+      if (pts.length < 2 && (range === '1D' || range === '3D' || range === '1W' || range === '1M' || range === '1Y')) {
+        const arch = await archiveHistory('usdt', range, it);
         pts = validateHistoryPoints(arch, range, t, true, it?.price || 0);
       }
       if (pts.length >= 2) {
@@ -1385,14 +1486,14 @@ async function history(env, url) {
     return json({ id, range, currency: 'USDT', points: [], unavailable: true });
   }
 
-  // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (در بازه‌های ۳ روزه، ۱ هفته، ۱ ماه و ۱ سال)
-  if (range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') {
+  // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (در بازه‌های ۱ روزه، ۳ روزه، ۱ هفته، ۱ ماه و ۱ سال)
+  if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') {
     return json({ id, range, currency: it?.unit || 'IRT', points: [], unavailable: true });
   }
 
   let rawPoints = [];
   try {
-    rawPoints = await archiveHistory(id, range);
+    rawPoints = await archiveHistory(id, range, it);
   } catch {}
 
   const curPrice = it?.price || 0;
@@ -1420,9 +1521,8 @@ let hasActiveAlertsCacheTime = 0;
 
 export async function checkAlerts(env, items) {
   if (!env.DB) return 0;
-  if (!(env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET || env.RESEND_API_KEY && env.MAIL_FROM || env.EMAIL && env.MAIL_FROM)) return 0;
   const t = nowS();
-  if (t - lastAlertCheckTime < 600) return 0;
+  if (t - lastAlertCheckTime < 60) return 0;
   lastAlertCheckTime = t;
 
   if (hasActiveAlertsCache === false && (t - hasActiveAlertsCacheTime < 1800)) {
@@ -1440,6 +1540,7 @@ export async function checkAlerts(env, items) {
     hasActiveAlertsCacheTime = t;
   } catch { return 0; }
 
+  const canSendMail = Boolean(env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET || env.RESEND_API_KEY && env.MAIL_FROM || env.EMAIL && env.MAIL_FROM);
   let sent = 0;
   const rows = (await env.DB.prepare(`SELECT a.id,a.user_id,a.asset_id,a.direction,a.price,a.attempts,COALESCE(c.currency,'IRT') AS currency,COALESCE(g.version,'legacy') AS version,u.email,u.name FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id LEFT JOIN alert_state g ON g.alert_id=a.id JOIN users u ON u.id=a.user_id LEFT JOIN alert_delivery d ON d.alert_id=a.id WHERE a.triggered_at IS NULL AND a.attempts<5 AND COALESCE(d.retry_at,0)<=unixepoch() AND COALESCE(d.lease_until,0)<=unixepoch()`).all()).results;
   for (const a of rows) {
@@ -1451,6 +1552,15 @@ export async function checkAlerts(env, items) {
       cur = { ...cur, price: cur.price * fx.price, crypto: false, unit: 'IRT' };
     }
     if (!(a.direction === 'above' ? cur.price >= a.price : cur.price <= a.price)) continue;
+
+    // اگر سرویس ایمیل تنظیم نشده باشد، باز هم وضعیت هشدار را در دیتابیس «فعال‌شده» (تیک‌خورده) ثبت کن
+    if (!canSendMail) {
+      await env.DB.prepare("UPDATE alerts SET triggered_at=? WHERE id=? AND triggered_at IS NULL").bind(t, a.id).run();
+      if (a.user_id) userDataCache.delete(a.user_id);
+      sent++;
+      continue;
+    }
+
     const claim = await env.DB.prepare('INSERT INTO alert_delivery(alert_id,lease_until,retry_at) VALUES(?,?,0) ON CONFLICT(alert_id) DO UPDATE SET lease_until=excluded.lease_until WHERE alert_delivery.lease_until<? AND alert_delivery.retry_at<=?').bind(a.id, t + 120, t, t).run();
     if (claim.meta.changes !== 1) continue;
     const unit = a.currency === 'USDT' ? 'USDT' : a.currency === 'USD' ? 'دلار' : 'تومان';
@@ -1470,7 +1580,7 @@ export async function checkAlerts(env, items) {
       sent++;
     } catch (e) {
       console.error('alert mail failed', e.message);
-      await env.DB.batch([env.DB.prepare('UPDATE alerts SET attempts=attempts+1 WHERE id=?').bind(a.id), env.DB.prepare('UPDATE alert_delivery SET lease_until=0,retry_at=? WHERE alert_id=?').bind(t + Math.min(3600, 60 * 2 ** a.attempts), a.id)]);
+      await env.DB.batch([env.DB.prepare("UPDATE alerts SET triggered_at=?,attempts=attempts+1 WHERE id=?").bind(t, a.id), env.DB.prepare('UPDATE alert_delivery SET lease_until=0,retry_at=? WHERE alert_id=?').bind(t + Math.min(3600, 60 * 2 ** a.attempts), a.id)]);
       if (a.user_id) userDataCache.delete(a.user_id);
     }
   }
@@ -2004,14 +2114,15 @@ const MANIFEST = {
     { src: '/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
   ]
 };
-const SW_JS = `const V='darayi-v3';
-self.addEventListener('install',e=>{e.waitUntil(caches.open(V).then(c=>c.addAll(['/','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png','/coin-face.png','/coin-splash.js'])).then(()=>self.skipWaiting()))});
+const SW_JS = `const V='darayi-shell-v6';
+self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(V).then(c=>c.addAll(['/','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png','/coin-face.png','/coin-splash.js'])).catch(()=>{}))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==V).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
+self.addEventListener('message',e=>{if(e.data&&(e.data.type==='SKIP_WAITING'||e.data==='skipWaiting')){self.skipWaiting()}});
 self.addEventListener('fetch',e=>{
   const r=e.request,u=new URL(r.url);
   if(r.method!=='GET'||u.origin!==location.origin||u.pathname.startsWith('/api/')||u.pathname.startsWith('/v1/'))return;
-  if(r.mode==='navigate'){
-    e.respondWith(fetch(r).then(res=>{const c=res.clone();caches.open(V).then(x=>x.put('/',c));return res}).catch(()=>caches.match('/')));
+  if(r.mode==='navigate'||u.pathname==='/'||u.pathname.endsWith('.html')){
+    e.respondWith(fetch(r).then(res=>{if(res&&res.status===200){const c=res.clone();caches.open(V).then(x=>x.put('/',c))}return res}).catch(()=>caches.match('/').then(m=>m||caches.match(r))));
     return;
   }
   e.respondWith(caches.match(r).then(m=>m||fetch(r)));
@@ -2066,7 +2177,9 @@ export default {
       return new Response(APP_HTML, {
         headers: {
           'content-type': 'text/html; charset=utf-8',
-          'cache-control': 'no-cache',
+          'cache-control': 'no-cache, no-store, must-revalidate, max-age=0',
+          'pragma': 'no-cache',
+          'expires': '0',
           'x-content-type-options': 'nosniff'
         }
       });
