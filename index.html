@@ -2962,12 +2962,12 @@ body:has(.modal-backdrop.open) .bottom-nav {
 </section>
 </main></div>
 <nav class="bottom-nav" aria-label="ناوبری اصلی">
-  <button class="nav-tab active" data-page="home" type="button" aria-label="داشبورد" title="داشبورد">
+  <button class="nav-tab" data-page="market" type="button" aria-label="بازار" title="بازار">
     <span class="nav-icon">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/></svg>
     </span>
   </button>
-  <button class="nav-tab nav-tab-coin" data-page="portfolio" type="button" aria-label="دارایی" title="دارایی">
+  <button class="nav-tab nav-tab-coin active" data-page="home" type="button" aria-label="داشبورد" title="داشبورد">
     <span class="coin-isometric-btn">
       <svg class="nav-coin-svg" width="28" height="28" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <ellipse cx="16" cy="11.5" rx="12" ry="6" fill="currentColor" fill-opacity="0.15"/>
@@ -2977,7 +2977,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
       </svg>
     </span>
   </button>
-  <button class="nav-tab" data-page="market" type="button" aria-label="بازار" title="بازار">
+  <button class="nav-tab" data-page="portfolio" type="button" aria-label="سبد دارایی" title="سبد دارایی">
     <span class="nav-icon">
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
     </span>
@@ -7390,7 +7390,7 @@ function togglePrivacy(){state.privacy=!state.privacy;persist();renderAll();upda
 if ($('#privacyBtn')) $('#privacyBtn').onclick=togglePrivacy;
 if ($('#themeBtn')) $('#themeBtn').onclick=()=>{state.theme=state.theme==='dark'?'light':'dark';persist();renderAll()};
 if ($('#backupBtn')) $('#backupBtn').onclick=()=>download('darayi-backup.json',{version:6,exportedAt:new Date().toISOString(),state,snapshots});if ($('#exportBtn')) $('#exportBtn').onclick=$('#backupBtn').onclick;$('#importBtn').onclick=()=>$('#importFile').click();$('#importFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{const d=JSON.parse(await f.text()),s=d.state||d;if(!Array.isArray(s.holdings)||!Array.isArray(s.watch))throw Error('invalid');const oldState=state;state={...state,...s,user:state.user};sanitizeState();try{ledger()}catch(e){state=oldState;throw e}if(Array.isArray(d.snapshots))snapshots=d.snapshots.filter(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite));persist();renderAll();toast('پشتیبان بازیابی شد')}catch{toast('فایل پشتیبان معتبر نیست')}e.target.value=''};$('#clearData').onclick=()=>{askConfirm('همهٔ خریدها، هشدارها و تنظیمات ذخیره‌شده حذف شوند؟',()=>{try{localStorage.removeItem('darayi-v5')}catch{}snapshots=[];try{localStorage.removeItem('darayi-valuations-v1')}catch{};state={holdings:[],watch:[],alerts:[],featured:['usd','usdt','gold18','btc','eur','gbp','try','cad','coin'],theme:'light',unit:'toman',privacy:false,filter:'all',query:''};renderAll();toast('اطلاعات این دستگاه پاک شد')})};
-const cardObserver=new MutationObserver(()=>{hydrateSparks()});['#marketGrid','#featuredGrid','#winners','#losers'].forEach(sel=>{const el=$(sel);if(el)cardObserver.observe(el,{childList:true});});loadPriceCache();loadCryptoIconsOnce();setupFeaturedDrag();setupDragToScroll();renderAll();
+const cardObserver=new MutationObserver(()=>{hydrateSparks()});['#marketGrid','#featuredGrid','#winners','#losers'].forEach(sel=>{const el=$(sel);if(el)cardObserver.observe(el,{childList:true});});loadPriceCache();loadCryptoIconsOnce();setupFeaturedDrag();setupDragToScroll();renderAll();goto('home');
 let splashPending = false;
 try { splashPending = !sessionStorage.getItem('darayi_splashed') && !!document.getElementById('coin-splash'); } catch (e) {}
 window.onSplashDone = function() {
