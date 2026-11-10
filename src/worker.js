@@ -1589,6 +1589,16 @@ export async function checkAlerts(env, items) {
 
 export async function runCron(env) {
   const { items } = await refreshPrices(env);
+  try {
+    if (typeof caches !== 'undefined' && caches.default && inMemoryPrices) {
+      const out = publicPrices(inMemoryPrices);
+      const res = json(out, 200, {
+        'access-control-allow-origin': '*',
+        'cache-control': 'public, max-age=15, s-maxage=55, stale-while-revalidate=120'
+      });
+      await caches.default.put('https://edge.darayi.local/api/prices', res);
+    }
+  } catch {}
   const sent = await checkAlerts(env, items);
   return { sent };
 }
@@ -1671,10 +1681,29 @@ async function route(req, env, url, ctx) {
 
   // دریافت لحظه‌ای قیمت‌ها: در دسترس همیشگی، بدون پرتاب خطای ۵۰۰ یا ۵۰۳
   if (p === '/api/prices' && m === 'GET') {
+    const manual = url.searchParams.get('refresh') === '1';
+    let edgeCache = null;
+    const canonicalKey = 'https://edge.darayi.local/api/prices';
+    try {
+      if (typeof caches !== 'undefined' && caches.default) {
+        edgeCache = caches.default;
+      }
+    } catch {}
+
+    if (!manual && edgeCache) {
+      try {
+        const cachedRes = await edgeCache.match(canonicalKey);
+        if (cachedRes) {
+          return cachedRes;
+        }
+      } catch (e) {
+        console.error('edge cache match error:', e?.message);
+      }
+    }
+
     let prices = { updatedAt: 0, items: {}, feeds: {} };
     try { prices = await getPrices(env); } catch (e) { console.error('getPrices error:', e?.message); }
 
-    const manual = url.searchParams.get('refresh') === '1';
     const age = nowS() - (prices.checkedAt || 0);
     const limit = manual ? 8 : Number(env.INLINE_REFRESH_S || 90);
     const empty = !Object.keys(prices.items || {}).length;
@@ -1702,9 +1731,15 @@ async function route(req, env, url, ctx) {
     if (inMemoryLastError) out.feeds = { ...(out.feeds || {}), lastError: inMemoryLastError };
     const headers = {
       'access-control-allow-origin': '*',
-      'cache-control': manual ? 'no-store' : 'public, max-age=15, stale-while-revalidate=30'
+      'cache-control': manual ? 'no-store' : 'public, max-age=15, s-maxage=55, stale-while-revalidate=120'
     };
-    return json(out, 200, headers);
+    const res = json(out, 200, headers);
+    if (!manual && edgeCache && ctx && ctx.waitUntil && Object.keys(out.items || {}).length > 0) {
+      try {
+        ctx.waitUntil(edgeCache.put(canonicalKey, res.clone()));
+      } catch {}
+    }
+    return res;
   }
 
   if (p === '/api/crypto-icons' && m === 'GET') {

@@ -4857,17 +4857,20 @@ function loadPriceCache(){
     const o4 = JSON.parse(localStorage.getItem(PRICE_CACHE) || '{}') || {};
     const o = { ...o3, ...o4 };
     const items = {};
+    const now = Math.floor(Date.now() / 1000);
     for(const [id,v] of Object.entries(o)){
       if (Array.isArray(v) && v[0] > 0 && v[2] > 0) {
-        items[id] = {price:v[0], change:v[1], updatedAt:v[2], currency:v[3], kind:v[4], name:v[5], symbol:v[6], cat:v[7], volume:v[8], pair:v[9], stale:true};
+        const isStale = (now - v[2]) > 7200;
+        items[id] = {price:v[0], change:v[1], updatedAt:v[2], currency:v[3], kind:v[4], name:v[5], symbol:v[6], cat:v[7], volume:v[8], pair:v[9], stale:isStale};
       }
     }
     if (!Object.keys(items).length) return null;
     return applyPrices(items);
   }catch{return null}
 }
+let initialPricesLoaded = false;
 let lastPriceFetchTime = Date.now(), lastSparkClearTime = Date.now();
-async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(Date.now()-lastSparkClearTime>300000){sparkSvgCache.clear();lastSparkClearTime=Date.now();}}
+async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);initialPricesLoaded=true;if(Date.now()-lastSparkClearTime>300000){sparkSvgCache.clear();lastSparkClearTime=Date.now();}}
 state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};evaluateAlerts();if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();if($('#portfolio')?.classList.contains('active'))renderPortfolio();}lastPriceSig=sig;snapshot();updateTrust();hydrateSparks();if(manual)toast(n?'دریافت انجام شد؛ زمان هر قیمت روی کارت مشخص است.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();hydrateSparks();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
 async function syncCrypto(){const buttons=[$('#syncNow'),$('#refreshBtn')];buttons.forEach(b=>b.disabled=true);try{await loadPrices(true)}finally{buttons.forEach(b=>b.disabled=false)}}
 let ws=null,wsTimer=0,wsAttempt=0,lastWs=0,wsPaint=0;
@@ -4886,6 +4889,7 @@ function connectPrices(){
   }
   ws.onmessage = e => {
     try {
+      if (!initialPricesLoaded) return;
       const arr = JSON.parse(e.data);
       if (!Array.isArray(arr)) return;
       const now = Math.floor(Date.now() / 1000);
@@ -7391,24 +7395,15 @@ if ($('#privacyBtn')) $('#privacyBtn').onclick=togglePrivacy;
 if ($('#themeBtn')) $('#themeBtn').onclick=()=>{state.theme=state.theme==='dark'?'light':'dark';persist();renderAll()};
 if ($('#backupBtn')) $('#backupBtn').onclick=()=>download('darayi-backup.json',{version:6,exportedAt:new Date().toISOString(),state,snapshots});if ($('#exportBtn')) $('#exportBtn').onclick=$('#backupBtn').onclick;$('#importBtn').onclick=()=>$('#importFile').click();$('#importFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{const d=JSON.parse(await f.text()),s=d.state||d;if(!Array.isArray(s.holdings)||!Array.isArray(s.watch))throw Error('invalid');const oldState=state;state={...state,...s,user:state.user};sanitizeState();try{ledger()}catch(e){state=oldState;throw e}if(Array.isArray(d.snapshots))snapshots=d.snapshots.filter(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite));persist();renderAll();toast('پشتیبان بازیابی شد')}catch{toast('فایل پشتیبان معتبر نیست')}e.target.value=''};$('#clearData').onclick=()=>{askConfirm('همهٔ خریدها، هشدارها و تنظیمات ذخیره‌شده حذف شوند؟',()=>{try{localStorage.removeItem('darayi-v5')}catch{}snapshots=[];try{localStorage.removeItem('darayi-valuations-v1')}catch{};state={holdings:[],watch:[],alerts:[],featured:['usd','usdt','gold18','btc','eur','gbp','try','cad','coin'],theme:'light',unit:'toman',privacy:false,filter:'all',query:''};renderAll();toast('اطلاعات این دستگاه پاک شد')})};
 const cardObserver=new MutationObserver(()=>{hydrateSparks()});['#marketGrid','#featuredGrid','#winners','#losers'].forEach(sel=>{const el=$(sel);if(el)cardObserver.observe(el,{childList:true});});loadPriceCache();loadCryptoIconsOnce();setupFeaturedDrag();setupDragToScroll();renderAll();goto('home');
+// دریافت فوری و همگام قیمت‌ها در اولین میلی‌ثانیه لود برنامه به صورت موازی با انیمیشن سکه
+loadPrices().finally(() => {
+  connectPrices();
+});
 let splashPending = false;
 try { splashPending = !sessionStorage.getItem('darayi_splashed') && !!document.getElementById('coin-splash'); } catch (e) {}
 window.onSplashDone = function() {
-  if (splashPending) {
-    splashPending = false;
-    loadPrices().then(connectPrices);
-  }
+  splashPending = false;
 };
-if (!splashPending) {
-  loadPrices().then(connectPrices);
-} else {
-  setTimeout(() => {
-    if (splashPending) {
-      splashPending = false;
-      loadPrices().then(connectPrices);
-    }
-  }, 3200);
-}
 
 
 
