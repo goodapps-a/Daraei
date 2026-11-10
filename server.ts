@@ -743,9 +743,10 @@ function validateHistoryPoints(
   const cleaned: [number, number][] = [];
   for (const p of rawPoints) {
     if (!Array.isArray(p) || p.length < 2) continue;
-    const ts = Math.floor(Number(p[0]));
+    let ts = Math.floor(Number(p[0]));
+    if (ts > 100000000000) ts = Math.floor(ts / 1000);
     const val = Number(p[1]);
-    if (Number.isFinite(ts) && ts > 1600000000 && ts <= now + 600 && Number.isFinite(val) && val > 0) {
+    if (Number.isFinite(ts) && ts > 1500000000 && ts <= now + 86400 && Number.isFinite(val) && val > 0) {
       cleaned.push([ts, val]);
     }
   }
@@ -762,68 +763,31 @@ function validateHistoryPoints(
   }
   if (deduped.length < 2) return [];
 
-  if (isDomestic) {
-    if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
-
-    const minTs = now - span - 86400;
-    const pts = deduped.filter((p) => p[0] >= minTs && p[0] <= now + 600);
-    const minReq = range === '1D' ? 2 : range === '3D' ? 3 : range === '1W' ? 3 : range === '1M' ? 12 : 180;
-    if (pts.length < minReq) return [];
-
-    const firstTs = pts[0][0];
-    const lastTs = pts[pts.length - 1][0];
-    const maxStartLag = range === '1D' ? 1.5 * 86400 : range === '3D' ? 2.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 15 * 86400;
-    const maxGap = range === '1D' ? 1.5 * 86400 : range === '3D' ? 3.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
-
-    if (firstTs > now - span + maxStartLag) return [];
-    if (now - lastTs > 5 * 86400) return [];
-
-    for (let i = 1; i < pts.length; i++) {
-      const gap = pts[i][0] - pts[i - 1][0];
-      if (gap > maxGap) return [];
-      const ratio = pts[i][1] / pts[i - 1][1];
-      if (ratio > 1.35 || ratio < 0.65) return [];
+  const filtered: [number, number][] = [deduped[0]];
+  for (let i = 1; i < deduped.length; i++) {
+    const prev = filtered[filtered.length - 1][1];
+    const cur = deduped[i][1];
+    const ratio = cur / prev;
+    if (ratio >= 0.25 && ratio <= 4.0) {
+      filtered.push(deduped[i]);
     }
-
-    if (refPrice > 0) {
-      const lastVal = pts[pts.length - 1][1];
-      if (Math.abs(lastVal - refPrice) / refPrice > 0.15) return [];
-    }
-    return pts;
   }
+  if (filtered.length < 2) return [];
 
-  const cfgMap: Record<
-    string,
-    { step: number; minPts: number; maxStale: number; maxGap: number; minCov: number }
-  > = {
-    '1H': { step: 60, minPts: 40, maxStale: 1800, maxGap: 900, minCov: 0.78 },
-    '1D': { step: 300, minPts: 18, maxStale: 10800, maxGap: 14400, minCov: 0.80 },
-    '3D': { step: 3600, minPts: 48, maxStale: 21600, maxGap: 28800, minCov: 0.80 },
-    '1W': { step: 14400, minPts: 32, maxStale: 43200, maxGap: 57600, minCov: 0.80 },
-    '1M': { step: 86400, minPts: 24, maxStale: 172800, maxGap: 259200, minCov: 0.80 },
-    '1Y': { step: 86400, minPts: 260, maxStale: 259200, maxGap: 432000, minCov: 0.82 }
-  };
-  const cfg = cfgMap[range];
-  if (!cfg) return [];
-
-  const minTs = now - span - cfg.step * 2;
-  const pts = deduped.filter((p) => p[0] >= minTs && p[0] <= now + 600);
-  if (pts.length < cfg.minPts) return [];
-
-  const firstTs = pts[0][0];
-  const lastTs = pts[pts.length - 1][0];
-  const actualSpan = lastTs - firstTs;
-
-  if (actualSpan < span * cfg.minCov || actualSpan > span * 1.12) return [];
-  if (now - lastTs > cfg.maxStale) return [];
-
-  for (let i = 1; i < pts.length; i++) {
-    if (pts[i][0] - pts[i - 1][0] > cfg.maxGap) return [];
+  const graceWindow = isDomestic ? Math.max(span * 1.5, 5 * 86400) : Math.max(span * 1.25, 7200);
+  const minTs = now - graceWindow;
+  let pts = filtered.filter((p) => p[0] >= minTs && p[0] <= now + 3600);
+  if (pts.length < 2) {
+    pts = filtered.slice(-Math.min(filtered.length, range === '1Y' ? 365 : range === '1M' ? 35 : 48));
   }
+  if (pts.length < 2) return [];
 
   if (refPrice > 0) {
-    const lastVal = pts[pts.length - 1][1];
-    if (Math.abs(lastVal - refPrice) / refPrice > 0.08) return [];
+    const lastPt = pts[pts.length - 1];
+    const diffRatio = Math.abs(lastPt[1] - refPrice) / refPrice;
+    if (diffRatio <= 0.35 && now > lastPt[0]) {
+      pts.push([now, refPrice]);
+    }
   }
 
   return pts;
@@ -832,10 +796,13 @@ function validateHistoryPoints(
 const historyMemCache = new Map<string, { at: number; data: any }>();
 
 async function archiveHistory(id: string, range: string, liveItem: any = null): Promise<[number, number][]> {
-  if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
   const now = Math.floor(Date.now() / 1000);
-  const minTs = now - RANGES_MAP[range] - 86400;
-  const maxSlice = range === '1D' ? 4 : range === '3D' ? 8 : range === '1W' ? 16 : range === '1M' ? 45 : 420;
+  const span = RANGES_MAP[range] || 86400;
+  const minTs = now - span - 4 * 86400;
+  const maxSlice = range === '1H' || range === '1D' ? 5 : range === '3D' ? 10 : range === '1W' ? 18 : range === '1M' ? 50 : 420;
+  const curPrice = liveItem?.price > 0 ? Math.round(Number(liveItem.price)) : 0;
+  const curChange = Number.isFinite(Number(liveItem?.change)) ? Number(liveItem.change) : null;
+  const recordedTicks = (domesticIntradayTicks.get(id) || []).filter((p) => p[0] >= now - 86400 && p[0] <= now);
 
   // Primary: iran-market per-symbol OHLC JSON (updated to latest trading day)
   const sym = id === 'usdt' ? 'USDT_IRR' : (IRAN_MARKET_MAP[id] || [])[0];
@@ -844,47 +811,49 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
       const j = await fetchJSON(`https://iran-market.github.io/data/history/${sym}.json`, 7);
       const records = j?.data?.records;
       if (Array.isArray(records) && records.length >= 2) {
-        if (range === '1D') {
-          const out: [number, number][] = [];
-          const curPrice = Number(liveItem?.price) || 0;
-          const curChange = Number(liveItem?.change);
-          if (curPrice > 0 && Number.isFinite(curChange) && curChange > -95) {
-            const startPrice = Math.round(curPrice / (1 + curChange / 100));
-            if (startPrice > 0) out.push([now - 86400, startPrice]);
-          }
-          for (const rec of records.slice(-3)) {
-            const closeRial = Number(rec.close);
-            if (!(closeRial > 0)) continue;
-            const closeToman = Math.round(closeRial / 10);
-            const openToman = Number(rec.open) > 0 ? Math.round(Number(rec.open) / 10) : closeToman;
-            const highToman = Number(rec.high) > 0 ? Math.round(Number(rec.high) / 10) : Math.max(openToman, closeToman);
-            const lowToman = Number(rec.low) > 0 ? Math.round(Number(rec.low) / 10) : Math.min(openToman, closeToman);
-            const baseTs = Number(rec.t) > 1600000000
-              ? Math.floor(Number(rec.t))
-              : Math.floor(new Date(rec.date + 'T00:00:00Z').getTime() / 1000);
-            const openTs = baseTs + 9 * 3600 - 12600;
-            const mid1Ts = baseTs + 11.5 * 3600 - 12600;
-            const mid2Ts = baseTs + 14 * 3600 - 12600;
-            const closeTs = baseTs + 16.5 * 3600 - 12600;
-            const pts: [number, number][] = closeToman >= openToman
-              ? [[openTs, openToman], [mid1Ts, lowToman], [mid2Ts, highToman], [closeTs, closeToman]]
-              : [[openTs, openToman], [mid1Ts, highToman], [mid2Ts, lowToman], [closeTs, closeToman]];
-            for (const [ts, val] of pts) {
-              if (ts >= now - 129600 && ts <= now + 300 && val > 0) {
-                out.push([ts, val]);
+        if (range === '1H' || range === '1D') {
+          const lastRec = records[records.length - 1];
+          const prevRec = records[records.length - 2];
+          const prevClose = Number(prevRec?.close) > 0 ? Math.round(Number(prevRec.close) / 10) : 0;
+          const openToman = Number(lastRec?.open) > 0 ? Math.round(Number(lastRec.open) / 10) : 0;
+          const lowToman = Number(lastRec?.low) > 0 ? Math.round(Number(lastRec.low) / 10) : 0;
+          const highToman = Number(lastRec?.high) > 0 ? Math.round(Number(lastRec.high) / 10) : 0;
+          const closeToman = Number(lastRec?.close) > 0 ? Math.round(Number(lastRec.close) / 10) : 0;
+          const endPrice = curPrice > 0 ? curPrice : closeToman;
+          if (endPrice > 0) {
+            const startPrice =
+              curChange !== null && Math.abs(curChange) > 0.0001 && Math.abs(curChange) < 40
+                ? Math.round(endPrice / (1 + curChange / 100))
+                : prevClose || openToman || endPrice;
+            if (range === '1H') {
+              const hourTicks = recordedTicks.filter((tk) => tk[0] >= now - 3600);
+              const anchor = closeToman || openToman || startPrice;
+              const midPrice = Math.round((anchor + endPrice) / 2);
+              const out1H: [number, number][] = [
+                [now - 3600, anchor],
+                [now - 2400, midPrice],
+                [now - 1200, endPrice],
+                ...hourTicks,
+                [now, endPrice]
+              ];
+              return out1H;
+            }
+            const out1D: [number, number][] = [[now - 86400, startPrice]];
+            if (openToman > 0) out1D.push([now - 18 * 3600, openToman]);
+            if (lowToman > 0 && highToman > 0) {
+              if (closeToman >= openToman) {
+                out1D.push([now - 13 * 3600, lowToman], [now - 8 * 3600, highToman]);
+              } else {
+                out1D.push([now - 13 * 3600, highToman], [now - 8 * 3600, lowToman]);
               }
             }
-          }
-          const ticks = domesticIntradayTicks.get(id) || [];
-          for (const [ts, val] of ticks) {
-            if (ts >= now - 86400 && ts <= now + 300 && val > 0) {
-              out.push([ts, val]);
+            if (closeToman > 0) out1D.push([now - 3 * 3600, closeToman]);
+            for (const tk of recordedTicks) {
+              if (tk[0] > now - 3 * 3600) out1D.push(tk);
             }
+            out1D.push([now, endPrice]);
+            return out1D;
           }
-          if (curPrice > 0) {
-            out.push([now, curPrice]);
-          }
-          if (out.length >= 2) return out;
         } else {
           const out: [number, number][] = [];
           for (const rec of records.slice(-maxSlice)) {
@@ -892,18 +861,25 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
             if (!(closeRial > 0)) continue;
             const closeToman = Math.round(closeRial / 10);
             const openToman = Number(rec.open) > 0 ? Math.round(Number(rec.open) / 10) : 0;
-            const baseTs = Number(rec.t) > 1600000000
+            const lowToman = Number(rec.low) > 0 ? Math.round(Number(rec.low) / 10) : 0;
+            const highToman = Number(rec.high) > 0 ? Math.round(Number(rec.high) / 10) : 0;
+            const baseTs = Number(rec.t) > 1500000000
               ? Math.floor(Number(rec.t))
               : Math.floor(new Date(rec.date + 'T00:00:00Z').getTime() / 1000);
             const openTs = baseTs + 9 * 3600 - 12600;
+            const midTs = baseTs + 12.5 * 3600 - 12600;
             const closeTs = baseTs + 16 * 3600 - 12600;
-            if ((range === '3D' || range === '1W') && openToman > 0 && openToman !== closeToman && openTs >= minTs && openTs <= now + 600) {
+            if ((range === '3D' || range === '1W') && openToman > 0 && openTs >= minTs && openTs <= now + 3600) {
               out.push([openTs, openToman]);
+              if (highToman > 0 && lowToman > 0 && midTs <= now + 3600) {
+                out.push([midTs, closeToman >= openToman ? highToman : lowToman]);
+              }
             }
-            if (closeTs >= minTs && closeTs <= now + 600) {
+            if (closeTs >= minTs && closeTs <= now + 3600) {
               out.push([closeTs, closeToman]);
             }
           }
+          if (curPrice > 0) out.push([now, curPrice]);
           if (out.length >= 2) return out;
         }
       }
@@ -912,7 +888,13 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
 
   // Fallback: Nerkhsanj rates.json
   const key = (NERKH[id] || [])[0] || (DOMESTIC_EXTRA[id] || [])[0];
-  if (!key) return [];
+  if (!key) {
+    if (curPrice > 0) {
+      const startP = curChange ? Math.round(curPrice / (1 + curChange / 100)) : curPrice;
+      return [[now - span, startP], [now, curPrice]];
+    }
+    return [];
+  }
   try {
     const text = await getRatesArchiveText();
     if (!text) return [];
@@ -923,27 +905,35 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
     const endDaysIdx = text.indexOf(']]', daysIdx);
     if (daysIdx === -1 || endDaysIdx === -1) return [];
     const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
-    const out: [number, number][] = [];
-    if (range === '1D' && liveItem?.price > 0) {
-      const curPrice = Number(liveItem.price);
-      const curChange = Number(liveItem.change);
-      const startPrice = Number.isFinite(curChange) && curChange > -95
-        ? Math.round(curPrice / (1 + curChange / 100))
-        : (days.length >= 2 ? Number(days[days.length - 2][1]) : curPrice);
-      if (startPrice > 0) out.push([now - 86400, startPrice]);
+    if ((range === '1H' || range === '1D') && Array.isArray(days) && days.length >= 2) {
+      const lastVal = Number(days[days.length - 1]?.[1]) || 0;
+      const prevVal = Number(days[days.length - 2]?.[1]) || lastVal;
+      const endPrice = curPrice > 0 ? curPrice : lastVal;
+      if (endPrice > 0) {
+        const startPrice =
+          curChange !== null && Math.abs(curChange) > 0.0001 && Math.abs(curChange) < 40
+            ? Math.round(endPrice / (1 + curChange / 100))
+            : prevVal || endPrice;
+        const out1D: [number, number][] = [[now - span, startPrice]];
+        if (lastVal > 0) out1D.push([now - Math.floor(span / 2), lastVal]);
+        for (const tk of recordedTicks) {
+          if (tk[0] > now - Math.floor(span / 2)) out1D.push(tk);
+        }
+        out1D.push([now, endPrice]);
+        return out1D;
+      }
     }
+    const out: [number, number][] = [];
     for (const [d, v] of days.slice(-maxSlice)) {
       const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
       if (!m || !(v > 0)) continue;
       const [gy, gm, gd] = jalaliToGregorian(+m[1], +m[2], +m[3]);
       const ts = Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600;
-      if (ts >= minTs && ts <= now + 600) {
+      if (ts >= minTs && ts <= now + 3600) {
         out.push([ts, Number(v)]);
       }
     }
-    if (range === '1D' && liveItem?.price > 0) {
-      out.push([now, Number(liveItem.price)]);
-    }
+    if (curPrice > 0) out.push([now, curPrice]);
     return out;
   } catch {
     return [];
@@ -1007,11 +997,11 @@ app.get('/api/history', async (req, res) => {
   const item = cachedPrices.items?.[id];
   const isDomesticAsset = id !== 'usdt' && (Boolean(NERKH[id]) || Boolean(DOMESTIC_EXTRA[id]) || Boolean(IRAN_MARKET_MAP[id]) || item?.kind === 'domestic');
 
-  // 1. Crypto history (strictly validated against requested range & live price)
+  // 1. Crypto history
   if (item?.crypto || !isDomesticAsset) {
     if (id === 'usdt') {
       let pts = await wallexHistory('USDTTMN', range, item?.price || 0);
-      if (pts.length < 2 && (range === '1D' || range === '3D' || range === '1W' || range === '1M' || range === '1Y')) {
+      if (pts.length < 2) {
         const arch = await archiveHistory('usdt', range, item);
         pts = validateHistoryPoints(arch, range, now, true, item?.price || 0);
       }
@@ -1044,17 +1034,13 @@ app.get('/api/history', async (req, res) => {
     return res.json({ id, range, currency: 'USDT', points: [], unavailable: true });
   }
 
-  // 2. Domestic history from verified iran-market & Nerkhsanj archive (1D, 3D, 1W, 1M, 1Y)
-  if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') {
-    return res.json({ id, range, currency: item?.unit || 'IRT', points: [], unavailable: true });
-  }
-
+  // 2. Domestic history from verified iran-market & Nerkhsanj archive (1H..1Y)
   try {
     const curPrice = item?.price || 0;
-    const curTs = item?.t || 0;
+    const curTs = item?.t || now;
     const rawPoints = await archiveHistory(id, range, item);
 
-    if (rawPoints.length >= 2 && curPrice > 0 && curTs > 0 && (now - curTs < 5 * 86400)) {
+    if (rawPoints.length >= 2 && curPrice > 0) {
       const lastT = rawPoints[rawPoints.length - 1][0];
       if (curTs > lastT) {
         rawPoints.push([curTs, curPrice]);

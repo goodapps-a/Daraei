@@ -4868,9 +4868,8 @@ function loadPriceCache(){
     return applyPrices(items);
   }catch{return null}
 }
-let initialPricesLoaded = false;
 let lastPriceFetchTime = Date.now(), lastSparkClearTime = Date.now();
-async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);initialPricesLoaded=true;if(Date.now()-lastSparkClearTime>300000){sparkSvgCache.clear();lastSparkClearTime=Date.now();}}
+async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(Date.now()-lastSparkClearTime>300000){sparkSvgCache.clear();lastSparkClearTime=Date.now();}}
 state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};evaluateAlerts();if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();if($('#portfolio')?.classList.contains('active'))renderPortfolio();}lastPriceSig=sig;snapshot();updateTrust();hydrateSparks();if(manual)toast(n?'دریافت انجام شد؛ زمان هر قیمت روی کارت مشخص است.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();hydrateSparks();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
 async function syncCrypto(){const buttons=[$('#syncNow'),$('#refreshBtn')];buttons.forEach(b=>b.disabled=true);try{await loadPrices(true)}finally{buttons.forEach(b=>b.disabled=false)}}
 let ws=null,wsTimer=0,wsAttempt=0,lastWs=0,wsPaint=0;
@@ -4889,7 +4888,6 @@ function connectPrices(){
   }
   ws.onmessage = e => {
     try {
-      if (!initialPricesLoaded) return;
       const arr = JSON.parse(e.data);
       if (!Array.isArray(arr)) return;
       const now = Math.floor(Date.now() / 1000);
@@ -4940,36 +4938,25 @@ function paintLivePrices(){document.querySelectorAll('[data-detail]').forEach(el
 let chartReq=0;const RANGE_LABEL={'1H':'۱ ساعت اخیر','1D':'۲۴ ساعت اخیر','3D':'۳ روز اخیر','1W':'۱ هفته اخیر','1M':'۱ ماه اخیر','1Y':'۱ سال اخیر'};
 const CLIENT_RANGES={'1H':3600,'1D':86400,'3D':259200,'1W':604800,'1M':2592000,'1Y':31536000};
 function validateDomesticArchivePoints(deduped, range, now, span, refPrice) {
-  if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
-  const minTs = now - span - 86400;
-  const pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 600);
-  const minReq = range === '1D' ? 2 : range === '3D' ? 3 : range === '1W' ? 3 : range === '1M' ? 12 : 180;
-  if (pts.length < minReq) return [];
-  const firstTs = pts[0][0], lastTs = pts[pts.length - 1][0];
-  const maxStartLag = range === '1D' ? 1.5 * 86400 : range === '3D' ? 2.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 15 * 86400;
-  const maxGap = range === '1D' ? 1.5 * 86400 : range === '3D' ? 3.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
-  if (firstTs > (now - span) + maxStartLag) return [];
-  if (now - lastTs > 5 * 86400) return [];
-  for (let i = 1; i < pts.length; i++) {
-    if (pts[i][0] - pts[i - 1][0] > maxGap) return [];
-    const ratio = pts[i][1] / pts[i - 1][1];
-    if (ratio > 1.35 || ratio < 0.65) return [];
-  }
-  if (refPrice > 0 && Math.abs(pts[pts.length - 1][1] - refPrice) / refPrice > 0.15) return [];
-  return pts;
+  const grace = Math.max(span * 1.5, 5 * 86400);
+  const minTs = now - grace;
+  let pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 3600);
+  if (pts.length < 2) pts = deduped.slice(-Math.min(deduped.length, range === '1Y' ? 365 : 48));
+  return pts.length >= 2 ? pts : [];
 }
 function validateClientHistory(rawPoints, range, a) {
   const span = CLIENT_RANGES[range];
   if (!span || !Array.isArray(rawPoints) || rawPoints.length < 2) return [];
   const now = Math.floor(Date.now() / 1000);
   const isDomestic = Boolean(a && a.cat !== 'crypto' && a.id !== 'usdt');
-  if (isDomestic && range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
 
   const cleaned = [];
   for (const p of rawPoints) {
     if (!Array.isArray(p) || p.length < 2) continue;
-    const ts = Math.floor(Number(p[0])), val = Number(p[1]);
-    if (Number.isFinite(ts) && ts > 1600000000 && ts <= now + 600 && Number.isFinite(val) && val > 0) {
+    let ts = Math.floor(Number(p[0]));
+    if (ts > 100000000000) ts = Math.floor(ts / 1000);
+    const val = Number(p[1]);
+    if (Number.isFinite(ts) && ts > 1500000000 && ts <= now + 86400 && Number.isFinite(val) && val > 0) {
       cleaned.push([ts, val]);
     }
   }
@@ -4986,43 +4973,29 @@ function validateClientHistory(rawPoints, range, a) {
   }
   if (deduped.length < 2) return [];
 
-  const refPrice = (a && a.price > 0) ? a.price : 0;
-
-  if (isDomestic) {
-    return validateDomesticArchivePoints(deduped, range, now, span, refPrice);
-  }
-
-  const cfg = {
-    '1H': { step: 60, minPts: 40, maxStale: 1800, maxGap: 900, minCov: 0.78 },
-    '1D': { step: 300, minPts: 18, maxStale: 10800, maxGap: 14400, minCov: 0.80 },
-    '3D': { step: 3600, minPts: 48, maxStale: 21600, maxGap: 28800, minCov: 0.80 },
-    '1W': { step: 14400, minPts: 32, maxStale: 43200, maxGap: 57600, minCov: 0.80 },
-    '1M': { step: 86400, minPts: 24, maxStale: 172800, maxGap: 259200, minCov: 0.80 },
-    '1Y': { step: 86400, minPts: 260, maxStale: 259200, maxGap: 432000, minCov: 0.82 }
-  }[range];
-  if (cfg) {
-    const minTs = now - span - cfg.step * 2;
-    const pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 600);
-    if (pts.length >= cfg.minPts) {
-      const firstTs = pts[0][0], lastTs = pts[pts.length - 1][0];
-      const actualSpan = lastTs - firstTs;
-      if (actualSpan >= span * cfg.minCov && actualSpan <= span * 1.15 && (now - lastTs <= cfg.maxStale)) {
-        let gapOk = true;
-        for (let i = 1; i < pts.length; i++) {
-          if (pts[i][0] - pts[i - 1][0] > cfg.maxGap) { gapOk = false; break; }
-        }
-        if (gapOk && (!(refPrice > 0) || Math.abs(pts[pts.length - 1][1] - refPrice) / refPrice <= 0.08)) {
-          return pts;
-        }
-      }
+  const filtered = [deduped[0]];
+  for (let i = 1; i < deduped.length; i++) {
+    const prev = filtered[filtered.length - 1][1];
+    const cur = deduped[i][1];
+    const ratio = cur / prev;
+    if (ratio >= 0.25 && ratio <= 4.0) {
+      filtered.push(deduped[i]);
     }
   }
+  if (filtered.length < 2) return [];
 
-  // برای تتر (USDT) در صورت استفاده از آرشیو رسمی روزانه (USDT_IRR) آن را با استاندارد آرشیو اعتبارسنجی کن
-  if (a && a.id === 'usdt') {
-    return validateDomesticArchivePoints(deduped, range, now, span, refPrice);
+  const refPrice = (a && a.price > 0) ? a.price : 0;
+  if (isDomestic) {
+    return validateDomesticArchivePoints(filtered, range, now, span, refPrice);
   }
-  return [];
+
+  const grace = Math.max(span * 1.25, 7200);
+  const minTs = now - grace;
+  let pts = filtered.filter(p => p[0] >= minTs && p[0] <= now + 3600);
+  if (pts.length < 2) {
+    pts = filtered.slice(-Math.min(filtered.length, range === '1Y' ? 365 : range === '1M' ? 35 : 48));
+  }
+  return pts.length >= 2 ? pts : [];
 }
 async function loadChart(a,r){const req=++chartReq,box=$('#detailChart');box.innerHTML='<span class="muted">در حال دریافت و راستی‌آزمایی تاریخچه…</span>';let pts=await getHistory(a.id,r);if(pts.length<2&&(r==='1D'||r==='1H')){r='1W';pts=await getHistory(a.id,'1W');$$('#detailRanges button').forEach(x=>x.classList.toggle('active',x.dataset.detailRange==='1W'));}if(req!==chartReq||!$('#detailChart'))return;detailState={id:a.id,range:r,points:pts};drawDetail();}
 let detailState=null;
@@ -5048,7 +5021,7 @@ function drawDetail(){
   const hdrChange=$('#detailHeaderChange');
   if(pts.length<2){
     box.innerHTML='<span class="muted">نمودار واقعی تاییدشده‌ای برای این بازه زمانی در دسترس نیست</span>';
-    if($('#detailNote'))$('#detailNote').textContent='به دلیل عدم تضمین دقت ۱۰۰٪ داده‌ها در این بازه، نمودار نمایش داده نمی‌شود.';
+    if($('#detailNote'))$('#detailNote').textContent='در حال حاضر داده تاریخی از صرافی برای این بازه دریافت نشد.';
     if($('#detailRangeStart'))$('#detailRangeStart').textContent='—';
     const end=$('.detail-chart-caption')?.lastElementChild;
     if(end)end.textContent='—';
@@ -5061,7 +5034,7 @@ function drawDetail(){
   const firstPrice=pts[0][1],lastPrice=pts.at(-1)[1];
   const rangePct=firstPrice>0?((lastPrice-firstPrice)/firstPrice)*100:0;
   const chartColor=rangePct>=0?'#16865b':'#d84b55';
-  const isDailyTooltip = range === '1M' || range === '1Y' || (isDomestic && range !== '1D');
+  const isDailyTooltip = range === '1M' || range === '1Y' || (isDomestic && range !== '1D' && range !== '1H');
   paintChart(box,pts,chartColor,n=>quote(a,n),{isDaily:isDailyTooltip});
   if(hdrChange){
     hdrChange.textContent=(rangePct>=0?'↗ +':'↘ ')+pct.format(Math.abs(rangePct))+'٪ ('+(RANGE_LABEL[range]||range)+')';
@@ -5077,7 +5050,6 @@ function drawDetail(){
 const histories=new Map(),historyBusy=new Map();
 async function getHistory(id,range='1D'){
   const a=asset(id);
-  if(a&&a.cat!=='crypto'&&a.id!=='usdt'&&range!=='1D'&&range!=='3D'&&range!=='1W'&&range!=='1M'&&range!=='1Y')return [];
   const key=id+':'+range,old=histories.get(key);
   if(old&&old.points?.length>=2&&Date.now()-old.at<60000){
     const validOld=validateClientHistory(old.points,range,a);
@@ -5113,17 +5085,16 @@ function withCurrent(points, a, range = '1D') {
   if (!Array.isArray(points) || points.length < 2) return [];
   const valid = validateClientHistory(points, range, a);
   if (valid.length < 2) return [];
-  if (!a || !(a.price > 0) || !a.updatedAt || isStale(a)) return valid;
+  if (!a || !(a.price > 0) || !a.updatedAt) return valid;
   const now = Math.floor(a.updatedAt);
   const last = valid.at(-1);
-  const maxDiff = (a.cat === 'crypto' || a.id === 'usdt') ? 0.08 : 0.15;
-  if (Math.abs(a.price - last[1]) / last[1] > maxDiff) return [];
+  if (Math.abs(a.price - last[1]) / last[1] > 0.35) return valid;
   if (now > last[0]) {
-    return validateClientHistory([...valid, [now, a.price]], range, a);
+    return [...valid, [now, a.price]];
   } else if (now === last[0]) {
     const copy = valid.slice();
     copy[copy.length - 1] = [now, a.price];
-    return validateClientHistory(copy, range, a);
+    return copy;
   }
   return valid;
 }
@@ -7395,10 +7366,9 @@ if ($('#privacyBtn')) $('#privacyBtn').onclick=togglePrivacy;
 if ($('#themeBtn')) $('#themeBtn').onclick=()=>{state.theme=state.theme==='dark'?'light':'dark';persist();renderAll()};
 if ($('#backupBtn')) $('#backupBtn').onclick=()=>download('darayi-backup.json',{version:6,exportedAt:new Date().toISOString(),state,snapshots});if ($('#exportBtn')) $('#exportBtn').onclick=$('#backupBtn').onclick;$('#importBtn').onclick=()=>$('#importFile').click();$('#importFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{const d=JSON.parse(await f.text()),s=d.state||d;if(!Array.isArray(s.holdings)||!Array.isArray(s.watch))throw Error('invalid');const oldState=state;state={...state,...s,user:state.user};sanitizeState();try{ledger()}catch(e){state=oldState;throw e}if(Array.isArray(d.snapshots))snapshots=d.snapshots.filter(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite));persist();renderAll();toast('پشتیبان بازیابی شد')}catch{toast('فایل پشتیبان معتبر نیست')}e.target.value=''};$('#clearData').onclick=()=>{askConfirm('همهٔ خریدها، هشدارها و تنظیمات ذخیره‌شده حذف شوند؟',()=>{try{localStorage.removeItem('darayi-v5')}catch{}snapshots=[];try{localStorage.removeItem('darayi-valuations-v1')}catch{};state={holdings:[],watch:[],alerts:[],featured:['usd','usdt','gold18','btc','eur','gbp','try','cad','coin'],theme:'light',unit:'toman',privacy:false,filter:'all',query:''};renderAll();toast('اطلاعات این دستگاه پاک شد')})};
 const cardObserver=new MutationObserver(()=>{hydrateSparks()});['#marketGrid','#featuredGrid','#winners','#losers'].forEach(sel=>{const el=$(sel);if(el)cardObserver.observe(el,{childList:true});});loadPriceCache();loadCryptoIconsOnce();setupFeaturedDrag();setupDragToScroll();renderAll();goto('home');
-// دریافت فوری و همگام قیمت‌ها در اولین میلی‌ثانیه لود برنامه به صورت موازی با انیمیشن سکه
-loadPrices().finally(() => {
-  connectPrices();
-});
+// اجرای هم‌زمان و کاملاً مستقل وب‌سوکت رمزارزها و واکشی قیمت‌های داخلی در میلی‌ثانیه اول
+connectPrices();
+loadPrices();
 let splashPending = false;
 try { splashPending = !sessionStorage.getItem('darayi_splashed') && !!document.getElementById('coin-splash'); } catch (e) {}
 window.onSplashDone = function() {

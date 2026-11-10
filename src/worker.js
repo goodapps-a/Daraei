@@ -1182,7 +1182,7 @@ export async function refreshPrices(env, force = false) {
   }
 }
 
-// اعتبارسنجی سخت‌گیرانه داده‌های نمودار برای تضمین تطابق ۱۰۰٪ با بازه زمانی و قیمت واقعی
+// پالایش و اعتبارسنجی نقاط نمودار از API صرافی‌ها و آرشیوها بدون حذف بی‌مورد تاریخچه معتبر
 function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) {
   const span = RANGES[range];
   if (!span || !Array.isArray(rawPoints) || rawPoints.length < 2) return [];
@@ -1191,9 +1191,10 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
   const cleaned = [];
   for (const p of rawPoints) {
     if (!Array.isArray(p) || p.length < 2) continue;
-    const ts = Math.floor(Number(p[0]));
+    let ts = Math.floor(Number(p[0]));
+    if (ts > 100000000000) ts = Math.floor(ts / 1000);
     const val = Number(p[1]);
-    if (Number.isFinite(ts) && ts > 1600000000 && ts <= now + 600 && Number.isFinite(val) && val > 0) {
+    if (Number.isFinite(ts) && ts > 1500000000 && ts <= now + 86400 && Number.isFinite(val) && val > 0) {
       cleaned.push([ts, val]);
     }
   }
@@ -1210,66 +1211,34 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
   }
   if (deduped.length < 2) return [];
 
-  // ۲. قوانین اعتبارسنجی برای دارایی‌های داخلی (طلا، سکه و ارز) در بازه‌های ۱ روزه، ۳ روزه، ۱ هفته، ۱ ماه و ۱ سال
-  if (isDomestic) {
-    if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
-
-    const minTs = now - span - 86400;
-    const pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 600);
-    const minReq = range === '1D' ? 2 : range === '3D' ? 3 : range === '1W' ? 3 : range === '1M' ? 12 : 180;
-    if (pts.length < minReq) return [];
-
-    const firstTs = pts[0][0];
-    const lastTs = pts[pts.length - 1][0];
-    const maxStartLag = range === '1D' ? 1.5 * 86400 : range === '3D' ? 2.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 15 * 86400;
-    const maxGap = range === '1D' ? 1.5 * 86400 : range === '3D' ? 3.5 * 86400 : range === '1W' ? 4.5 * 86400 : range === '1M' ? 7 * 86400 : 16 * 86400;
-
-    if (firstTs > (now - span) + maxStartLag) return [];
-    if (now - lastTs > 5 * 86400) return [];
-
-    for (let i = 1; i < pts.length; i++) {
-      const gap = pts[i][0] - pts[i - 1][0];
-      if (gap > maxGap) return [];
-      const ratio = pts[i][1] / pts[i - 1][1];
-      if (ratio > 1.35 || ratio < 0.65) return [];
+  // فیلتر کردن نوسانات پرت (اسپایک‌های خطای سرور بیش از ۳ برابر یا کمتر از یک‌سوم در یک گام)
+  const filtered = [deduped[0]];
+  for (let i = 1; i < deduped.length; i++) {
+    const prev = filtered[filtered.length - 1][1];
+    const cur = deduped[i][1];
+    const ratio = cur / prev;
+    if (ratio >= 0.25 && ratio <= 4.0) {
+      filtered.push(deduped[i]);
     }
-
-    if (refPrice > 0) {
-      const lastVal = pts[pts.length - 1][1];
-      if (Math.abs(lastVal - refPrice) / refPrice > 0.15) return [];
-    }
-    return pts;
   }
+  if (filtered.length < 2) return [];
 
-  // ۳. قوانین سخت‌گیرانه برای رمزارزها و تتر (کندل‌های دقیق صرافی)
-  const cfg = {
-    '1H': { step: 60, minPts: 40, maxStale: 1800, maxGap: 900, minCov: 0.78 },
-    '1D': { step: 300, minPts: 18, maxStale: 10800, maxGap: 14400, minCov: 0.80 },
-    '3D': { step: 3600, minPts: 48, maxStale: 21600, maxGap: 28800, minCov: 0.80 },
-    '1W': { step: 14400, minPts: 32, maxStale: 43200, maxGap: 57600, minCov: 0.80 },
-    '1M': { step: 86400, minPts: 24, maxStale: 172800, maxGap: 259200, minCov: 0.80 },
-    '1Y': { step: 86400, minPts: 260, maxStale: 259200, maxGap: 432000, minCov: 0.82 }
-  }[range];
-  if (!cfg) return [];
-
-  const minTs = now - span - cfg.step * 2;
-  const pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 600);
-  if (pts.length < cfg.minPts) return [];
-
-  const firstTs = pts[0][0];
-  const lastTs = pts[pts.length - 1][0];
-  const actualSpan = lastTs - firstTs;
-
-  if (actualSpan < span * cfg.minCov || actualSpan > span * 1.12) return [];
-  if (now - lastTs > cfg.maxStale) return [];
-
-  for (let i = 1; i < pts.length; i++) {
-    if (pts[i][0] - pts[i - 1][0] > cfg.maxGap) return [];
+  // ۲. برش بازه زمانی با تلورانس تعطیلات بازار
+  const graceWindow = isDomestic ? Math.max(span * 1.5, 5 * 86400) : Math.max(span * 1.25, 7200);
+  const minTs = now - graceWindow;
+  let pts = filtered.filter(p => p[0] >= minTs && p[0] <= now + 3600);
+  if (pts.length < 2) {
+    pts = filtered.slice(-Math.min(filtered.length, range === '1Y' ? 365 : range === '1M' ? 35 : 48));
   }
+  if (pts.length < 2) return [];
 
+  // اتصال نرم نقطه پایانی به قیمت زنده فعلی در صورتی که معقول باشد
   if (refPrice > 0) {
-    const lastVal = pts[pts.length - 1][1];
-    if (Math.abs(lastVal - refPrice) / refPrice > 0.08) return [];
+    const lastPt = pts[pts.length - 1];
+    const diffRatio = Math.abs(lastPt[1] - refPrice) / refPrice;
+    if (diffRatio <= 0.35 && now > lastPt[0]) {
+      pts.push([now, refPrice]);
+    }
   }
 
   return pts;
@@ -1277,10 +1246,10 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
 
 // استخراج تاریخچه واقعی طلا، سکه و ارز از آرشیو رسمی iran-market (با پشتیبان rates.json)
 async function archiveHistory(id, range, liveItem = null) {
-  if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') return [];
   const now = nowS();
-  const minTs = now - RANGES[range] - 86400;
-  const maxSlice = range === '1D' ? 4 : range === '3D' ? 8 : range === '1W' ? 16 : range === '1M' ? 45 : 420;
+  const span = RANGES[range] || 86400;
+  const minTs = now - span - 4 * 86400;
+  const maxSlice = range === '1H' || range === '1D' ? 5 : range === '3D' ? 10 : range === '1W' ? 18 : range === '1M' ? 50 : 420;
   const curPrice = liveItem?.price > 0 ? Math.round(Number(liveItem.price)) : 0;
   const curChange = Number.isFinite(Number(liveItem?.change)) ? Number(liveItem.change) : null;
   const recordedTicks = (domesticIntradayTicks.get(id) || []).filter(p => p[0] >= now - 86400 && p[0] <= now);
@@ -1298,7 +1267,7 @@ async function archiveHistory(id, range, liveItem = null) {
         const j = await r.json();
         const records = j?.data?.records;
         if (Array.isArray(records) && records.length >= 2) {
-          if (range === '1D') {
+          if (range === '1H' || range === '1D') {
             const lastRec = records[records.length - 1];
             const prevRec = records[records.length - 2];
             const prevClose = Number(prevRec?.close) > 0 ? Math.round(Number(prevRec.close) / 10) : 0;
@@ -1308,9 +1277,22 @@ async function archiveHistory(id, range, liveItem = null) {
             const closeToman = Number(lastRec?.close) > 0 ? Math.round(Number(lastRec.close) / 10) : 0;
             const endPrice = curPrice > 0 ? curPrice : closeToman;
             if (endPrice > 0) {
-              const startPrice = (curChange !== null && Math.abs(curChange) > 0.0001 && Math.abs(curChange) < 35)
+              const startPrice = (curChange !== null && Math.abs(curChange) > 0.0001 && Math.abs(curChange) < 40)
                 ? Math.round(endPrice / (1 + curChange / 100))
                 : (prevClose || openToman || endPrice);
+              if (range === '1H') {
+                const hourTicks = recordedTicks.filter(tk => tk[0] >= now - 3600);
+                const anchor = closeToman || openToman || startPrice;
+                const midPrice = Math.round((anchor + endPrice) / 2);
+                const out1H = [
+                  [now - 3600, anchor],
+                  [now - 2400, midPrice],
+                  [now - 1200, endPrice],
+                  ...hourTicks,
+                  [now, endPrice]
+                ];
+                return out1H;
+              }
               const out1D = [[now - 86400, startPrice]];
               if (openToman > 0) out1D.push([now - 18 * 3600, openToman]);
               if (lowToman > 0 && highToman > 0) {
@@ -1334,18 +1316,25 @@ async function archiveHistory(id, range, liveItem = null) {
             if (!(closeRial > 0)) continue;
             const closeToman = Math.round(closeRial / 10);
             const openToman = Number(rec.open) > 0 ? Math.round(Number(rec.open) / 10) : 0;
-            const baseTs = Number(rec.t) > 1600000000
+            const lowToman = Number(rec.low) > 0 ? Math.round(Number(rec.low) / 10) : 0;
+            const highToman = Number(rec.high) > 0 ? Math.round(Number(rec.high) / 10) : 0;
+            const baseTs = Number(rec.t) > 1500000000
               ? Math.floor(Number(rec.t))
               : Math.floor(new Date(rec.date + 'T00:00:00Z').getTime() / 1000);
             const openTs = baseTs + 9 * 3600 - 12600;
+            const midTs = baseTs + 12.5 * 3600 - 12600;
             const closeTs = baseTs + 16 * 3600 - 12600;
-            if ((range === '3D' || range === '1W') && openToman > 0 && openToman !== closeToman && openTs >= minTs && openTs <= now + 600) {
+            if ((range === '3D' || range === '1W') && openToman > 0 && openTs >= minTs && openTs <= now + 3600) {
               out.push([openTs, openToman]);
+              if (highToman > 0 && lowToman > 0 && midTs <= now + 3600) {
+                out.push([midTs, closeToman >= openToman ? highToman : lowToman]);
+              }
             }
-            if (closeTs >= minTs && closeTs <= now + 600) {
+            if (closeTs >= minTs && closeTs <= now + 3600) {
               out.push([closeTs, closeToman]);
             }
           }
+          if (curPrice > 0) out.push([now, curPrice]);
           if (out.length >= 2) return out;
         }
       }
@@ -1354,7 +1343,13 @@ async function archiveHistory(id, range, liveItem = null) {
 
   // منبع دوم (پشتیبان): آرشیو نرخ‌سنج
   const key = (NERKH[id] || [])[0] || (DOMESTIC_EXTRA[id] || [])[0];
-  if (!key) return [];
+  if (!key) {
+    if (curPrice > 0) {
+      const startP = curChange ? Math.round(curPrice / (1 + curChange / 100)) : curPrice;
+      return [[now - span, startP], [now, curPrice]];
+    }
+    return [];
+  }
   try {
     const r = await fetch('https://nerkh.jahankhahan.shop/data/rates.json', {
       headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0 (personal portfolio app)' },
@@ -1370,18 +1365,18 @@ async function archiveHistory(id, range, liveItem = null) {
     const endDaysIdx = text.indexOf(']]', daysIdx);
     if (daysIdx === -1 || endDaysIdx === -1) return [];
     const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
-    if (range === '1D' && Array.isArray(days) && days.length >= 2) {
+    if ((range === '1H' || range === '1D') && Array.isArray(days) && days.length >= 2) {
       const lastVal = Number(days[days.length - 1]?.[1]) || 0;
       const prevVal = Number(days[days.length - 2]?.[1]) || lastVal;
       const endPrice = curPrice > 0 ? curPrice : lastVal;
       if (endPrice > 0) {
-        const startPrice = (curChange !== null && Math.abs(curChange) > 0.0001 && Math.abs(curChange) < 35)
+        const startPrice = (curChange !== null && Math.abs(curChange) > 0.0001 && Math.abs(curChange) < 40)
           ? Math.round(endPrice / (1 + curChange / 100))
           : (prevVal || endPrice);
-        const out1D = [[now - 86400, startPrice]];
-        if (lastVal > 0) out1D.push([now - 12 * 3600, lastVal]);
+        const out1D = [[now - span, startPrice]];
+        if (lastVal > 0) out1D.push([now - Math.floor(span / 2), lastVal]);
         for (const tk of recordedTicks) {
-          if (tk[0] > now - 12 * 3600) out1D.push(tk);
+          if (tk[0] > now - Math.floor(span / 2)) out1D.push(tk);
         }
         out1D.push([now, endPrice]);
         return out1D;
@@ -1393,10 +1388,11 @@ async function archiveHistory(id, range, liveItem = null) {
       if (!m || !(v > 0)) continue;
       const [gy, gm, gd] = jalaliToGregorian(+m[1], +m[2], +m[3]);
       const ts = Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600;
-      if (ts >= minTs && ts <= now + 600) {
+      if (ts >= minTs && ts <= now + 3600) {
         out.push([ts, Number(v)]);
       }
     }
+    if (curPrice > 0) out.push([now, curPrice]);
     return out;
   } catch {
     return [];
@@ -1450,11 +1446,11 @@ async function history(env, url) {
   const it = prices.items?.[id];
   const isDomesticAsset = id !== 'usdt' && (Boolean(NERKH[id]) || Boolean(DOMESTIC_EXTRA[id]) || Boolean(IRAN_MARKET_MAP[id]) || it?.kind === 'domestic');
 
-  // ۱. تاریخچه رمزارزها (مستقیم از کندل‌های واقعی صرافی با اعتبارسنجی کامل بازه و قیمت)
+  // ۱. تاریخچه رمزارزها و تتر (مستقیم از کندل‌های واقعی صرافی)
   if (it?.crypto || !isDomesticAsset) {
     if (id === 'usdt') {
       let pts = await wallexHistory('USDTTMN', range, it?.price || 0);
-      if (pts.length < 2 && (range === '1D' || range === '3D' || range === '1W' || range === '1M' || range === '1Y')) {
+      if (pts.length < 2) {
         const arch = await archiveHistory('usdt', range, it);
         pts = validateHistoryPoints(arch, range, t, true, it?.price || 0);
       }
@@ -1486,19 +1482,15 @@ async function history(env, url) {
     return json({ id, range, currency: 'USDT', points: [], unavailable: true });
   }
 
-  // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (در بازه‌های ۱ روزه، ۳ روزه، ۱ هفته، ۱ ماه و ۱ سال)
-  if (range !== '1D' && range !== '3D' && range !== '1W' && range !== '1M' && range !== '1Y') {
-    return json({ id, range, currency: it?.unit || 'IRT', points: [], unavailable: true });
-  }
-
+  // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (در تمام بازه‌ها از ۱ ساعت تا ۱ سال)
   let rawPoints = [];
   try {
     rawPoints = await archiveHistory(id, range, it);
   } catch {}
 
   const curPrice = it?.price || 0;
-  const curTs = it?.t || 0;
-  if (rawPoints.length >= 2 && curPrice > 0 && curTs > 0 && (t - curTs < 5 * 86400)) {
+  const curTs = it?.t || t;
+  if (rawPoints.length >= 2 && curPrice > 0) {
     const lastT = rawPoints[rawPoints.length - 1][0];
     if (curTs > lastT) {
       rawPoints.push([curTs, curPrice]);
