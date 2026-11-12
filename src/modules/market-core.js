@@ -97,12 +97,9 @@ export function isTehranMarketOpen(nowSec = Math.floor(Date.now() / 1000)) {
   return hour >= 10 && hour <= 19.5;
 }
 
-// محاسبه آستانه کهنگی (Stale) متناسب با نوع دارایی و ساعت کاری بازار
+// محاسبه آستانه کهنگی (Stale) — فقط وقتی بیش از ۲۴ ساعت (۸۶۴۰۰ ثانیه) از آخرین قیمت بگذرد قدیمی محسوب می‌شود
 export function getStaleThresholdSec(id, isCrypto, nowSec = Math.floor(Date.now() / 1000)) {
-  if (id === 'usdt') return 600; // تتر ۲۴ ساعته در صرافی‌های داخلی: ۱۰ دقیقه
-  if (isCrypto) return 180; // رمزارزهای ۲۴ ساعته: ۳ دقیقه
-  // دارایی‌های داخلی (طلا، سکه، ارز): در ساعات باز بودن بازار ۱ ساعت، در شب و تعطیلات تا ۷۲ ساعت (حفظ آخرین نرخ بسته شدن)
-  return isTehranMarketOpen(nowSec) ? 3600 : 72 * 3600;
+  return 86400;
 }
 
 export function isPriceItemStale(item, id, nowSec = Math.floor(Date.now() / 1000)) {

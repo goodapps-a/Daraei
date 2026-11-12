@@ -1437,6 +1437,8 @@ export async function refreshPrices(env, force = false) {
       const prevClosesMap = await getDomesticPrevCloses();
       const resolvedDomesticIds = new Set();
       const sourcesSummary = {};
+      const nerkharaHasUsdEur = Boolean(naDict.usd && naDict.eur);
+      const iranMarketHasUsdEur = Boolean(imDict.USD && imDict.EUR);
 
       for (const id of ALL_DOMESTIC_IDS) {
         const meta = DOMESTIC_META[id];
@@ -1446,21 +1448,42 @@ export async function refreshPrices(env, force = false) {
         const imItem = imSym ? imDict[imSym] : null;
         const naItem = naKey ? naDict[naKey] : null;
 
-        // مقایسه هوشمند زمان انتشار واقعی بین ایران‌مارکت و نرخ‌آرا به ازای هر دارایی
+        // اولویت اصلی با نرخ‌آرا (آخرین API اضافه‌شده) و تضمین منبع یکسان برای دلار و یورو
         let chosen = null;
-        if (imItem && naItem) {
-          const imTs = imItem.srcTs || 0;
-          const naTs = naItem.srcTs || 0;
-          // اگر نرخ‌آرا حداقل ۵ دقیقه جدیدتر از ایران‌مارکت باشد از نرخ‌آرا استفاده کن، در غیر این صورت ایران‌مارکت
-          if (naTs > imTs + 300) {
-            chosen = { src: 'nerkhara', price: Math.round(Number(naItem.price)), rawChg: naItem.change_pct, ts: naItem.srcTs, extra: { priceType: naItem.method || 'average', method: naItem.method, sourcesCount: Number(naItem.sources) || undefined, spreadPct: Number.isFinite(Number(naItem.spread_pct)) ? Number(naItem.spread_pct) : undefined } };
-          } else {
-            chosen = { src: 'iran_market', price: Math.round(Number(imItem.price)), rawChg: imItem.change_pct, ts: imItem.srcTs, extra: { priceType: 'last' } };
+        const buildNerkhara = (item) => ({
+          src: 'nerkhara',
+          price: Math.round(Number(item.price)),
+          rawChg: item.change_pct,
+          ts: item.srcTs,
+          extra: {
+            priceType: item.method || 'average',
+            method: item.method,
+            sourcesCount: Number(item.sources) || undefined,
+            spreadPct: Number.isFinite(Number(item.spread_pct)) ? Number(item.spread_pct) : undefined
           }
-        } else if (imItem) {
-          chosen = { src: 'iran_market', price: Math.round(Number(imItem.price)), rawChg: imItem.change_pct, ts: imItem.srcTs, extra: { priceType: 'last' } };
+        });
+        const buildIranMarket = (item) => ({
+          src: 'iran_market',
+          price: Math.round(Number(item.price)),
+          rawChg: item.change_pct,
+          ts: item.srcTs,
+          extra: { priceType: 'last' }
+        });
+
+        if (id === 'usd' || id === 'eur') {
+          if (nerkharaHasUsdEur && naItem) {
+            chosen = buildNerkhara(naItem);
+          } else if (iranMarketHasUsdEur && imItem) {
+            chosen = buildIranMarket(imItem);
+          } else if (naItem) {
+            chosen = buildNerkhara(naItem);
+          } else if (imItem) {
+            chosen = buildIranMarket(imItem);
+          }
         } else if (naItem) {
-          chosen = { src: 'nerkhara', price: Math.round(Number(naItem.price)), rawChg: naItem.change_pct, ts: naItem.srcTs, extra: { priceType: naItem.method || 'average', method: naItem.method, sourcesCount: Number(naItem.sources) || undefined, spreadPct: Number.isFinite(Number(naItem.spread_pct)) ? Number(naItem.spread_pct) : undefined } };
+          chosen = buildNerkhara(naItem);
+        } else if (imItem) {
+          chosen = buildIranMarket(imItem);
         }
 
         if (chosen && chosen.price > 0) {
