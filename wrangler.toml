@@ -31,3 +31,19 @@ PRICE_HISTORY_DAYS = "7"
 # binding = "PRICES_KV"
 # id = "YOUR_CLOUDFLARE_KV_NAMESPACE_ID"
 
+# Cloudflare Observability (لاگ‌ها، ردیابی خطاها و رهگیری عملکرد)
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+persist = true
+
+[observability.traces]
+enabled = true
+head_sampling_rate = 1
+persist = true
+
+[observability.issue_detection]
+enabled = true
+
+
