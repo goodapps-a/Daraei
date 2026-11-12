@@ -20,5 +20,14 @@ crons = ["*/5 * * * *", "17 3 * * *"]
 [vars]
 APP_URL = "https://darayi.clearworks.workers.dev"
 GOOGLE_CLIENT_ID = "927651692028-q4rp0ir4lcgg94pc9r76rcu6t0veoele.apps.googleusercontent.com"
-INLINE_REFRESH_S = "240"
+INLINE_REFRESH_S = "60"
 MAIL_FROM = "a.h.sh.t1381@gmail.com"
+PRICE_HISTORY_DAYS = "7"
+
+# اتصال اختیاری Cloudflare KV برای ذخیره Snapshot آخرین قیمت‌های معتبر بازار (کلید prices:snapshot:v1)
+# در صورت ساخت Namespace در پنل کلادفلر، خطوط زیر را از حالت کامنت خارج کرده و id واقعی را قرار دهید.
+# اگر این اتصال تعریف نشود، Worker بدون خطا با Cache API و حافظه داخلی کار می‌کند.
+# [[kv_namespaces]]
+# binding = "PRICES_KV"
+# id = "YOUR_CLOUDFLARE_KV_NAMESPACE_ID"
+

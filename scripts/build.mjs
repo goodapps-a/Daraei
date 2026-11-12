@@ -13,7 +13,22 @@ if (!fs.existsSync(distDir)) {
 
 console.log('Reading src/index.html and src/worker.js...');
 const htmlContent = fs.readFileSync(indexHtmlPath, 'utf8');
-const workerContent = fs.readFileSync(workerJsPath, 'utf8');
+let workerContent = fs.readFileSync(workerJsPath, 'utf8');
+
+// Inline local ES module imports from ./modules/*.js so dist/worker.js remains a self-contained single-file Worker bundle
+workerContent = workerContent.replace(
+  /import\s+\{[^}]+\}\s+from\s+['"](\.\/modules\/[^'"]+)['"];?/g,
+  (_match, relPath) => {
+    const modPath = path.resolve(path.dirname(workerJsPath), relPath);
+    if (!fs.existsSync(modPath)) {
+      throw new Error(`Module not found during build: ${modPath}`);
+    }
+    const modSource = fs.readFileSync(modPath, 'utf8');
+    // Strip 'export ' prefix from inlined module declarations to avoid duplicate export collisions if needed, or keep top-level const/function
+    return `// --- Inlined from ${relPath} ---\n` + modSource.replace(/^export\s+(const|let|function|async\s+function)\s+/gm, '$1 ') + `\n// --- End ${relPath} ---`;
+  }
+);
+
 const splashJsPath = path.join(rootDir, 'public', 'coin-splash.js');
 const facePngPath = path.join(rootDir, 'public', 'coin-face.png');
 const splashJsContent = fs.existsSync(splashJsPath) ? fs.readFileSync(splashJsPath, 'utf8') : '';

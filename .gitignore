@@ -6,3 +6,9 @@ coverage/
 *.log
 .env*
 !.env.example
+.auth-session.json
+cached-prices.json
+cached-intraday-history.json
+.wrangler/
+.dev.vars
+

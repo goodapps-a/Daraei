@@ -3233,10 +3233,25 @@ function quoteToman(a) {
   return fx.price > 0 ? a.price * fx.price : 0;
 }
 function alertQuote(al){const a=asset(al.assetId);return quote({...a,currency:al.currency||'IRT'},al.price)}
+function isClientTehranMarketOpen(nowMs = Date.now()) {
+  const tehranMs = nowMs + (3.5 * 3600 * 1000);
+  const d = new Date(tehranMs);
+  const dow = d.getUTCDay(); // 5 = Friday
+  const hour = d.getUTCHours() + d.getUTCMinutes() / 60;
+  if (dow === 5) return false;
+  if (dow === 4) return hour >= 9 && hour < 17;
+  return hour >= 9 && hour < 21;
+}
 function isStale(a){
-  if (!a || !a.updatedAt) return true;
-  const age = Date.now() / 1000 - a.updatedAt;
-  return !!a.stale || age > (a.currency === 'USDT' ? 300 : 3600);
+  if (!a) return true;
+  const ts = a.sourceTimestamp || a.updatedAt || a.receivedAt;
+  if (!ts) return true;
+  if (a.stale) return true;
+  const age = Date.now() / 1000 - ts;
+  if (a.id === 'usdt') return age > 600;
+  if (a.cat === 'crypto' || a.currency === 'USDT') return age > 180;
+  const marketOpen = isClientTehranMarketOpen();
+  return age > (marketOpen ? 3600 : 72 * 3600);
 }
 function formatChartTooltipDateTime(ts, isDaily = false) {
   if (!ts) return { time: '—', date: '—' };
@@ -3270,8 +3285,11 @@ function formatRelativeDate(ts){
 }
 function quality(a){
   if (!(a.price > 0)) return 'قیمتی در دسترس نیست';
-  if (!a.updatedAt) return 'زمان نامشخص';
-  return (isStale(a) ? '● قیمت برای ' : '● به‌روز · ') + formatRelativeDate(a.updatedAt);
+  const ts = a.sourceTimestamp || a.updatedAt || a.receivedAt;
+  if (!ts) return 'زمان نامشخص';
+  const stale = isStale(a);
+  const midNote = a.priceType === 'mid' ? ' · میانگین اردربوک' : '';
+  return (stale ? '● قیمت قدیمی · ' : '● به‌روز · ') + formatRelativeDate(ts) + midNote;
 }
 const sparkSvgCache = new Map();
 function spark(a){
@@ -3344,7 +3362,7 @@ function paintChart(box, points, color, formatter, opts = {}) {
     const valFormatted = Math.round(curVal * factor) / factor;
     const priceStr = formatter(valFormatted, allowedDecimals);
 
-    tip.innerHTML = '<span class="tip-time">' + time + '</span><span class="tip-date">' + date + '</span>';
+    tip.innerHTML = '<span class="tip-time">' + escapeHtml(time) + '</span><span class="tip-date">' + escapeHtml(date) + '</span>';
     tip.hidden = false;
 
     const rect = svg.getBoundingClientRect();
@@ -3400,22 +3418,49 @@ function hasMissingPrice(){return safeLedger().positions.some(p=>!(quoteToman(as
 function totalCost(){return safeLedger().positions.reduce((v,p)=>v+p.cost,0)}function totalValue(){return safeLedger().positions.reduce((v,p)=>v+p.qty*quoteToman(asset(p.assetId)),0)}function pnl(){return totalValue()-totalCost()}function roi(){return totalCost()?pnl()/totalCost()*100:0}
 let snapshots=[];try{snapshots=JSON.parse(localStorage.getItem('darayi-valuations-v1')||'[]').filter(x=>Array.isArray(x)&&x.length===2&&x.every(Number.isFinite))}catch{}
 function snapshot(){const positions=safeLedger().positions;if(!positions.length||positions.some(p=>!(asset(p.assetId).price>0)||isStale(asset(p.assetId))||asset(p.assetId).currency!=='IRT'&&(!(asset('usdt').price>0)||isStale(asset('usdt')))))return;const t=Math.floor(Date.now()/1000);if(snapshots.length&&t-snapshots.at(-1)[0]<60)return;snapshots.push([t,totalValue()]);snapshots=snapshots.filter(p=>t-p[0]<366*86400).slice(-5000);try{localStorage.setItem('darayi-valuations-v1',JSON.stringify(snapshots))}catch{}}
+function parseHoldingTimeSec(h) {
+  if (!h) return null;
+  if (h.date) {
+    const parts = String(h.date).split('-');
+    if (parts.length === 3) {
+      const d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]), 0, 0, 0);
+      const t = Math.floor(d.getTime() / 1000);
+      if (Number.isFinite(t) && t > 0) return t;
+    }
+    const t = Math.floor(new Date(h.date).getTime() / 1000);
+    if (Number.isFinite(t) && t > 0) return t;
+  }
+  if (Number.isFinite(h.createdAt) && h.createdAt > 0) {
+    return h.createdAt > 1e11 ? Math.floor(h.createdAt / 1000) : Math.floor(h.createdAt);
+  }
+  return null;
+}
+
 function getOldestHoldingTime() {
   if (!state.holdings.length) return null;
-  const times = state.holdings
-    .map(h => {
-      if (!h.date) return null;
-      const parts = String(h.date).split('-');
-      if (parts.length === 3) {
-        const d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]), 12, 0, 0);
-        const t = Math.floor(d.getTime() / 1000);
-        return Number.isFinite(t) && t > 0 ? t : null;
-      }
-      const t = Math.floor(new Date(h.date).getTime() / 1000);
-      return Number.isFinite(t) && t > 0 ? t : null;
-    })
-    .filter(Boolean);
+  const times = state.holdings.map(parseHoldingTimeSec).filter(Boolean);
   return times.length ? Math.min(...times) : null;
+}
+
+function positionsAtTime(records, ts, windowStartTs) {
+  if (!Array.isArray(records) || !records.length) return [];
+  const withTime = records.map(h => ({ h, t: parseHoldingTimeSec(h) || 0 }));
+  const validTimes = withTime.map(x => x.t).filter(t => t > 0);
+  if (!validTimes.length) return safeLedger().positions;
+  const minT = Math.min(...validTimes);
+  const maxT = Math.max(...validTimes);
+  // اگر همه دارایی‌ها در یک تاریخ واحد ثبت شده‌اند یا همگی پیش از شروع بازه نمودار بوده‌اند، ترکیب فعلی سبد در کل بازه برقرار است
+  if (minT === maxT || maxT <= windowStartTs) {
+    return safeLedger().positions;
+  }
+  const cutoff = Math.max(ts, minT);
+  const activeRecords = withTime.filter(x => x.t <= cutoff).map(x => x.h);
+  if (!activeRecords.length) return safeLedger().positions;
+  try {
+    return ledger(activeRecords).positions;
+  } catch {
+    return safeLedger().positions;
+  }
 }
 
 let portfolioChartSeq = 0;
@@ -3437,15 +3482,18 @@ function priceAtTime(series, ts, fallbackVal = 0) {
 }
 
 async function computePortfolioHistoryPoints(range) {
-  const positions = safeLedger().positions;
-  if (!state.holdings.length || !positions.length) return { status: 'empty', points: [] };
+  const currentPositions = safeLedger().positions;
+  if (!state.holdings.length || !currentPositions.length) return { status: 'empty', points: [] };
   if (hasMissingPrice()) return { status: 'loading', points: [] };
 
   const now = Math.floor(Date.now() / 1000);
   const curVal = totalValue();
   const tOldest = getOldestHoldingTime();
-  const hasDomestic = positions.some(p => {
-    const a = asset(p.assetId);
+
+  // جمع‌آوری تمام دارایی‌هایی که در معاملات کاربر حضور داشته‌اند یا هم‌اکنون در سبد هستند
+  const allAssetIds = [...new Set([...currentPositions.map(p => p.assetId), ...state.holdings.map(h => h.assetId).filter(Boolean)])];
+  const hasDomestic = allAssetIds.some(id => {
+    const a = asset(id);
     return a && a.cat !== 'crypto' && a.id !== 'usdt';
   });
 
@@ -3459,37 +3507,32 @@ async function computePortfolioHistoryPoints(range) {
     else apiRange = '1Y';
   }
 
-  const spanSec = CLIENT_RANGES[apiRange] || 86400;
-  const needsUsdt = positions.some(p => asset(p.assetId).currency === 'USDT');
+  let spanSec = CLIENT_RANGES[apiRange] || 86400;
+  let windowStartTs = now - spanSec;
+  const needsUsdt = allAssetIds.some(id => asset(id).currency === 'USDT');
   const seriesMap = new Map();
 
-  await Promise.all(positions.map(async p => {
-    const a = asset(p.assetId);
-    let raw = await getHistory(p.assetId, apiRange);
-    let valid = withCurrent(raw, a, apiRange);
-    if (valid.length < 2 && apiRange === '1D') {
-      const fbRaw = await getHistory(p.assetId, '3D');
-      const fbValid = withCurrent(fbRaw, a, '3D');
-      if (fbValid.length >= 2) {
-        const startVal = priceAtTime(fbValid, now - 86400, fbValid[0][1]);
-        const recent = fbValid.filter(pt => pt[0] > now - 86400);
-        valid = [[now - 86400, startVal], ...recent];
+  const loadSeriesForRange = async (r) => {
+    seriesMap.clear();
+    await Promise.all(allAssetIds.map(async assetId => {
+      const a = asset(assetId);
+      const raw = await getHistory(assetId, r);
+      const valid = withCurrent(raw, a, r);
+      if (valid.length >= 2) {
+        seriesMap.set(assetId, valid);
       }
-    }
-    if (valid.length < 2 && apiRange === '1D' && a && a.price > 0) {
-      const chg = Number.isFinite(a.change) ? a.change : 0;
-      const startP = a.price / (1 + chg / 100);
-      const midP = (startP + a.price) / 2;
-      valid = [
-        [now - 86400, startP],
-        [now - 43200, midP],
-        [now, a.price]
-      ];
-    }
-    if (valid.length >= 2) {
-      seriesMap.set(p.assetId, valid);
-    }
-  }));
+    }));
+  };
+
+  await loadSeriesForRange(apiRange);
+
+  // اگر کاربر در حالت «کل دوره» (ALL) است و دارایی داخلی تازه ثبت شده اما هنوز ۲ نقطه روزانه در D1 برای 1D جمع نشده، از بازه واقعی هفتگی (1W) استفاده کن
+  if ((range === 'ALL' || !range) && apiRange === '1D' && currentPositions.some(p => !seriesMap.has(p.assetId))) {
+    apiRange = '1W';
+    spanSec = CLIENT_RANGES[apiRange] || 7 * 86400;
+    windowStartTs = now - spanSec;
+    await loadSeriesForRange(apiRange);
+  }
 
   let usdtSeries = [];
   if (needsUsdt) {
@@ -3498,46 +3541,44 @@ async function computePortfolioHistoryPoints(range) {
     } else {
       const usdtAsset = asset('usdt');
       const uRange = (apiRange === '1D' || apiRange === '1H') ? '1D' : apiRange;
-      let uRaw = await getHistory('usdt', uRange);
+      const uRaw = await getHistory('usdt', uRange);
       usdtSeries = withCurrent(uRaw, usdtAsset, uRange);
       if (usdtSeries.length < 2 && uRange === '1D') {
-        uRaw = await getHistory('usdt', '1W');
-        usdtSeries = withCurrent(uRaw, usdtAsset, '1W');
-      }
-      if (usdtSeries.length < 2 && usdtAsset && usdtAsset.price > 0) {
-        const chg = Number.isFinite(usdtAsset.change) ? usdtAsset.change : 0;
-        const startU = Math.round(usdtAsset.price / (1 + chg / 100));
-        usdtSeries = [[now - spanSec, startU], [now, usdtAsset.price]];
+        const uRawW = await getHistory('usdt', '1W');
+        usdtSeries = withCurrent(uRawW, usdtAsset, '1W');
       }
     }
   }
 
-  for (const p of positions) {
-    if (!seriesMap.has(p.assetId)) {
-      return { status: 'unavailable', points: [], apiRange };
+  // اگر تاریخچه واقعی بازار برای هر یک از دارایی‌های فعلی سبد موجود نباشد:
+  // فقط در صورتی که اسنپ‌شات‌های واقعی ثبت‌شده در مرورگر برای این بازه وجود داشته باشد از آن استفاده کن؛
+  // در غیر این صورت بدون تولید داده مصنوعی، وضعیت unavailable برگردان.
+  const missingCurrentSeries = currentPositions.some(p => !seriesMap.has(p.assetId));
+  if (missingCurrentSeries || (needsUsdt && usdtSeries.length < 2)) {
+    const realSnaps = snapshots.filter(pt => pt[0] >= windowStartTs && pt[1] > 0);
+    if (realSnaps.length >= 2) {
+      const snapOut = realSnaps.map(pt => [pt[0], Math.round(pt[1])]);
+      if (curVal > 0 && now > snapOut[snapOut.length - 1][0]) {
+        snapOut.push([now, Math.round(curVal)]);
+      }
+      return { status: 'ok', points: snapOut, apiRange, isDaily: false };
     }
+    return { status: 'unavailable', points: [], apiRange };
   }
 
   // جمع‌آوری نقاط زمانی واقعی از تاریخچه دارایی‌های سبد
   const tsSet = new Set();
   for (const pts of seriesMap.values()) {
-    for (const pt of pts) tsSet.add(pt[0]);
+    for (const pt of pts) {
+      if (pt[0] >= windowStartTs - 3600) tsSet.add(pt[0]);
+    }
   }
   if (needsUsdt && usdtSeries.length >= 2) {
     for (const pt of usdtSeries) {
-      if (pt[0] >= now - spanSec) tsSet.add(pt[0]);
+      if (pt[0] >= windowStartTs - 3600) tsSet.add(pt[0]);
     }
   }
   let allTs = [...tsSet].sort((a, b) => a - b);
-
-  // برای بازه ۱ روزه مطمئن شو بازه ۲۴ ساعت اخیر پوشش داده شده است
-  if (apiRange === '1D') {
-    const min1D = now - 86400;
-    allTs = allTs.filter(ts => ts >= min1D - 3600);
-    if (!allTs.length || allTs[0] > min1D + 7200) {
-      allTs.unshift(min1D);
-    }
-  }
 
   // اگر بازه «کل دوره» است و تاریخ اولین خرید بیش از ۲ روز قبل در داخل این بازه است، از تاریخ اولین خرید به بعد را نشان بده
   if ((range === 'ALL' || !range) && tOldest && (now - tOldest >= 2 * 86400)) {
@@ -3553,14 +3594,17 @@ async function computePortfolioHistoryPoints(range) {
   const liveUsdt = asset('usdt').price > 0 ? asset('usdt').price : 0;
   const out = [];
   for (const ts of allTs) {
+    const activePositions = positionsAtTime(state.holdings, ts, windowStartTs);
+    if (!activePositions.length) continue;
     let sum = 0;
     let ok = true;
     const fxAtTs = needsUsdt ? priceAtTime(usdtSeries, ts, liveUsdt) : 1;
     if (needsUsdt && !(fxAtTs > 0)) { ok = false; break; }
-    for (const p of positions) {
+    for (const p of activePositions) {
       const a = asset(p.assetId);
       const s = seriesMap.get(p.assetId);
-      const pr = priceAtTime(s, ts, a.price || 0);
+      if (!s || !s.length) { ok = false; break; }
+      const pr = priceAtTime(s, ts, 0);
       if (!(pr > 0)) { ok = false; break; }
       const unitToman = a.currency === 'USDT' ? pr * fxAtTs : pr;
       sum += p.qty * unitToman;
@@ -3570,8 +3614,8 @@ async function computePortfolioHistoryPoints(range) {
     }
   }
 
-  if (curVal > 0) {
-    if (!out.length || now > out[out.length - 1][0]) {
+  if (curVal > 0 && out.length >= 1) {
+    if (now > out[out.length - 1][0]) {
       out.push([now, Math.round(curVal)]);
     } else {
       out[out.length - 1] = [now, Math.round(curVal)];
@@ -3579,7 +3623,7 @@ async function computePortfolioHistoryPoints(range) {
   }
 
   if (out.length < 2) return { status: 'unavailable', points: [], apiRange };
-  const isDaily = apiRange === '1M' || apiRange === '1Y' || (hasDomestic && apiRange !== '1D');
+  const isDaily = apiRange === '1M' || apiRange === '1Y' || (hasDomestic && apiRange !== '1D' && apiRange !== '1H');
   return { status: 'ok', points: out, apiRange, isDaily };
 }
 
@@ -4261,10 +4305,7 @@ function featuredPicker(){
   };
 }
 const api=async(path,opt={})=>{
-  const authHeaders={};
-  if(state.user?.token)authHeaders['authorization']='Bearer '+state.user.token;
-  if(state.user?.email)authHeaders['x-auth-email']=state.user.email;
-  const r=await fetch(path,{credentials:'same-origin',...opt,headers:{...(opt.body?{'content-type':'application/json'}:{}),...authHeaders,...(opt.headers||{})}});
+  const r=await fetch(path,{credentials:'same-origin',...opt,headers:{'x-requested-with':'XMLHttpRequest',...(opt.body?{'content-type':'application/json'}:{}),...(opt.headers||{})}});
   if(!(r.headers.get('content-type')||'').includes('json'))throw new Error('no_api');
   const j=await r.json();
   if(!r.ok){const e=new Error(j.error||'خطا');e.status=r.status;throw e}
@@ -4294,7 +4335,7 @@ function applyRemote(d,rev){applying=true;if(rev!==undefined){remoteRevision=Num
 async function afterLogin(){try{const j=await api('/api/me/data');const srvRev=j.updatedAt||0;if(!j.exists){remoteRevision=0;state.remoteRevision=0;if(state.holdings.length||state.watch.length||state.alerts.length){syncDirty=true;await pushRemote()}return}applyRemote(j.data,srvRev)}catch{}}
 async function checkSession(welcome){const q=new URLSearchParams(location.search),ae=q.get('auth_error');if(ae||q.get('login_token'))history.replaceState(null,'',location.pathname);
 if(ae)toast(({denied:'ورود با گوگل لغو شد.',state:'ورود منقضی شد؛ دوباره تلاش کن.',token:'ورود با گوگل ناموفق بود.',claims:'حساب گوگل تأیید نشد.',invalid:'درخواست ورود نامعتبر بود.'})[ae]||'ورود ناموفق بود.');
-try{const j=await api('/api/me');if(j.user){const isAdm = !!j.user.isAdmin || String(j.user.email||'').toLowerCase() === 'a.h.sh.t1381@gmail.com'; state.user={name:j.user.name||j.user.email.split('@')[0],email:j.user.email,role:j.user.role||(isAdm?'admin':'user'),isAdmin:isAdm,token:j.token||state.user?.token||null,remote:true};persist();renderAll();await afterLogin();if(welcome)toast('خوش آمدی '+state.user.name)}else if(state.user&&state.user.remote){renderAll();}}catch{if(state.user&&state.user.remote)renderAll();}}
+try{const j=await api('/api/me');if(j.user){const isAdm = !!j.user.isAdmin; state.user={name:j.user.name||j.user.email.split('@')[0],email:j.user.email,role:j.user.role||(isAdm?'admin':'user'),isAdmin:isAdm,remote:true};persist();renderAll();await afterLogin();if(welcome)toast('خوش آمدی '+state.user.name)}else if(state.user&&state.user.remote){state.user=null;persist();renderAll();}}catch{if(state.user&&state.user.remote)renderAll();}}
 const faDigits=v=>String(v).replace(/[۰-۹]/g,d=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d));
 const emailRe=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const eyeSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>`;
@@ -4314,7 +4355,7 @@ function authWire(go){
   $$('#modalBody input').forEach(i=>i.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();go()}}));
 }
 const authErr=(m,t)=>{m.className='auth-msg err';m.textContent=t};
-async function authCall(path,body,btn,msg){btn.disabled=true;msg.className='auth-msg';msg.textContent='لطفاً صبر کن…';try{const j=await api(path,{method:'POST',body:JSON.stringify(body)});if(j&&(j.user||j.token)){const u=j.user||{email:body?.email||state.user?.email||''};const isAdm=!!u.isAdmin||String(u.email||'').toLowerCase()==='a.h.sh.t1381@gmail.com';if(u.email){state.user={name:u.name||u.email.split('@')[0],email:u.email,role:u.role||(isAdm?'admin':'user'),isAdmin:isAdm,token:j.token||state.user?.token||null,remote:true};persist();}}msg.textContent='';return j}catch(e){authErr(msg,e.message==='no_api'?'سرور در دسترس نیست؛ ورود فقط در نسخهٔ منتشرشده کار می‌کند.':e.message);return null}finally{btn.disabled=false}}
+async function authCall(path,body,btn,msg){btn.disabled=true;msg.className='auth-msg';msg.textContent='لطفاً صبر کن…';try{const j=await api(path,{method:'POST',body:JSON.stringify(body)});if(j&&j.user){const u=j.user;const isAdm=!!u.isAdmin;if(u.email){state.user={name:u.name||u.email.split('@')[0],email:u.email,role:u.role||(isAdm?'admin':'user'),isAdmin:isAdm,remote:true};persist();}}msg.textContent='';return j}catch(e){authErr(msg,e.message==='no_api'?'سرور در دسترس نیست؛ ورود فقط در نسخهٔ منتشرشده کار می‌کند.':e.message);return null}finally{btn.disabled=false}}
 const authDone=async(t)=>{
   closeModal();
   await checkSession(true);
@@ -4473,67 +4514,20 @@ function handleGoogleSignIn(prefillEmail = '') {
     location.href = '/api/auth/google/start';
     return;
   }
-  openModal('ورود سریع با حساب گوگل', `
+  openModal('ورود با حساب گوگل', `
     <div class="auth-box">
       <div style="text-align:center;margin-bottom:10px">
         <div style="display:grid;place-items:center;margin-bottom:8px">
           <svg width="34" height="34" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/></svg>
         </div>
-        <h3 style="margin:0 0 4px;font-size:15px;font-weight:900">اتصال و ورود با جیمیل</h3>
-        <p class="muted" style="font-size:12px;margin:0;line-height:1.7">آدرس ایمیل گوگل (Gmail) خود را وارد کنید تا مستقیماً به حسابتان متصل شوید:</p>
+        <h3 style="margin:0 0 4px;font-size:15px;font-weight:900">ورود امن با رمز عبور</h3>
+        <p class="muted" style="font-size:12px;margin:0;line-height:1.7">اتصال مستقیم OAuth گوگل روی این سرور تنظیم نشده است. برای حفظ امنیت حسابتان، لطفاً با ایمیل و رمز عبور وارد شوید یا حساب جدید بسازید.</p>
       </div>
-      <div class="field">
-        <label for="gEmail">آدرس Gmail</label>
-        <div class="modern-input-wrap">
-          <input id="gEmail" type="email" inputmode="email" autocomplete="email" placeholder="name@gmail.com" value="${escapeHtml(prefillEmail || '')}">
-        </div>
-      </div>
-      <div class="auth-msg" id="gMsg"></div>
       <div class="form-actions" style="margin-top:8px">
-        <button class="btn btn-dark" type="button" id="gSubmit" style="height:44px;font-size:13.5px;font-weight:800;border-radius:13px">ورود مستقیم به حساب</button>
-      </div>
-      <div style="text-align:center;margin-top:6px">
-        <button type="button" class="link-btn" id="gBack" style="font-size:12px">بازگشت به فرم ورود</button>
+        <button class="btn btn-dark" type="button" id="gBack" style="height:44px;font-size:13.5px;font-weight:800;border-radius:13px">بازگشت به فرم ورود و ثبت‌نام</button>
       </div>
     </div>
   `);
-
-  const gGo = async () => {
-    const m = $('#gMsg'), btn = $('#gSubmit');
-    const email = faDigits($('#gEmail').value).trim().toLowerCase();
-    if (!emailRe.test(email)) return authErr(m, 'لطفاً یک آدرس ایمیل معتبر وارد کنید.');
-    btn.disabled = true;
-    m.textContent = 'در حال برقراری ارتباط با حساب…';
-    try {
-      const res = await api('/api/auth/login', { method: 'POST', body: JSON.stringify({ email, password: email }) });
-      if (res && res.user) {
-        const isAdm = !!res.user.isAdmin || String(res.user.email || '').toLowerCase() === 'a.h.sh.t1381@gmail.com';
-        state.user = { name: res.user.name || email.split('@')[0], email: res.user.email || email, role: res.user.role || (isAdm ? 'admin' : 'user'), isAdmin: isAdm, token: res.token || null, remote: true };
-        persist();
-        authDone('با موفقیت وارد شدید');
-        return;
-      }
-    } catch {
-      try {
-        const regRes = await api('/api/auth/register/start', {
-          method: 'POST',
-          body: JSON.stringify({ name: email.split('@')[0], email, password: email })
-        });
-        if (regRes && regRes.ok) {
-          authOtp('register', email, { name: email.split('@')[0], email, password: email });
-          return;
-        }
-      } catch (e2) {
-        authErr(m, e2.message || 'خطا در برقراری ارتباط');
-        btn.disabled = false;
-        return;
-      }
-    }
-    btn.disabled = false;
-  };
-
-  authWire(gGo);
-  $('#gSubmit').onclick = gGo;
   $('#gBack').onclick = () => authModal('login', { email: prefillEmail });
 }
 
@@ -4768,8 +4762,18 @@ function loginForm() {
   $('#logoutBtn').onclick = async () => {
     try { await api('/api/auth/logout', { method: 'POST' }); } catch {}
     state.user = null;
+    state.holdings = [];
+    state.watch = [];
+    state.alerts = [];
+    state.remoteRevision = 0;
+    state.syncedSig = '';
+    snapshots = {};
     clearTimeout(syncTimer);
     syncDirty = false;
+    try {
+      localStorage.removeItem('darayi-v5');
+      localStorage.removeItem('darayi-valuations-v1');
+    } catch {}
     persist();
     renderAll();
     closeModal();
@@ -4780,7 +4784,18 @@ function loginForm() {
     try {
       await api('/api/me', { method: 'DELETE' });
       state.user = null;
+      state.holdings = [];
+      state.watch = [];
+      state.alerts = [];
+      state.remoteRevision = 0;
+      state.syncedSig = '';
+      snapshots = {};
+      clearTimeout(syncTimer);
       syncDirty = false;
+      try {
+        localStorage.removeItem('darayi-v5');
+        localStorage.removeItem('darayi-valuations-v1');
+      } catch {}
       persist();
       renderAll();
       toast('حساب با موفقیت حذف شد');
@@ -4798,9 +4813,11 @@ const PRICE_CACHE='darayi-prices-v4';
 function softRender(){
   paintLivePrices();
 }
-function applyPrices(items){let n=0,added=0,sig=0;const now=Date.now()/1000;
+function applyPrices(items){let n=0,added=0,sig=0;const now=Math.floor(Date.now()/1000);
   for(const [id,i] of Object.entries(items||{})){
-    if(!/^[a-z0-9]{1,20}$/.test(id)||!(i.price>0))continue;sig+=i.price+(i.updatedAt||0);
+    if(!/^[a-z0-9]{1,20}$/.test(id)||!(i.price>0))continue;
+    const itemTs = i.sourceTimestamp || i.updatedAt || i.receivedAt || now;
+    sig+=i.price+itemTs;
     let a=assets.find(x=>x.id===id);
     if(!a&&(i.kind==='crypto'||i.kind==='domestic')){
       const sy=String(i.symbol||id),dom=i.kind==='domestic';
@@ -4825,11 +4842,27 @@ function applyPrices(items){let n=0,added=0,sig=0;const now=Date.now()/1000;
         a.name = cleanDisplayName(sy, a.name);
         a.en = cleanDisplayName(sy, a.en);
       }
-      if(a.cat==='crypto'&&a.id!=='usdt'&&(i.currency||'IRT')==='USDT'&&a.updatedAt>i.updatedAt)continue;
+      const existingTs = a.sourceTimestamp || a.updatedAt || 0;
+      if(a.cat==='crypto'&&a.id!=='usdt'&&(i.currency||'IRT')==='USDT'&&existingTs>itemTs)continue;
       const nextChange = (Number.isFinite(i.change) && (i.change !== 0 || a.price !== i.price || !Number.isFinite(a.change)))
         ? i.change
         : (Number.isFinite(a.change) ? a.change : i.change);
-      Object.assign(a,{price:i.price,change:nextChange,currency:i.currency||'IRT',updatedAt:i.updatedAt,stale:!!i.stale||now-i.updatedAt>(i.currency==='USDT'?150:1800),vol:i.volume||0,pair:i.pair,source:'live'});
+      Object.assign(a,{
+        price:i.price,
+        change:nextChange,
+        currency:i.currency||'IRT',
+        updatedAt:itemTs,
+        sourceTimestamp:i.sourceTimestamp||itemTs,
+        receivedAt:i.receivedAt||now,
+        checkedAt:i.checkedAt||now,
+        priceType:i.priceType||'quoted',
+        method:i.method||null,
+        stale:!!i.stale,
+        vol:i.volume||0,
+        pair:i.pair,
+        source:i.source||'live'
+      });
+      a.stale = isStale(a);
       n++;
     }
   }
@@ -4845,7 +4878,8 @@ function savePriceCache(items){
         const chg = (Number.isFinite(i.change) && i.change !== 0)
           ? i.change
           : (Array.isArray(prevArr) && prevArr[0] === i.price && Number.isFinite(prevArr[1]) && prevArr[1] !== 0 ? prevArr[1] : i.change);
-        o[id] = [i.price, chg, i.updatedAt, i.currency, i.kind, i.name, i.symbol, i.cat, i.volume, i.pair];
+        const ts = i.sourceTimestamp || i.updatedAt || i.receivedAt || Math.floor(Date.now() / 1000);
+        o[id] = [i.price, chg, ts, i.currency, i.kind, i.name, i.symbol, i.cat, i.volume, i.pair, i.priceType || 'quoted', i.source || 'cache'];
       }
     }
     localStorage.setItem(PRICE_CACHE, JSON.stringify(o));
@@ -4857,11 +4891,23 @@ function loadPriceCache(){
     const o4 = JSON.parse(localStorage.getItem(PRICE_CACHE) || '{}') || {};
     const o = { ...o3, ...o4 };
     const items = {};
-    const now = Math.floor(Date.now() / 1000);
     for(const [id,v] of Object.entries(o)){
       if (Array.isArray(v) && v[0] > 0 && v[2] > 0) {
-        const isStale = (now - v[2]) > 7200;
-        items[id] = {price:v[0], change:v[1], updatedAt:v[2], currency:v[3], kind:v[4], name:v[5], symbol:v[6], cat:v[7], volume:v[8], pair:v[9], stale:isStale};
+        items[id] = {
+          price:v[0],
+          change:v[1],
+          updatedAt:v[2],
+          sourceTimestamp:v[2],
+          currency:v[3],
+          kind:v[4],
+          name:v[5],
+          symbol:v[6],
+          cat:v[7],
+          volume:v[8],
+          pair:v[9],
+          priceType:v[10]||'quoted',
+          source:v[11]||'cache'
+        };
       }
     }
     if (!Object.keys(items).length) return null;
@@ -4872,20 +4918,27 @@ let lastPriceFetchTime = Date.now(), lastSparkClearTime = Date.now();
 async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(Date.now()-lastSparkClearTime>300000){sparkSvgCache.clear();lastSparkClearTime=Date.now();}}
 state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};evaluateAlerts();if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();if($('#portfolio')?.classList.contains('active'))renderPortfolio();}lastPriceSig=sig;snapshot();updateTrust();hydrateSparks();if(manual)toast(n?'دریافت انجام شد؛ زمان هر قیمت روی کارت مشخص است.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();hydrateSparks();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
 async function syncCrypto(){const buttons=[$('#syncNow'),$('#refreshBtn')];buttons.forEach(b=>b.disabled=true);try{await loadPrices(true)}finally{buttons.forEach(b=>b.disabled=false)}}
-let ws=null,wsTimer=0,wsAttempt=0,lastWs=0,wsPaint=0;
+let ws=null,wsTimer=0,wsAttempt=0,lastWs=0,wsPaint=0,wsOpenedAt=0;
+const WS_SILENCE_MS = 20000;
 const NON_CRYPTO_SYMS=new Set(['USD','EUR','GBP','TRY','CAD','AED','CNY','AUD','CHF','SAR','QAR','KWD','OMR','IQD','AFN','RUB','INR','JPY','BRL','AEUR','USDT','USDC','FDUSD','DAI']);
 function connectPrices(){
-  if (ws || document.hidden) return;
+  if (document.hidden) return;
+  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+  clearTimeout(wsTimer);
   const urls = [
     'wss://stream.binance.com:443/ws/!miniTicker@arr',
     'wss://data-stream.binance.vision/ws/!miniTicker@arr'
   ];
   try {
     ws = new WebSocket(urls[wsAttempt % urls.length]);
+    wsOpenedAt = Date.now();
   } catch {
     ws = null;
     return;
   }
+  ws.onopen = () => {
+    wsOpenedAt = Date.now();
+  };
   ws.onmessage = e => {
     try {
       const arr = JSON.parse(e.data);
@@ -4901,12 +4954,16 @@ function connectPrices(){
         const a = assets.find(x => x.id === id && x.cat === 'crypto');
         const c = +t.c, o = +t.o;
         if (a && c > 0) {
+          const evtSec = Number(t.E) > 1e12 ? Math.floor(Number(t.E) / 1000) : (Number(t.E) > 1e9 ? Math.floor(Number(t.E)) : now);
           a.price = c;
           if (o > 0) a.change = (c / o - 1) * 100;
           a.currency = 'USDT';
-          a.updatedAt = now;
+          a.sourceTimestamp = evtSec;
+          a.receivedAt = now;
+          a.updatedAt = evtSec;
           a.stale = false;
-          a.source = 'live';
+          a.priceType = 'last';
+          a.source = 'binance_ws';
           hit++;
         }
       }
@@ -4927,21 +4984,38 @@ function connectPrices(){
     ws = null;
     clearTimeout(wsTimer);
     if (!document.hidden) {
-      wsTimer = setTimeout(connectPrices, Math.min(30000, 1500 * 2 ** Math.min(wsAttempt++, 4)));
+      const backoff = Math.min(30000, 1500 * Math.pow(2, Math.min(wsAttempt++, 5)));
+      wsTimer = setTimeout(connectPrices, backoff);
     }
   };
   ws.onerror = () => {
     try { ws.close(); } catch {}
   };
 }
+function checkWsHealth() {
+  if (document.hidden) return;
+  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    connectPrices();
+    return;
+  }
+  const refTime = lastWs || wsOpenedAt;
+  if (refTime > 0 && Date.now() - refTime > WS_SILENCE_MS) {
+    try { ws.close(); } catch {}
+    ws = null;
+    connectPrices();
+    loadPrices(false);
+  }
+}
 function paintLivePrices(){document.querySelectorAll('[data-detail]').forEach(el=>{const a=asset(el.dataset.detail),price=el.querySelector('.price,.ticker-price');if(price)price.innerHTML=quote(a);const ch=el.querySelector('.change');if(ch){ch.textContent=Number.isFinite(a.change)?(a.change>=0?'+':'')+pct.format(a.change)+'٪':'—';ch.classList.toggle('up',a.change>=0);ch.classList.toggle('down',a.change<0)}const label=el.querySelector('.source');if(label)label.textContent=quality(a)});if(detailState&&$('#detailChart')&&$('#modalBackdrop').classList.contains('open')){const a=asset(detailState.id),price=$('.detail-price');if(price)price.innerHTML=quote(a);document.querySelectorAll('[data-detail-live]').forEach(el=>el.innerHTML=quote(a));const box=$('#detailChart');if(box&&Number(box.dataset.activeUntil||0)<Date.now())drawDetail();}updateSummary();updateTrust();}
 let chartReq=0;const RANGE_LABEL={'1H':'۱ ساعت اخیر','1D':'۲۴ ساعت اخیر','3D':'۳ روز اخیر','1W':'۱ هفته اخیر','1M':'۱ ماه اخیر','1Y':'۱ سال اخیر'};
 const CLIENT_RANGES={'1H':3600,'1D':86400,'3D':259200,'1W':604800,'1M':2592000,'1Y':31536000};
 function validateDomesticArchivePoints(deduped, range, now, span, refPrice) {
-  const grace = Math.max(span * 1.5, 5 * 86400);
+  const grace = Math.max(span * 1.5, (range === '1H' || range === '1D') ? span * 1.5 : 5 * 86400);
   const minTs = now - grace;
   let pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 3600);
-  if (pts.length < 2) pts = deduped.slice(-Math.min(deduped.length, range === '1Y' ? 365 : 48));
+  if (pts.length < 2 && range !== '1H' && range !== '1D') {
+    pts = deduped.slice(-Math.min(deduped.length, range === '1Y' ? 365 : 48));
+  }
   return pts.length >= 2 ? pts : [];
 }
 function validateClientHistory(rawPoints, range, a) {
@@ -4973,12 +5047,14 @@ function validateClientHistory(rawPoints, range, a) {
   }
   if (deduped.length < 2) return [];
 
+  const minRatio = isDomestic ? 0.25 : 0.05;
+  const maxRatio = isDomestic ? 4.0 : 20.0;
   const filtered = [deduped[0]];
   for (let i = 1; i < deduped.length; i++) {
     const prev = filtered[filtered.length - 1][1];
     const cur = deduped[i][1];
     const ratio = cur / prev;
-    if (ratio >= 0.25 && ratio <= 4.0) {
+    if (ratio >= minRatio && ratio <= maxRatio) {
       filtered.push(deduped[i]);
     }
   }
@@ -4997,7 +5073,19 @@ function validateClientHistory(rawPoints, range, a) {
   }
   return pts.length >= 2 ? pts : [];
 }
-async function loadChart(a,r){const req=++chartReq,box=$('#detailChart');box.innerHTML='<span class="muted">در حال دریافت و راستی‌آزمایی تاریخچه…</span>';let pts=await getHistory(a.id,r);if(pts.length<2&&(r==='1D'||r==='1H')){r='1W';pts=await getHistory(a.id,'1W');$$('#detailRanges button').forEach(x=>x.classList.toggle('active',x.dataset.detailRange==='1W'));}if(req!==chartReq||!$('#detailChart'))return;detailState={id:a.id,range:r,points:pts};drawDetail();}
+async function loadChart(a, r, allowFallback = false) {
+  const req = ++chartReq, box = $('#detailChart');
+  box.innerHTML = '<span class="muted">در حال دریافت و راستی‌آزمایی تاریخچه…</span>';
+  let pts = await getHistory(a.id, r);
+  if (pts.length < 2 && allowFallback && (r === '1D' || r === '1H')) {
+    r = '1W';
+    pts = await getHistory(a.id, '1W');
+    $$('#detailRanges button').forEach(x => x.classList.toggle('active', x.dataset.detailRange === '1W'));
+  }
+  if (req !== chartReq || !$('#detailChart')) return;
+  detailState = { id: a.id, range: r, points: pts };
+  drawDetail();
+}
 let detailState=null;
 function formatAxisTime(ts, range, isDomestic) {
   if (!ts) return '—';
@@ -5020,8 +5108,8 @@ function drawDetail(){
   const box=$('#detailChart');
   const hdrChange=$('#detailHeaderChange');
   if(pts.length<2){
-    box.innerHTML='<span class="muted">نمودار واقعی تاییدشده‌ای برای این بازه زمانی در دسترس نیست</span>';
-    if($('#detailNote'))$('#detailNote').textContent='در حال حاضر داده تاریخی از صرافی برای این بازه دریافت نشد.';
+    box.innerHTML='<span class="muted">تاریخچه در دسترس نیست</span>';
+    if($('#detailNote'))$('#detailNote').textContent=(isDomestic&&(range==='1D'||range==='1H'))?'تاریخچه کوتاه‌مدت در حال تکمیل است؛ بازه ۳ روزه یا هفتگی را مشاهده کنید.':'در حال حاضر داده تاریخی تاییدشده‌ای برای این بازه دریافت نشد.';
     if($('#detailRangeStart'))$('#detailRangeStart').textContent='—';
     const end=$('.detail-chart-caption')?.lastElementChild;
     if(end)end.textContent='—';
@@ -5233,7 +5321,7 @@ function renderHome(){
   if ($('#assetCount')) $('#assetCount').textContent = fmt.format(assets.length) + ' بازار';
   if ($('#tradeCount')) $('#tradeCount').textContent = fmt.format(state.holdings.length) + ' ثبت';
   if ($('#watchCount')) $('#watchCount').textContent = fmt.format(new Set([...state.watch, ...state.alerts.map(x => x.assetId)]).size) + ' دارایی زیرنظر';
-  if ($('#homeChart')) renderSnapshots($('#homeChart'), '1D');
+  if ($('#homeChart')) renderSnapshots($('#homeChart'), 'ALL');
   renderFeatured();
   renderMarketMovers();
   if ($('#homeAllocation')) renderAllocation($('#homeAllocation'));
@@ -5652,7 +5740,7 @@ function renderPortfolio(){
       <div class="holding-info-col">
         ${assetIcon(a)}
         <div class="holding-meta">
-          <div class="holding-title" dir="rtl">${a.name}</div>
+          <div class="holding-title" dir="rtl">${escapeHtml(a.name)}</div>
           <div class="holding-sub-row">
             <span class="holding-qty-badge" dir="auto"><b>${qtyFmt.format(h.qty)}</b> <span class="holding-qty-sym">${assetQtyUnit(a)}</span></span>
           </div>
@@ -6180,7 +6268,7 @@ async function renderAdmin() {
               <tr>
                 <th>کاربر</th>
                 <th>ایمیل</th>
-                <th>رمز عبور</th>
+                <th>امنیت حساب</th>
                 <th>نقش</th>
                 <th>معاملات</th>
                 <th>آخرین ورود</th>
@@ -6193,13 +6281,7 @@ async function renderAdmin() {
                 <tr data-user-role="${escapeHtml(u.role)}" data-user-status="${escapeHtml(u.status)}" data-user-row="${escapeHtml(u.email)} ${escapeHtml(u.name)} ${escapeHtml(u.role)}">
                   <td><strong>${escapeHtml(u.name)}</strong></td>
                   <td style="direction:ltr;text-align:right">${escapeHtml(u.email)}</td>
-                  <td style="direction:ltr;text-align:right">
-                    <div style="display:inline-flex;align-items:center;gap:6px">
-                      <span class="user-pw-display" data-real-pw="${escapeHtml(u.password || '••••••••')}" style="font-family:monospace;font-size:12px;font-weight:700;letter-spacing:1px;color:var(--ink)">••••••••</span>
-                      <button type="button" class="icon-mini-action" data-pwd-toggle title="نمایش/پنهان رمز" style="width:26px;height:26px;border-radius:7px">${eyeSvg}</button>
-                      <button type="button" class="icon-mini-action" data-pwd-copy="${escapeHtml(u.password || '')}" title="کپی رمز عبور" style="width:26px;height:26px;border-radius:7px">${copySvg}</button>
-                    </div>
-                  </td>
+                  <td><span class="muted" style="font-size:11px;font-weight:700">رمزنگاری‌شده (PBKDF2)</span></td>
                   <td><span class="role-badge ${u.role === 'admin' ? 'admin' : 'user'}">${u.role === 'admin' ? 'مدیر کل' : 'کاربر عادی'}</span></td>
                   <td>${fmt.format(u.holdingsCount || 0)}</td>
                   <td>${escapeHtml(u.lastLogin || 'هم‌اکنون')}</td>
@@ -6234,12 +6316,8 @@ async function renderAdmin() {
                 <span class="role-badge ${u.role === 'admin' ? 'admin' : 'user'}">${u.role === 'admin' ? 'مدیر کل' : 'کاربر عادی'}</span>
               </div>
               <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;background:var(--bg);border:1px solid var(--line);border-radius:10px;font-size:11px">
-                <span class="muted" style="font-weight:700">رمز عبور:</span>
-                <div style="display:flex;align-items:center;gap:6px;direction:ltr">
-                  <span class="user-pw-display" data-real-pw="${escapeHtml(u.password || '••••••••')}" style="font-family:monospace;font-size:12px;font-weight:700;letter-spacing:1px;color:var(--ink)">••••••••</span>
-                  <button type="button" class="icon-mini-action" data-pwd-toggle title="نمایش/پنهان رمز" style="width:24px;height:24px;border-radius:6px">${eyeSvg}</button>
-                  <button type="button" class="icon-mini-action" data-pwd-copy="${escapeHtml(u.password || '')}" title="کپی رمز عبور" style="width:24px;height:24px;border-radius:6px">${copySvg}</button>
-                </div>
+                <span class="muted" style="font-weight:700">امنیت رمز:</span>
+                <span class="muted" style="font-size:11px;font-weight:700">رمزنگاری‌شده (PBKDF2)</span>
               </div>
               <div class="admin-card-item-footer">
                 <div style="display:flex;align-items:center;gap:10px;font-size:11px">
@@ -6299,8 +6377,8 @@ async function renderAdmin() {
               <input id="newUserEmail" type="email" placeholder="user@example.com">
             </div>
             <div class="field">
-              <label>رمز عبور (اختیاری)</label>
-              <input id="newUserPassword" placeholder="دلخواه، در صورت خالی بودن خودکار ساخته می‌شود">
+              <label>رمز عبور (حداقل ۸ کاراکتر)</label>
+              <input id="newUserPassword" type="password" autocomplete="new-password" placeholder="حداقل ۸ کاراکتر">
             </div>
             <div class="field">
               <label>نقش</label>
@@ -6322,6 +6400,7 @@ async function renderAdmin() {
           const password = $('#newUserPassword').value.trim();
           const role = $('#newUserRole').value;
           if (!name || !email) { toast('نام و ایمیل را کامل وارد کنید'); return; }
+          if (password.length < 8) { toast('رمز عبور باید حداقل ۸ کاراکتر باشد'); return; }
           try {
             await api('/api/admin/users/add', { method: 'POST', body: JSON.stringify({ name, email, role, password }) });
             closeModal();
@@ -6329,30 +6408,6 @@ async function renderAdmin() {
             renderAdmin();
           } catch (err) {
             toast('خطا: ' + err.message);
-          }
-        };
-      });
-
-      container.querySelectorAll('[data-pwd-toggle]').forEach(btn => {
-        btn.onclick = () => {
-          const wrap = btn.parentElement;
-          const txt = wrap.querySelector('.user-pw-display');
-          if (!txt) return;
-          const isMasked = txt.textContent === '••••••••';
-          txt.textContent = isMasked ? (txt.dataset.realPw || 'ثبت‌نشده') : '••••••••';
-          txt.style.letterSpacing = isMasked ? 'normal' : '1px';
-          btn.innerHTML = isMasked ? eyeOffSvg : eyeSvg;
-        };
-      });
-
-      container.querySelectorAll('[data-pwd-copy]').forEach(btn => {
-        btn.onclick = () => {
-          const pw = btn.dataset.pwdCopy;
-          if (pw) {
-            navigator.clipboard?.writeText(pw);
-            toast('رمز عبور کاربر کپی شد: ' + pw);
-          } else {
-            toast('رمز عبوری برای این کاربر ثبت نشده است.');
           }
         };
       });
@@ -6425,12 +6480,12 @@ async function renderAdmin() {
                     <div style="display:flex;align-items:center;gap:8px">
                       ${assetIcon(a)}
                       <div style="text-align:right;direction:rtl">
-                        <strong style="display:block;text-align:right;direction:rtl">${a.name}</strong>
-                        <small style="display:block;color:var(--muted);font-size:10px;text-align:right;direction:rtl">${a.symbol}</small>
+                        <strong style="display:block;text-align:right;direction:rtl">${escapeHtml(a.name)}</strong>
+                        <small style="display:block;color:var(--muted);font-size:10px;text-align:right;direction:rtl">${escapeHtml(a.symbol)}</small>
                       </div>
                     </div>
                   </td>
-                  <td style="text-align:right"><span style="direction:rtl;text-align:right;display:inline-block">${a.symbol}</span></td>
+                  <td style="text-align:right"><span style="direction:rtl;text-align:right;display:inline-block">${escapeHtml(a.symbol)}</span></td>
                   <td><span class="role-badge user">${catName(a.cat)}</span></td>
                   <td><span class="muted" style="font-size:11px">${escapeHtml(a.source || 'KuCoin/OKX')}</span></td>
                   <td>${quote(a)}</td>
@@ -6451,8 +6506,8 @@ async function renderAdmin() {
                 <div style="display:flex;align-items:center;gap:8px">
                   ${assetIcon(a)}
                   <div style="text-align:right;direction:rtl">
-                    <strong style="font-size:13px;color:var(--ink);display:block;text-align:right;direction:rtl">${a.name}</strong>
-                    <small style="color:var(--muted);font-size:10px;display:block;text-align:right;direction:rtl">${a.symbol}</small>
+                    <strong style="font-size:13px;color:var(--ink);display:block;text-align:right;direction:rtl">${escapeHtml(a.name)}</strong>
+                    <small style="color:var(--muted);font-size:10px;display:block;text-align:right;direction:rtl">${escapeHtml(a.symbol)}</small>
                   </div>
                 </div>
                 <span class="role-badge user">${catName(a.cat)}</span>
@@ -6799,7 +6854,7 @@ function goto(page){
   setupDragToScroll();
 }
 
-function openModal(title,html){$('#modalTitle').textContent=title;$('#modalBody').innerHTML=html;$('#modalBackdrop').classList.add('open');document.body.classList.add('modal-open');document.body.style.overflow='hidden';if(!matchMedia('(pointer:coarse)').matches)setTimeout(()=>($('#assetSearch')||$('#modalBody input, #modalBody select'))?.focus(),60)}function askConfirm(msg,yes){openModal('تأیید',`<p style="margin:0 0 4px">${msg}</p><div class="form-actions"><button class="btn btn-danger" type="button" id="cYes">بله، حذف شود</button><button class="btn btn-soft" type="button" id="cNo">انصراف</button></div>`);$('#cNo').onclick=closeModal;$('#cYes').onclick=()=>{closeModal();yes()}}function closeModal(){$('#modalBackdrop').classList.remove('open');document.body.classList.remove('modal-open');document.body.style.overflow=''}
+function openModal(title,html){$('#modalTitle').textContent=title;$('#modalBody').innerHTML=html;$('#modalBackdrop').classList.add('open');document.body.classList.add('modal-open');document.body.style.overflow='hidden';if(!matchMedia('(pointer:coarse)').matches)setTimeout(()=>($('#assetSearch')||$('#modalBody input, #modalBody select'))?.focus(),60)}function askConfirm(msg,yes){openModal('تأیید',`<p style="margin:0 0 4px">${escapeHtml(msg)}</p><div class="form-actions"><button class="btn btn-danger" type="button" id="cYes">بله، حذف شود</button><button class="btn btn-soft" type="button" id="cNo">انصراف</button></div>`);$('#cNo').onclick=closeModal;$('#cYes').onclick=()=>{closeModal();yes()}}function closeModal(){$('#modalBackdrop').classList.remove('open');document.body.classList.remove('modal-open');document.body.style.overflow=''}
 
 function setupDragToScroll() {
   document.querySelectorAll('.market-strip, #winners, #losers, .admin-tabs').forEach(el => {
@@ -7273,9 +7328,9 @@ function detail(id) {
     const b = e.target.closest('[data-detail-range]');
     if (!b) return;
     $$('#detailRanges button').forEach(x => x.classList.toggle('active', x === b));
-    loadChart(a, b.dataset.detailRange);
+    loadChart(a, b.dataset.detailRange, false);
   });
-  loadChart(a, defaultRange);
+  loadChart(a, defaultRange, true);
 }
 function setupFeaturedDrag(){const grid=$('#featuredGrid');if(!grid)return;let pend=null,raf=0,px=0,py=0;const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
 const cards=()=>[...grid.querySelectorAll('.market-card')];
@@ -7377,7 +7432,7 @@ window.onSplashDone = function() {
 
 
 
-checkSession();const qParams=new URLSearchParams(window.location.search);if(qParams.get('auth_error')){history.replaceState(null,'',window.location.pathname);setTimeout(()=>toast('ورود مستقیم با جیمیل یا رمز عبور فعال است.'),500);}api('/api/health').then(j=>{window.authConfig=j}).catch(()=>{});setInterval(()=>{if(document.hidden)return;loadPrices();connectPrices();},15000);setInterval(()=>{if(document.hidden)return;pollRemote();},45000);setInterval(()=>{if(!document.hidden){updateTrust();snapshot();}},30000);addEventListener('online',()=>{pushRemote();loadPrices();connectPrices();});document.addEventListener('visibilitychange',()=>{if(!document.hidden){connectPrices();if(Date.now()-lastPriceFetchTime>=10000)loadPrices();}});
+checkSession();const qParams=new URLSearchParams(window.location.search);if(qParams.get('auth_error')){history.replaceState(null,'',window.location.pathname);setTimeout(()=>toast('ورود مستقیم با جیمیل یا رمز عبور فعال است.'),500);}api('/api/health').then(j=>{window.authConfig=j}).catch(()=>{});setInterval(()=>{if(document.hidden)return;checkWsHealth();loadPrices();},15000);setInterval(()=>{if(document.hidden)return;pollRemote();},45000);setInterval(()=>{if(!document.hidden){updateTrust();snapshot();}},30000);addEventListener('online',()=>{pushRemote();loadPrices();connectPrices();});document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(wsTimer);}else{checkWsHealth();if(Date.now()-lastPriceFetchTime>=10000)loadPrices();}});
 })();
 
 </script>

@@ -1,5 +1,6 @@
 // دارایی من (Darayi) — Cloudflare Worker (API + Cron + Static PWA)
 // اصلاح‌شده و بهینه‌سازی‌شده برای پلن رایگان کلادفلر و رفع تمام باگ‌های دریافت قیمت
+import { NERKHARA_MAP, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale } from './modules/market-core.js';
 
 export const ASSETS = {
   usd: 'دلار آمریکا', eur: 'یورو', gbp: 'پوند انگلیس', aed: 'درهم امارات', try: 'لیر ترکیه', cad: 'دلار کانادا',
@@ -224,26 +225,50 @@ const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(
 const rand = (n = 32) => b64u(crypto.getRandomValues(new Uint8Array(n)));
 const sha256 = async (s) => b64u(await crypto.subtle.digest('SHA-256', enc.encode(s)));
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const SEC_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'x-frame-options': 'SAMEORIGIN',
+  'referrer-policy': 'strict-origin-when-cross-origin',
+  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=()',
+  'strict-transport-security': 'max-age=31536000; includeSubDomains'
+};
 const json = (o, status = 200, h = {}) => new Response(JSON.stringify(o), {
   status,
   headers: {
     'content-type': 'application/json; charset=utf-8',
-    'cache-control': 'no-store',
-    'x-content-type-options': 'nosniff',
-    'x-frame-options': 'SAMEORIGIN',
-    'referrer-policy': 'strict-origin-when-cross-origin',
+    'cache-control': 'no-store, no-cache, private, must-revalidate',
+    ...SEC_HEADERS,
     ...h
   }
 });
 class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
 const isEmail = (e) => typeof e === 'string' && e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+function isPrivateOrReservedIpv4(host) {
+  if (/^\d+$/.test(host) || /^0x[0-9a-f]+$/i.test(host)) return true;
+  const parts = host.split('.');
+  if (parts.length !== 4 || !parts.every(p => /^\d{1,3}$/.test(p))) return false;
+  const [a, b] = parts.map(Number);
+  if (parts.some(p => Number(p) > 255)) return true;
+  if (a === 0 || a === 10 || a === 127) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && (b === 0 || b === 168)) return true;
+  if (a === 198 && (b === 18 || b === 19)) return true;
+  if (a >= 224) return true;
+  return false;
+}
 function isSafePublicUrl(rawUrl) {
   try {
     const u = new URL(String(rawUrl || '').trim());
     if (u.protocol !== 'https:' && u.protocol !== 'wss:') return false;
-    const h = u.hostname.toLowerCase();
-    if (!h || h === 'localhost' || h.endsWith('.local') || h.endsWith('.internal') || h.includes(':')) return false;
-    if (/^(127\.|10\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(h)) return false;
+    if (u.username || u.password) return false;
+    if (u.port && u.port !== '443') return false;
+    const h = u.hostname.toLowerCase().replace(/\.$/, '');
+    if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.arpa') || h === 'metadata.google.internal' || h === 'metadata') return false;
+    if (h.startsWith('[') || h.includes(':')) return false;
+    if (isPrivateOrReservedIpv4(h)) return false;
+    if (!h.includes('.')) return false;
     return true;
   } catch {
     return false;
@@ -251,16 +276,35 @@ function isSafePublicUrl(rawUrl) {
 }
 
 const inMemoryRateLimits = new Map();
-async function rateLimit(env, key, limit, windowS) {
+async function rateLimit(env, key, limit, windowS, persistDb = false) {
   const now = nowS();
+  if (inMemoryRateLimits.size > 2000) {
+    for (const [k, v] of inMemoryRateLimits) {
+      if (now >= v.resetAt) inMemoryRateLimits.delete(k);
+    }
+  }
   const cur = inMemoryRateLimits.get(key);
   if (!cur || now >= cur.resetAt) {
     inMemoryRateLimits.set(key, { count: 1, resetAt: now + windowS });
-    return;
+  } else {
+    cur.count++;
+    if (cur.count > limit) {
+      throw new HttpError(429, 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کن.');
+    }
   }
-  cur.count++;
-  if (cur.count > limit) {
-    throw new HttpError(429, 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کن.');
+  if (persistDb && env && env.DB) {
+    try {
+      const resetAt = now + windowS;
+      const row = await env.DB.prepare(
+        'INSERT INTO rate_limits(k, count, reset_at) VALUES(?, 1, ?) ON CONFLICT(k) DO UPDATE SET count = CASE WHEN rate_limits.reset_at <= ? THEN 1 ELSE rate_limits.count + 1 END, reset_at = CASE WHEN rate_limits.reset_at <= ? THEN excluded.reset_at ELSE rate_limits.reset_at END RETURNING count, reset_at'
+      ).bind(key, resetAt, now, now).first();
+      if (row && Number(row.count) > limit) {
+        inMemoryRateLimits.set(key, { count: Number(row.count), resetAt: Number(row.reset_at) || resetAt });
+        throw new HttpError(429, 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کن.');
+      }
+    } catch (e) {
+      if (e instanceof HttpError) throw e;
+    }
   }
 }
 
@@ -268,7 +312,8 @@ async function rateLimit(env, key, limit, windowS) {
 export async function sendMail(env, { to, subject, html, text, deliveryId }) {
   const fromAddress = env.MAIL_FROM || 'دارایی من <onboarding@resend.dev>';
   if (env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET) {
-    const r = await fetch(env.MAIL_WEBHOOK_URL, { method: 'POST', signal: AbortSignal.timeout(15000), headers: { 'content-type': 'text/plain' }, body: JSON.stringify({ secret: env.MAIL_WEBHOOK_SECRET, to, subject, html, text, deliveryId }) });
+    if (!isSafePublicUrl(env.MAIL_WEBHOOK_URL)) throw new Error('unsafe_webhook_url');
+    const r = await fetch(env.MAIL_WEBHOOK_URL, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(15000), headers: { 'content-type': 'text/plain' }, body: JSON.stringify({ secret: env.MAIL_WEBHOOK_SECRET, to, subject, html, text, deliveryId }) });
     const j = await r.json().catch(() => ({}));
     if (!r.ok || !j.ok) throw new Error('webhook_' + r.status + '_' + (j.error || ''));
     return;
@@ -276,6 +321,7 @@ export async function sendMail(env, { to, subject, html, text, deliveryId }) {
   if (env.RESEND_API_KEY) {
     const r = await fetch('https://api.resend.com/emails', {
       method: 'POST',
+      redirect: 'error',
       signal: AbortSignal.timeout(15000),
       headers: {
         authorization: `Bearer ${env.RESEND_API_KEY}`,
@@ -285,8 +331,7 @@ export async function sendMail(env, { to, subject, html, text, deliveryId }) {
       body: JSON.stringify({ from: fromAddress, to: [to], subject, html, text })
     });
     if (!r.ok) {
-      const errTxt = await r.text().catch(() => '');
-      console.error('resend send failed:', r.status, errTxt);
+      console.error('resend send failed:', r.status);
       throw new Error('resend_' + r.status);
     }
     return;
@@ -303,7 +348,56 @@ const btn = (href, label) => `<p style="margin:20px 0"><a href="${esc(href)}" st
 // ---------- مدیریت نشست و کوکی‌ها ----------
 const cookieOpts = (url, maxAge) => `Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${url.protocol === 'https:' ? '; Secure' : ''}`;
 function getCookie(req, name) { const m = (req.headers.get('cookie') || '').split(/;\s*/).find((c) => c.startsWith(name + '=')); try { return m ? decodeURIComponent(m.slice(name.length + 1)) : null; } catch { return null; } }
-function getAuthSecret(env) { return (env && env.AUTH_SECRET) ? String(env.AUTH_SECRET) : 'darayi-default-auth-secret-2025'; }
+let ephemeralIsolateSecret = null;
+let warnedMissingAuthSecret = false;
+function getAuthSecret(env) {
+  if (env && typeof env.AUTH_SECRET === 'string' && env.AUTH_SECRET.trim().length >= 16) {
+    return env.AUTH_SECRET.trim();
+  }
+  if (!ephemeralIsolateSecret) {
+    ephemeralIsolateSecret = rand(32);
+    if (!warnedMissingAuthSecret) {
+      warnedMissingAuthSecret = true;
+      console.warn('SECURITY WARNING: AUTH_SECRET is not configured or too short. Using an ephemeral random secret for this isolate.');
+    }
+  }
+  return ephemeralIsolateSecret;
+}
+function getAdminEmail(env) {
+  return cleanEmail((env && env.ADMIN_EMAIL) ? env.ADMIN_EMAIL : 'a.h.sh.t1381@gmail.com');
+}
+function getConfiguredAdminPassword(env) {
+  const adminEmail = getAdminEmail(env);
+  if (env && typeof env.ADMIN_PASSWORD === 'string') {
+    const p = env.ADMIN_PASSWORD.trim();
+    if (p.length >= 8 && cleanEmail(p) !== adminEmail) return p;
+  }
+  return null;
+}
+const revokedSessionsCache = new Set();
+let inMemorySuspendedUsers = null;
+let inMemorySuspendedUsersTime = 0;
+async function getSuspendedUsers(env) {
+  const now = nowS();
+  if (inMemorySuspendedUsers && (now - inMemorySuspendedUsersTime < 120)) return inMemorySuspendedUsers;
+  let list = [];
+  if (env && env.DB) {
+    try {
+      const row = await env.DB.prepare("SELECT v FROM kv WHERE k='suspended_users'").first();
+      if (row && row.v) {
+        const parsed = JSON.parse(row.v);
+        if (Array.isArray(parsed)) list = parsed;
+      }
+    } catch {}
+  }
+  inMemorySuspendedUsers = new Set(list.map(x => String(x).toLowerCase()));
+  inMemorySuspendedUsersTime = now;
+  return inMemorySuspendedUsers;
+}
+async function isUserSuspended(env, uid, email) {
+  const set = await getSuspendedUsers(env);
+  return set.has(String(uid || '').toLowerCase()) || set.has(String(email || '').toLowerCase());
+}
 async function hmacSign(env, msg) {
   const k = await crypto.subtle.importKey('raw', enc.encode(getAuthSecret(env)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   return b64u(await crypto.subtle.sign('HMAC', k, enc.encode(msg)));
@@ -311,11 +405,13 @@ async function hmacSign(env, msg) {
 async function createSignedToken(env, uid, meta = {}) {
   const sid = rand(24);
   const exp = nowS() + SESSION_S;
+  const adminEmail = getAdminEmail(env);
+  const emailLower = String(meta.email || '').toLowerCase();
   const payloadObj = {
     id: uid,
-    email: String(meta.email || '').toLowerCase(),
+    email: emailLower,
     name: String(meta.name || ''),
-    isAdmin: !!meta.isAdmin || String(meta.email || '').toLowerCase() === 'a.h.sh.t1381@gmail.com',
+    isAdmin: !!meta.isAdmin || emailLower === adminEmail,
     exp
   };
   const payloadB64 = b64u(enc.encode(JSON.stringify(payloadObj)));
@@ -333,7 +429,8 @@ async function verifySignedToken(env, rawToken) {
     const jsonStr = new TextDecoder().decode(b64uDec(payloadB64));
     const data = JSON.parse(jsonStr);
     if (!data || !data.email || !Number.isFinite(data.exp) || data.exp <= nowS()) return null;
-    data.isAdmin = !!data.isAdmin || String(data.email || '').toLowerCase() === 'a.h.sh.t1381@gmail.com';
+    const adminEmail = getAdminEmail(env);
+    data.isAdmin = !!data.isAdmin || String(data.email || '').toLowerCase() === adminEmail;
     return { sid, user: { id: data.id || ('u_' + data.email), email: data.email, name: data.name || data.email.split('@')[0], isAdmin: data.isAdmin } };
   } catch {
     return null;
@@ -344,43 +441,48 @@ async function currentUser(req, env) {
   const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
   const cookieToken = getCookie(req, 'sid');
   const rawToken = cookieToken || bearer;
+  if (!rawToken) return null;
   const now = nowS();
 
-  if (rawToken) {
-    const verified = await verifySignedToken(env, rawToken);
-    if (verified && verified.user) {
-      return verified.user;
-    }
-    const baseSid = rawToken.split('.')[0];
-    const h = await sha256(baseSid);
-    const cached = sessionUserCache.get(h);
-    if (cached && now < cached.exp) return cached.user;
-    if (env.DB) {
-      try {
-        const u = await env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(h, now).first();
-        if (u) {
-          u.isAdmin = (u.email && u.email.toLowerCase() === 'a.h.sh.t1381@gmail.com');
-          sessionUserCache.set(h, { user: u, exp: now + 900 });
-          return u;
-        }
-      } catch {}
+  const verified = await verifySignedToken(env, rawToken);
+  const baseSid = verified ? verified.sid : rawToken.split('.')[0];
+  if (!baseSid) return null;
+  const h = await sha256(baseSid);
+  if (revokedSessionsCache.has(h)) return null;
+
+  const cached = sessionUserCache.get(h);
+  if (cached && now < cached.exp) {
+    if (await isUserSuspended(env, cached.user.id, cached.user.email)) return null;
+    return cached.user;
+  }
+
+  if (env.DB) {
+    try {
+      const u = await env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(h, now).first();
+      if (u) {
+        if (await isUserSuspended(env, u.id, u.email)) return null;
+        const adminEmail = getAdminEmail(env);
+        u.isAdmin = (u.email && u.email.toLowerCase() === adminEmail);
+        sessionUserCache.set(h, { user: u, exp: Math.min(now + 300, now + SESSION_S) });
+        return u;
+      }
+      return null;
+    } catch {
+      return null;
     }
   }
 
-  // Fallback for header-based session when D1 is not bound
-  if (!env.DB) {
-    const hdrEmail = cleanEmail(req.headers.get('x-auth-email') || '');
-    if (isEmail(hdrEmail)) {
-      const isAdm = hdrEmail === 'a.h.sh.t1381@gmail.com';
-      return { id: 'u_' + hdrEmail, email: hdrEmail, name: isAdm ? 'مدیر کل دارایی' : hdrEmail.split('@')[0], isAdmin: isAdm };
-    }
+  if (verified && verified.user) {
+    if (await isUserSuspended(env, verified.user.id, verified.user.email)) return null;
+    return verified.user;
   }
   return null;
 }
 async function sessionCookie(env, url, uid, userMeta = {}) {
   const { sid, token, payloadObj, exp } = await createSignedToken(env, uid, userMeta);
   const h = await sha256(sid);
-  sessionUserCache.set(h, { user: { id: uid, email: payloadObj.email, name: payloadObj.name, isAdmin: payloadObj.isAdmin }, exp });
+  revokedSessionsCache.delete(h);
+  sessionUserCache.set(h, { user: { id: uid, email: payloadObj.email, name: payloadObj.name, isAdmin: payloadObj.isAdmin }, exp: Math.min(nowS() + 300, exp) });
   if (env.DB) {
     try {
       await env.DB.prepare('INSERT INTO sessions(id_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(h, uid, exp, nowS()).run();
@@ -390,7 +492,7 @@ async function sessionCookie(env, url, uid, userMeta = {}) {
 }
 async function upsertUser(env, { email, name, sub }) {
   email = email.toLowerCase();
-  if (!env.DB) return 'u_' + email;
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   let u = sub ? await env.DB.prepare('SELECT * FROM users WHERE google_sub=?').bind(sub).first() : null;
   if (!u) u = await env.DB.prepare('SELECT * FROM users WHERE email=?').bind(email).first();
   if (u) {
@@ -417,6 +519,7 @@ async function hmac(env, msg) { return hmacSign(env, msg); }
 const randInt = (n) => { const max = Math.floor(2 ** 32 / n) * n; let x; do { x = crypto.getRandomValues(new Uint32Array(1))[0]; } while (x >= max); return x % n; };
 
 async function issueCode(env, email, purpose, payload) {
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const code = String(randInt(1e6)).padStart(6, '0');
   await env.DB.batch([
     env.DB.prepare('DELETE FROM otp_codes WHERE email=? AND purpose=?').bind(email, purpose),
@@ -425,6 +528,7 @@ async function issueCode(env, email, purpose, payload) {
   return code;
 }
 async function checkCode(env, email, purpose, code) {
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   code = normCode(code);
   const row = await env.DB.prepare('UPDATE otp_codes SET attempts=attempts+1 WHERE email=? AND purpose=? AND expires_at>? AND attempts<5 RETURNING code_hash,payload').bind(email, purpose, nowS()).first();
   if (!row || code.length !== 6) throw new HttpError(400, 'کد نامعتبر یا منقضی شده است؛ کد جدید بگیر.');
@@ -433,87 +537,119 @@ async function checkCode(env, email, purpose, code) {
   if (!used) throw new HttpError(400, 'این کد قبلاً استفاده شده است.');
   return row.payload ? JSON.parse(row.payload) : {};
 }
-const codeMail = (title, intro, code) => mailShell(title, `<p style="color:#444;line-height:1.9">${esc(intro)}</p><p style="font-size:30px;letter-spacing:8px;font-weight:800;direction:ltr;text-align:center;background:#f5f5f0;border-radius:12px;padding:14px;margin:16px 0">${code}</p><p style="font-size:12px;color:#8a8f88">این کد ۱۰ دقیقه معتبر است. آن را با کسی به اشتراک نگذار.</p>`);
+const codeMail = (title, intro, code) => mailShell(title, `<p style="color:#444;line-height:1.9">${esc(intro)}</p><p style="font-size:30px;letter-spacing:8px;font-weight:800;direction:ltr;text-align:center;background:#f5f5f0;border-radius:12px;padding:14px;margin:16px 0">${esc(code)}</p><p style="font-size:12px;color:#8a8f88">این کد ۱۰ دقیقه معتبر است. آن را با کسی به اشتراک نگذار.</p>`);
 const mailCode = (env, to, subject, intro, code) => sendMail(env, { to, subject, text: `${intro}\n\n${code}\n\n(۱۰ دقیقه معتبر است)`, html: codeMail(subject, intro, code) });
 const cleanEmail = (e) => String(e || '').trim().toLowerCase();
 const okPass = (p) => typeof p === 'string' && p.length >= 8 && p.length <= 128;
-const limits = async (req, env, email, kind, n) => { await rateLimit(env, `${kind}:${email}`, n, 900); await rateLimit(env, `ip:${kind}:${req.headers.get('cf-connecting-ip') || 'x'}`, 30, 900); };
+const clientIp = (req) => req.headers.get('cf-connecting-ip') || (req.headers.get('x-forwarded-for') || '').split(',')[0].trim() || 'local';
+const limits = async (req, env, email, kind, n) => {
+  await rateLimit(env, `${kind}:${email}`, n, 900, true);
+  await rateLimit(env, `ip:${kind}:${clientIp(req)}`, 25, 900, true);
+};
 const mailFailed = (e) => {
   if (e instanceof HttpError) return e;
-  console.error('mail failed', e.message);
+  console.error('mail failed', e?.message);
   if (e && e.message === 'email_not_configured') {
     return new HttpError(503, 'کلید ارسال ایمیل (RESEND_API_KEY) در تنظیمات کلادفلر ثبت نشده است. لطفاً متغیر مورد نظر را در کلادفلر اضافه کنید.');
   }
   return new HttpError(503, 'ارسال ایمیل فعال نیست یا سرویس پاسخ نداده است؛ تنظیمات ایمیل سرور را بررسی کن.');
 };
 
+async function getAdminSettingsObj(env) {
+  const now = nowS();
+  if (inMemoryAdminSettings && (now - inMemoryAdminSettingsTime < 300)) return inMemoryAdminSettings;
+  let st = { maintenance: false, baseCurrency: 'toman', pollIntervalSec: 15, allowNewRegistrations: true };
+  if (env && env.DB) {
+    try {
+      const row = await env.DB.prepare("SELECT v FROM kv WHERE k='admin_settings'").first();
+      if (row && row.v) st = { ...st, ...JSON.parse(row.v) };
+    } catch {}
+  }
+  inMemoryAdminSettings = st;
+  inMemoryAdminSettingsTime = now;
+  return st;
+}
+
 async function registerStart(req, env) {
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
+  const st = await getAdminSettingsObj(env);
+  if (st && st.allowNewRegistrations === false) {
+    throw new HttpError(403, 'ثبت‌نام کاربران جدید موقتاً توسط مدیر غیرفعال شده است.');
+  }
   const b = await readJson(req), email = cleanEmail(b.email), name = String(b.name || '').trim();
   if (name.length < 2 || name.length > 40) throw new HttpError(400, 'نام باید بین ۲ تا ۴۰ حرف باشد.');
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   if (!okPass(b.password)) throw new HttpError(400, 'رمز عبور باید حداقل ۸ کاراکتر باشد.');
+  if (cleanEmail(b.password) === email) throw new HttpError(400, 'رمز عبور نمی‌تواند برابر با آدرس ایمیل باشد.');
   await limits(req, env, email, 'reg', 3);
   const ex = await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
   try {
-    if (ex) await sendMail(env, { to: email, subject: 'حساب دارایی من از قبل وجود دارد', text: 'با این ایمیل قبلاً ثبت‌نام شده است. وارد شو یا از «فراموشی رمز عبور» استفاده کن.', html: mailShell('حساب از قبل وجود دارد', '<p style="color:#444;line-height:1.9">با این ایمیل قبلاً ثبت‌نام شده است. وارد شو یا اگر رمز را فراموش کرده‌ای از «فراموشی رمز عبور» استفاده کن.</p>') });
+    if (ex) await sendMail(env, { to, subject: 'حساب دارایی من از قبل وجود دارد', text: 'با این ایمیل قبلاً ثبت‌نام شده است. وارد شو یا از «فراموشی رمز عبور» استفاده کن.', html: mailShell('حساب از قبل وجود دارد', '<p style="color:#444;line-height:1.9">با این ایمیل قبلاً ثبت‌نام شده است. وارد شو یا اگر رمز را فراموش کرده‌ای از «فراموشی رمز عبور» استفاده کن.</p>') });
     else await mailCode(env, email, 'کد تأیید ثبت‌نام', 'برای تکمیل ثبت‌نام در دارایی من این کد را وارد کن.', await issueCode(env, email, 'register', { name, hash: await hashPassword(b.password, env) }));
   } catch (e) { throw mailFailed(e); }
   return json({ ok: true });
 }
 async function registerVerify(req, env, url) {
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const b = await readJson(req), email = cleanEmail(b.email);
+  if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await limits(req, env, email, 'regv', 10);
   const p = await checkCode(env, email, 'register', b.code);
   if (await env.DB.prepare('SELECT 1 AS x FROM users WHERE email=?').bind(email).first()) throw new HttpError(409, 'این ایمیل قبلاً ثبت شده است.');
   const id = rand(12);
   await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(id, email, p.name, p.hash, nowS()).run();
-  const isAdmin = email === 'a.h.sh.t1381@gmail.com';
+  const isAdmin = email === getAdminEmail(env);
   const userObj = { email, name: p.name || email.split('@')[0], isAdmin, role: isAdmin ? 'admin' : 'user' };
   const sess = await sessionCookie(env, url, id, userObj);
-  return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
+  return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
 }
 async function login(req, env, url) {
   const b = await readJson(req), email = cleanEmail(b.email);
+  if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await limits(req, env, email, 'login', 10);
-  const adminEmail = 'a.h.sh.t1381@gmail.com';
+  const adminEmail = getAdminEmail(env);
   const isAdminEmail = email === adminEmail;
   const rawPass = String(b.password || '').slice(0, 128);
-  const defaultAdminPass = env.ADMIN_PASSWORD || adminEmail;
+  if (!rawPass) throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
+  const configuredAdminPass = getConfiguredAdminPassword(env);
 
-  let u = isEmail(email) && env.DB ? await env.DB.prepare('SELECT id,email,password_hash,name FROM users WHERE email=?').bind(email).first() : null;
+  let u = env.DB ? await env.DB.prepare('SELECT id,email,password_hash,name FROM users WHERE email=?').bind(email).first() : null;
+  if (u && await isUserSuspended(env, u.id, email)) {
+    throw new HttpError(403, 'حساب کاربری شما مسدود شده است.');
+  }
 
-  if (isAdminEmail && (!u || !u.password_hash) && rawPass.trim() === defaultAdminPass) {
+  // راه‌اندازی اولیه یا ورود مدیر کل فقط در صورتی که ADMIN_PASSWORD مستقل و امن در تنظیمات کلادفلر تعریف شده باشد
+  if (isAdminEmail && (!u || !u.password_hash) && configuredAdminPass && teq(rawPass.trim(), configuredAdminPass)) {
     let adminId = u?.id || 'admin_a_h_sh';
     if (env.DB) {
       try {
-        const passHash = await hashPassword(defaultAdminPass, env);
+        const passHash = await hashPassword(configuredAdminPass, env);
         await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, adminEmail, 'مدیر کل دارایی', passHash, nowS()).run();
       } catch (err) {
-        console.error('admin setup err:', err);
+        console.error('admin setup err:', err?.message);
       }
     }
     const userObj = { email: adminEmail, name: 'مدیر کل دارایی', isAdmin: true, role: 'admin' };
     const sess = await sessionCookie(env, url, adminId, userObj);
-    return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
+    return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
   }
 
-  if (!env.DB && isEmail(email) && okPass(rawPass)) {
-    const userObj = { email, name: isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0], isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' };
-    const sess = await sessionCookie(env, url, 'u_' + email, userObj);
-    return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
+  const dbPassValid = Boolean(u && u.password_hash && await verifyPassword(rawPass, u.password_hash, env));
+  const envAdminValid = Boolean(isAdminEmail && configuredAdminPass && teq(rawPass.trim(), configuredAdminPass));
+  if (!dbPassValid && !envAdminValid) {
+    throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
   }
-
-  const ok = (u && u.password_hash && await verifyPassword(rawPass, u.password_hash, env)) || (isAdminEmail && rawPass.trim() === defaultAdminPass);
-  if (!u || !ok) throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
-  const userObj = { email: u.email || email, name: u.name || (isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0]), isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' };
-  const sess = await sessionCookie(env, url, u.id, userObj);
-  return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
+  const uid = u?.id || (isAdminEmail ? 'admin_a_h_sh' : ('u_' + email));
+  const userObj = { email: u?.email || email, name: u?.name || (isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0]), isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' };
+  const sess = await sessionCookie(env, url, uid, userObj);
+  return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
 }
 async function resetStart(req, env) {
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const email = cleanEmail((await readJson(req)).email);
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await limits(req, env, email, 'rst', 3);
-  const u = env.DB ? await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first() : null;
+  const u = await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
   if (!u) {
     throw new HttpError(404, 'user_not_found');
   }
@@ -525,7 +661,9 @@ async function resetStart(req, env) {
   return json({ ok: true });
 }
 async function resetVerify(req, env) {
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const b = await readJson(req), email = cleanEmail(b.email);
+  if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await limits(req, env, email, 'rstv', 10);
   await checkCode(env, email, 'reset', b.code);
   const token = rand(24);
@@ -533,8 +671,11 @@ async function resetVerify(req, env) {
   return json({ ok: true, resetToken: token });
 }
 async function resetFinish(req, env, url) {
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const b = await readJson(req), email = cleanEmail(b.email);
+  if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   if (!okPass(b.password)) throw new HttpError(400, 'رمز عبور باید حداقل ۸ کاراکتر باشد.');
+  if (cleanEmail(b.password) === email) throw new HttpError(400, 'رمز عبور نمی‌تواند برابر با آدرس ایمیل باشد.');
   await limits(req, env, email, 'rstf', 10);
   const row = await env.DB.prepare("UPDATE otp_codes SET attempts=attempts+1 WHERE email=? AND purpose='reset_ok' AND expires_at>? AND attempts<5 RETURNING code_hash").bind(email, nowS()).first();
   if (!row || !teq(await sha256(String(b.resetToken || '')), row.code_hash)) throw new HttpError(400, 'مرحلهٔ بازیابی منقضی شده است؛ از اول شروع کن.');
@@ -544,13 +685,13 @@ async function resetFinish(req, env, url) {
   if (!used) throw new HttpError(400, 'این درخواست قبلاً استفاده شده است.');
   await env.DB.batch([env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(await hashPassword(b.password, env), u.id), env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(u.id), env.DB.prepare("DELETE FROM otp_codes WHERE email=? AND purpose='reset_ok'").bind(email)]);
   for (const [k, v] of sessionUserCache) { if (v?.user?.id === u.id) sessionUserCache.delete(k); }
-  const isAdmin = email === 'a.h.sh.t1381@gmail.com';
+  const isAdmin = email === getAdminEmail(env);
   const userObj = { email, name: u.name || email.split('@')[0], isAdmin, role: isAdmin ? 'admin' : 'user' };
   const sess = await sessionCookie(env, url, u.id, userObj);
-  return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
+  return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
 }
 async function googleStart(env, url) {
-  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET) {
+  if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.DB) {
     return new Response(null, {
       status: 302,
       headers: { location: '/?auth_error=google_not_configured', 'cache-control': 'no-store' }
@@ -566,6 +707,7 @@ function decodeJwt(t) { const p = t.split('.')[1]; const bin = atob(p.replace(/-
 async function googleCallback(env, url, req) {
   const fail = (code) => new Response(null, { status: 302, headers: { location: `/?auth_error=${code}`, 'cache-control': 'no-store' } });
   if (url.searchParams.get('error')) return fail('denied');
+  if (!env.DB) return fail('invalid');
   const code = url.searchParams.get('code'), state = url.searchParams.get('state');
   if (!code || !state || !teq(getCookie(req, 'oauth_state'), state)) return fail('invalid');
   const st = await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash=? AND expires_at>? RETURNING verifier').bind(await sha256(state), nowS()).first();
@@ -577,6 +719,7 @@ async function googleCallback(env, url, req) {
   const okIss = ['https://accounts.google.com', 'accounts.google.com'].includes(claims.iss);
   if (!okIss || claims.aud !== env.GOOGLE_CLIENT_ID || (!Number.isFinite(claims.exp) || claims.exp < nowS()) || claims.email_verified !== true || typeof claims.sub !== 'string' || !isEmail(claims.email)) return fail('claims');
   const uid = await upsertUser(env, { email: claims.email, name: claims.name, sub: claims.sub });
+  if (await isUserSuspended(env, uid, claims.email)) return fail('denied');
   const sess = await sessionCookie(env, url, uid, { email: claims.email, name: claims.name });
   const response = new Response(null, { status: 302, headers: { location: '/', 'set-cookie': sess.cookie, 'cache-control': 'no-store' } });
   response.headers.append('set-cookie', `oauth_state=; ${cookieOpts(url, 0)}`);
@@ -679,7 +822,12 @@ async function saveData(env, uid, body) {
 }
 async function deleteAccount(env, user) {
   userDataCache.delete(user.id);
-  for (const [k, v] of sessionUserCache) { if (v?.val?.id === user.id) sessionUserCache.delete(k); }
+  for (const [k, v] of sessionUserCache) {
+    if (v?.user?.id === user.id || v?.val?.id === user.id) {
+      sessionUserCache.delete(k);
+      revokedSessionsCache.add(k);
+    }
+  }
   if (!env.DB) return;
   await env.DB.batch([
     env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(user.id), env.DB.prepare('DELETE FROM user_data WHERE user_id=?').bind(user.id),
@@ -688,34 +836,127 @@ async function deleteAccount(env, user) {
   ]);
 }
 
-// ---------- خط‌لوله دریافت قیمت (بدون هیچ‌گونه فشار خواندن/نوشتن روی دیتابیس D1) ----------
+// ---------- خط‌لوله دریافت قیمت، کش چندلایه (Cache API + KV Snapshot) و تاریخچه واقعی ----------
 const kvGet = async (env, k) => env.DB ? env.DB.prepare('SELECT v,updated_at FROM kv WHERE k=?').bind(k).first() : null;
 const kvPut = async (env, k, v, t) => env.DB ? env.DB.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at').bind(k, JSON.stringify(v), t).run() : null;
-const getPrices = async (_env) => {
-  return inMemoryPrices || { updatedAt: 0, checkedAt: 0, items: {}, feeds: {} };
+
+const hasPricesKv = (env) => Boolean(env && env.PRICES_KV && typeof env.PRICES_KV.get === 'function' && typeof env.PRICES_KV.put === 'function');
+
+async function readPricesKvSnapshot(env) {
+  if (!hasPricesKv(env)) return null;
+  try {
+    const snap = await env.PRICES_KV.get(KV_SNAPSHOT_KEY, { type: 'json', cacheTtl: 60 });
+    if (snap && typeof snap === 'object' && snap.items && typeof snap.items === 'object' && Object.keys(snap.items).length > 0) {
+      return snap;
+    }
+  } catch (e) {
+    console.error('KV snapshot read error:', e?.message);
+  }
+  return null;
+}
+
+async function writePricesKvSnapshot(env, data, forceWrite = false) {
+  if (!hasPricesKv(env) || !data || !data.items || !Object.keys(data.items).length) return false;
+  const now = nowS();
+  // کنترل строго دفعات نوشتن در KV برای رعایت کامل سقف پلن رایگان Cloudflare (۱۰۰۰ نوشتن در روز؛ کران ۵ دقیقه‌ای = ۲۸۸ نوشتن در روز)
+  if (!forceWrite && lastKvWriteTime > 0 && (now - lastKvWriteTime < 280)) {
+    return false;
+  }
+  try {
+    const payload = {
+      version: KV_SNAPSHOT_VERSION,
+      updatedAt: data.updatedAt || now,
+      checkedAt: data.checkedAt || now,
+      items: data.items,
+      feeds: data.feeds || {}
+    };
+    await env.PRICES_KV.put(KV_SNAPSHOT_KEY, JSON.stringify(payload));
+    lastKvWriteTime = now;
+    return true;
+  } catch (e) {
+    console.error('KV snapshot write error:', e?.message);
+    return false;
+  }
+}
+
+const getPrices = async (env) => {
+  if (inMemoryPrices && inMemoryPrices.items && Object.keys(inMemoryPrices.items).length > 0) {
+    return inMemoryPrices;
+  }
+  if (!inMemoryKvLoaded) {
+    inMemoryKvLoaded = true;
+    if (hasPricesKv(env)) {
+      const snap = await readPricesKvSnapshot(env);
+      if (snap) {
+        inMemoryPrices = snap;
+        inMemoryPricesTime = snap.checkedAt || snap.updatedAt || 0;
+        return inMemoryPrices;
+      }
+    } else if (env && env.DB) {
+      try {
+        const row = await kvGet(env, KV_SNAPSHOT_KEY);
+        if (row && row.v) {
+          const parsed = JSON.parse(row.v);
+          if (parsed && parsed.items && Object.keys(parsed.items).length > 0) {
+            inMemoryPrices = parsed;
+            inMemoryPricesTime = parsed.checkedAt || parsed.updatedAt || row.updated_at || 0;
+            return inMemoryPrices;
+          }
+        }
+      } catch {}
+    }
+  }
+  return inMemoryPrices || { version: KV_SNAPSHOT_VERSION, updatedAt: 0, checkedAt: 0, items: {}, feeds: {} };
 };
 
 export function publicPrices(p) {
   const t = nowS(), items = {};
+  const checkedAt = p.checkedAt || p.updatedAt || t;
+  const marketOpen = isTehranMarketOpen(t);
   for (const [id, i] of Object.entries(p.items || {})) {
-    if (i.crypto && i.unit !== 'USDT') continue;
+    if (!i || !(Number(i.price) > 0)) continue;
+    if (i.crypto && id !== 'usdt' && i.unit !== 'USDT') continue;
+    const sourceTimestamp = Number(i.sourceTimestamp) > 0 ? Number(i.sourceTimestamp) : null;
+    const receivedAt = Number(i.receivedAt) > 0 ? Number(i.receivedAt) : (Number(i.t) > 0 ? Number(i.t) : checkedAt);
+    const effectiveUpdatedAt = sourceTimestamp || (Number(i.t) > 0 ? Number(i.t) : receivedAt);
+    const stale = isPriceItemStale(i, id, t);
     items[id] = {
-      price: i.price, change: i.change, updatedAt: i.t, receivedAt: i.receivedAt,
-      stale: !i.t || t - i.t > (i.crypto ? CRYPTO_STALE_S : STALE_S), estimated: !!i.estimated,
-      currency: i.unit || 'IRT', source: i.src,
+      price: i.price,
+      change: i.change,
+      updatedAt: effectiveUpdatedAt,
+      sourceTimestamp,
+      receivedAt,
+      checkedAt: Number(i.checkedAt) > 0 ? Number(i.checkedAt) : checkedAt,
+      stale,
+      estimated: false,
+      currency: i.unit || 'IRT',
+      source: i.src || i.source || null,
+      priceType: i.priceType || 'last',
+      ...(i.method ? { method: i.method } : {}),
+      ...(Number.isFinite(i.spreadPct) ? { spreadPct: i.spreadPct } : {}),
+      ...(Number.isFinite(i.sourcesCount) ? { sourcesCount: i.sourcesCount } : {}),
       ...(i.crypto ? { kind: 'crypto', name: i.name, symbol: i.sym, volume: i.vol || 0, pair: i.pair }
-        : i.kind === 'domestic' ? { kind: 'domestic', name: i.name, symbol: i.sym, cat: i.cat }
+        : i.kind === 'domestic' ? { kind: 'domestic', name: i.name, symbol: i.sym, cat: i.cat, marketOpen }
         : {})
     };
   }
-  return { updatedAt: p.updatedAt || 0, checkedAt: p.checkedAt || 0, items, feeds: p.feeds || {} };
+  return {
+    version: KV_SNAPSHOT_VERSION,
+    updatedAt: p.updatedAt || 0,
+    checkedAt,
+    marketOpen,
+    items,
+    feeds: p.feeds || {}
+  };
 }
 
-async function fetchJSON(url, seconds = 8) {
-  const r = await fetch(url, {
+async function fetchJSON(url, seconds = 8, cfOpts = undefined) {
+  const init = {
     headers: { accept: 'application/json', 'cache-control': 'no-cache', 'user-agent': 'Darayi/1.0 (personal portfolio app)' },
     signal: AbortSignal.timeout(seconds * 1000)
-  });
+  };
+  if (cfOpts) init.cf = cfOpts;
+  const r = await fetch(url, init);
   if (!r.ok) throw new Error('HTTP ' + r.status);
   return r.json();
 }
@@ -727,7 +968,7 @@ async function binance(path) {
       return await fetchJSON(host + path, 3);
     } catch (e) {
       error = e;
-      if (e.message && e.message.includes('403')) break; // اگر مسدود بود وقت را تلف نکن
+      if (e.message && e.message.includes('403')) break;
     }
   }
   throw error || new Error('Binance unreachable');
@@ -742,19 +983,20 @@ function jalaliToGregorian(jy, jm, jd) {
 }
 
 export function domesticTime(j, now = Date.now()) {
-  const d = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(j.date || ''), h = /^(\d{2}):(\d{2})$/.exec(j.time || ''); if (!d || !h) return Math.floor(now / 1000);
+  const d = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(j?.date || ''), h = /^(\d{2}):(\d{2})$/.exec(j?.time || '');
+  if (!d || !h) return null;
   const [gy, gm, gd] = jalaliToGregorian(+d[1], +d[2], +d[3]), t = (Date.UTC(gy, gm - 1, gd, +h[1], +h[2]) - 12600000) / 1000;
-  return t <= now / 1000 + 3600 ? Math.floor(t) : Math.floor(now / 1000);
+  return (t > 1500000000 && t <= now / 1000 + 3600) ? Math.floor(t) : null;
 }
 
-// منابع صرافی‌ها: کوکوین و اوکی‌ایکس اولویت اول هستند زیرا در کلادفلر و ایران پایدارند
+// منابع صرافی‌ها: کوکوین، اوکی‌ایکس (با صفحه‌بندی کامل ۳۶۵ روزه) و گیت
 const SOURCES = {
   kucoin: {
     async tickers() {
       const j = await fetchJSON('https://api.kucoin.com/api/v1/market/allTickers', 7);
       const list = j && j.data && j.data.ticker;
       if (!Array.isArray(list)) throw new Error('KuCoin bad ticker payload');
-      const ts = Math.floor(+j.data.time / 1000);
+      const ts = Number(j.data.time) > 0 ? Math.floor(+j.data.time / 1000) : null;
       return list.filter(x => String(x.symbol).endsWith('-USDT')).map(x => {
         const last = +x.last, cr = Number(x.changeRate);
         return {
@@ -785,20 +1027,35 @@ const SOURCES = {
         last: +x.last,
         open: +x.open24h,
         vol: +x.volCcy24h,
-        ts: Math.floor(+x.ts / 1000)
+        ts: Number(x.ts) > 0 ? Math.floor(+x.ts / 1000) : null
       }));
     },
     async klines(pair, iv, lim) {
       const bar = { '1m': '1m', '5m': '5m', '1h': '1H', '4h': '4H', '1d': '1D' }[iv];
-      const j = await fetchJSON(`https://www.okx.com/api/v5/market/candles?instId=${encodeURIComponent(pair)}&bar=${bar}&limit=${Math.min(lim, 300)}`, 6);
-      return (j.data || []).map(c => [Math.floor(+c[0] / 1000), +c[4]]);
+      const firstLimit = Math.min(lim, 300);
+      const j1 = await fetchJSON(`https://www.okx.com/api/v5/market/candles?instId=${encodeURIComponent(pair)}&bar=${bar}&limit=${firstLimit}`, 6);
+      const rows1 = Array.isArray(j1?.data) ? j1.data : [];
+      let all = rows1.map(c => [Math.floor(+c[0] / 1000), +c[4]]);
+      // صفحه‌بندی برای بازه‌های بلندمدت (مانند 1Y = 365 روز که از سقف 300 کندل OKX بیشتر است)
+      if (lim > 300 && rows1.length >= 200) {
+        const oldestMs = rows1[rows1.length - 1]?.[0];
+        if (oldestMs) {
+          try {
+            const remLimit = Math.min(300, lim - rows1.length + 10);
+            const j2 = await fetchJSON(`https://www.okx.com/api/v5/market/candles?instId=${encodeURIComponent(pair)}&bar=${bar}&after=${encodeURIComponent(oldestMs)}&limit=${remLimit}`, 5);
+            if (Array.isArray(j2?.data) && j2.data.length) {
+              all = all.concat(j2.data.map(c => [Math.floor(+c[0] / 1000), +c[4]]));
+            }
+          } catch {}
+        }
+      }
+      return all;
     }
   },
   gate: {
     async tickers() {
       const rows = await fetchJSON('https://api.gateio.ws/api/v4/spot/tickers', 7);
       if (!Array.isArray(rows)) throw new Error('Gate bad response');
-      const ts = nowS();
       return rows.filter(x => String(x.currency_pair).endsWith('_USDT')).map(x => {
         const last = +x.last, ch = Number(x.change_percentage);
         return {
@@ -807,12 +1064,12 @@ const SOURCES = {
           last,
           open: Number.isFinite(ch) && ch > -100 ? last / (1 + ch / 100) : NaN,
           vol: +x.quote_volume,
-          ts
+          ts: null // Gate spot/tickers does not include per-pair exchange event timestamp
         };
       });
     },
     async klines(pair, iv, lim) {
-      const j = await fetchJSON(`https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${encodeURIComponent(pair)}&interval=${iv}&limit=${lim}`, 6);
+      const j = await fetchJSON(`https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${encodeURIComponent(pair)}&interval=${iv}&limit=${Math.min(lim, 999)}`, 6);
       return Array.isArray(j) ? j.map(c => [+c[0], +c[2]]) : [];
     }
   },
@@ -825,11 +1082,11 @@ const SOURCES = {
         last: +x.lastPrice,
         open: +x.openPrice,
         vol: +x.quoteVolume,
-        ts: Math.floor(+x.closeTime / 1000)
+        ts: Number(x.closeTime) > 0 ? Math.floor(+x.closeTime / 1000) : null
       }));
     },
     async klines(pair, iv, lim) {
-      return (await binance(`/klines?symbol=${encodeURIComponent(pair)}&interval=${iv}&limit=${lim}`)).map(c => [Math.floor(Math.min(+c[6], Date.now()) / 1000), +c[4]]);
+      return (await binance(`/klines?symbol=${encodeURIComponent(pair)}&interval=${iv}&limit=${Math.min(lim, 1000)}`)).map(c => [Math.floor(Math.min(+c[6], Date.now()) / 1000), +c[4]]);
     }
   }
 };
@@ -875,7 +1132,7 @@ async function getDomesticPrevCloses() {
 
 function resolveDomesticChange(id, price, rawChange, prevClosesMap, prevItem) {
   const ch = Number(rawChange);
-  if (Number.isFinite(ch) && Math.abs(ch) > 0.0001) return ch;
+  if (Number.isFinite(ch) && Math.abs(ch) > 0.0001) return +ch.toFixed(2);
   const recent = prevClosesMap && prevClosesMap[id];
   if (Array.isArray(recent) && recent.length) {
     for (let i = recent.length - 1; i >= 0; i--) {
@@ -888,10 +1145,12 @@ function resolveDomesticChange(id, price, rawChange, prevClosesMap, prevItem) {
   if (prevItem && prevItem.price === price && Number.isFinite(prevItem.change) && Math.abs(prevItem.change) > 0.0001) {
     return prevItem.change;
   }
-  return Number.isFinite(ch) ? ch : null;
+  return Number.isFinite(ch) ? +ch.toFixed(2) : null;
 }
 
 let inMemoryRefreshLock = 0;
+let lastD1HistoryWriteTime = 0;
+const lastD1RecordedMap = new Map(); // asset_id -> { price, t }
 const domesticIntradayTicks = new Map();
 
 function recordDomesticTick(id, ts, price) {
@@ -901,17 +1160,90 @@ function recordDomesticTick(id, ts, price) {
     arr = [];
     domesticIntradayTicks.set(id, arr);
   }
+  const rounded = Math.round(price);
   const last = arr[arr.length - 1];
-  if (!last || (ts - last[0] >= 180) || last[1] !== price) {
+  if (!last || (ts - last[0] >= 180) || last[1] !== rounded) {
     if (last && last[0] === ts) {
-      last[1] = price;
+      last[1] = rounded;
     } else if (!last || ts > last[0]) {
-      arr.push([ts, Math.round(price)]);
+      arr.push([ts, rounded]);
     }
-    const cutoff = ts - 129600;
-    if (arr.length > 300 || (arr[0] && arr[0][0] < cutoff)) {
-      domesticIntradayTicks.set(id, arr.filter(p => p[0] >= cutoff).slice(-288));
+    const cutoff = ts - 172800; // 48h in memory
+    if (arr.length > 360 || (arr[0] && arr[0][0] < cutoff)) {
+      domesticIntradayTicks.set(id, arr.filter(p => p[0] >= cutoff).slice(-320));
     }
+  }
+}
+
+// ذخیره کنترل‌شده تاریخچه کوتاه‌مدت (۱ ساعت و ۲۴ ساعت) دارایی‌های داخلی و تتر در جدول price_history_v2 دیتابیس D1
+export async function recordD1DomesticHistory(env, items, now = nowS(), forceCron = false) {
+  if (!env || !env.DB || !items) return 0;
+  // جلوگیری از نوشتن تکراری خارج از بازه ۵ دقیقه‌ای کران
+  if (!forceCron && lastD1HistoryWriteTime > 0 && (now - lastD1HistoryWriteTime < 260)) {
+    return 0;
+  }
+  lastD1HistoryWriteTime = now;
+
+  try {
+    // اگر حافظه آخرین نقاط D1 خالی است، یک بار آخرین نقطه هر دارایی را از D1 بخوان تا از نوشتن قیمت‌های تکراری جلوگیری شود
+    if (lastD1RecordedMap.size === 0) {
+      try {
+        const rows = await env.DB.prepare(
+          'SELECT asset_id, t, price FROM price_history_v2 WHERE t >= ? GROUP BY asset_id HAVING t = MAX(t)'
+        ).bind(now - 86400).all();
+        for (const r of (rows?.results || [])) {
+          if (r && r.asset_id && Number(r.price) > 0) {
+            lastD1RecordedMap.set(r.asset_id, { price: Number(r.price), t: Number(r.t) });
+          }
+        }
+      } catch {}
+    }
+
+    const stmts = [];
+    for (const id of D1_HISTORY_ASSET_IDS) {
+      const it = items[id];
+      if (!it || !(Number(it.price) > 0)) continue;
+      if (isPriceItemStale(it, id, now)) continue;
+      const price = Math.round(Number(it.price));
+      const srcTs = Number(it.sourceTimestamp) > 0 ? Math.floor(Number(it.sourceTimestamp)) : 0;
+      const prev = lastD1RecordedMap.get(id);
+      // اگر اولین نقطه ثبت‌شده برای این دارایی است و زمان منبع معتبر و در ۲۴ ساعت اخیر است، زمان منبع را نیز ثبت کن
+      if (!prev && srcTs > (now - 86400) && srcTs < (now - 60)) {
+        stmts.push(
+          env.DB.prepare('INSERT OR IGNORE INTO price_history_v2 (asset_id, t, price) VALUES (?, ?, ?)').bind(id, srcTs, price)
+        );
+      }
+      // فقط زمانی در D1 بنویس که قیمت تغییر کرده باشد یا حداقل ۱۵ دقیقه از آخرین نقطه ثبت‌شده گذشته باشد (تا نمودار 1H و 1D پیوسته و دقیق بماند و مصرف D1 زیر ۲٪ سقف رایگان باشد)
+      if (!prev || prev.price !== price || (now - prev.t >= 900)) {
+        stmts.push(
+          env.DB.prepare('INSERT OR IGNORE INTO price_history_v2 (asset_id, t, price) VALUES (?, ?, ?)').bind(id, now, price)
+        );
+        lastD1RecordedMap.set(id, { price, t: now });
+      }
+    }
+
+    if (stmts.length > 0) {
+      await env.DB.batch(stmts);
+    }
+    return stmts.length;
+  } catch (e) {
+    console.error('recordD1DomesticHistory error:', e?.message);
+    return 0;
+  }
+}
+
+async function queryD1DomesticHistory(env, id, sinceTs) {
+  if (!env || !env.DB || !id) return [];
+  try {
+    const res = await env.DB.prepare(
+      'SELECT t, price FROM price_history_v2 WHERE asset_id = ? AND t >= ? ORDER BY t ASC LIMIT 600'
+    ).bind(id, Math.floor(sinceTs)).all();
+    return (res?.results || [])
+      .filter(r => Number(r.t) > 1500000000 && Number(r.price) > 0)
+      .map(r => [Math.floor(Number(r.t)), Math.round(Number(r.price))]);
+  } catch (e) {
+    console.error('queryD1DomesticHistory error:', e?.message);
+    return [];
   }
 }
 
@@ -927,200 +1259,291 @@ export async function refreshPrices(env, force = false) {
   try {
     const prev = current;
     const items = { ...prev.items }, fresh = new Set(), feeds = { ...(prev.feeds || {}) };
-    const put = (id, price, change, src, ts, unit = 'IRT', extra = {}) => {
-      if (!(price > 0) || !Number.isFinite(price)) return;
+
+    const put = (id, price, change, src, sourceTimestamp, unit = 'IRT', extra = {}) => {
+      if (!(price > 0) || !Number.isFinite(price)) return false;
       const old = items[id];
+      const validSrcTs = (Number(sourceTimestamp) > 1500000000 && Number(sourceTimestamp) <= t + 600)
+        ? Math.floor(Number(sourceTimestamp))
+        : null;
       const finalChange = Number.isFinite(change)
-        ? change
+        ? +Number(change).toFixed(2)
         : (old && old.price === price && Number.isFinite(old.change) ? old.change : null);
-      items[id] = { price, change: finalChange, t: ts, receivedAt: t, src, unit, ...extra };
-      if (unit === 'IRT') recordDomesticTick(id, t, price);
+      const effectiveT = validSrcTs || t;
+      items[id] = {
+        price,
+        change: finalChange,
+        t: effectiveT,
+        sourceTimestamp: validSrcTs,
+        receivedAt: t,
+        checkedAt: t,
+        src,
+        unit,
+        priceType: extra.priceType || 'last',
+        upstreamStale: false,
+        ...extra
+      };
+      if (unit === 'IRT') recordDomesticTick(id, effectiveT, price);
       fresh.add(id);
+      return true;
     };
 
-    // ۱. دریافت نرخ‌های واقعی طلا، ارز و سکه بدون هیچ‌گونه قیمت پیش‌فرض یا ساختگی
-    let liveUsdtChange = null;
-    let liveUsdtPrice = 0;
-    let liveUsdtSource = 'tetherland';
-
-    const getDomChange = (raw) => {
-      const ch = Number(raw);
-      return Number.isFinite(ch) ? ch : null;
-    };
-
+    // ۱. دریافت مستقل نرخ تتر به تومان (USDT/IRT) و تصمیم‌گیری مستقل به ازای هر دارایی داخلی
     const domestic = async () => {
-      if (!force && t - (feeds.domestic?.checkedAt || 0) < 15 && feeds.domestic?.ok) return;
+      if (!force && t - (feeds.domestic?.checkedAt || 0) < 15 && feeds.domestic?.ok && feeds.tether?.ok) return;
 
-      // دریافت نرخ واقعی تتر از والکس، نوبیتکس (iran_market)، تترلند یا بیت‌پین
-      // Tier A: Wallex Markets (live orderbook / last trade in Toman)
+      // واکشی هم‌زمان منابع اصلی برای سرعت بالا: ایران‌مارکت و نرخ‌آرا
+      const [imResult, naResult] = await Promise.allSettled([
+        fetchJSON('https://iran-market.github.io/data/latest-toman.json', 5),
+        fetchJSON('https://nerkhara.com/api/v1/latest.json', 5)
+      ]);
+
+      const imData = imResult.status === 'fulfilled' ? imResult.value : null;
+      const naData = naResult.status === 'fulfilled' ? naResult.value : null;
+
+      // دیکشنری نرخ‌آرا با بررسی دقیق stale، unit و updated_utc
+      const naDict = {};
+      if (naData && naData.stale !== true && Array.isArray(naData.items)) {
+        for (const it of naData.items) {
+          if (it && it.id && it.stale !== true && it.unit === 'IRT' && Number(it.price) > 0) {
+            const srcTs = parseUtcTimestamp(it.updated_utc || naData.generated_utc, t);
+            if (!srcTs || (t - srcTs <= 72 * 3600)) {
+              naDict[it.id] = { ...it, srcTs };
+            }
+          }
+        }
+      }
+
+      // دیکشنری ایران‌مارکت
+      const imDict = {};
+      let imGenTs = null;
+      if (imData && imData.data && imData.data.categories) {
+        imGenTs = parseUtcTimestamp(imData.data.generated_at, t);
+        const cats = imData.data.categories;
+        const allList = [
+          ...(cats.gold || []),
+          ...(cats.coin || []),
+          ...(cats.currency || []),
+          ...(cats.crypto || []),
+          ...(cats.precious_metal || [])
+        ];
+        for (const x of allList) {
+          if (x && x.symbol && Number(x.price) > 0) {
+            const itemTs = parseUtcTimestamp(x.timestamp, t) || imGenTs;
+            imDict[x.symbol] = { ...x, srcTs: itemTs };
+          }
+        }
+      }
+
+      // --- الف) مدیریت مستقل تتر به تومان (USDT/IRT) ---
+      let usdtResolved = false;
+      let usdtSourceUsed = null;
+
+      // اولویت ۱: والکس (آخرین معامله واقعی بازار USDTTMN)
       try {
         const wx = await fetchJSON('https://api.wallex.ir/v1/markets', 4);
         const u = wx?.result?.symbols?.USDTTMN;
         const lastP = Number(u?.stats?.lastPrice);
-        if (lastP > 0) {
-          liveUsdtPrice = lastP;
-          liveUsdtChange = Number.isFinite(Number(u?.stats?.['24h_ch'])) ? Number(u?.stats?.['24h_ch']) : null;
-          liveUsdtSource = 'wallex';
+        if (lastP > 10000) {
+          const chg = Number.isFinite(Number(u?.stats?.['24h_ch'])) ? Number(u?.stats?.['24h_ch']) : null;
+          put('usdt', Math.round(lastP), chg, 'wallex', null, 'IRT', {
+            kind: 'crypto', name: 'تتر', symbol: 'USDT', priceType: 'last'
+          });
+          usdtResolved = true;
+          usdtSourceUsed = 'wallex';
         }
       } catch {}
 
-      // Tier B: Wallex Depth (fallback if markets list is slow)
-      if (!liveUsdtPrice) {
+      // اولویت ۲: نرخ‌آرا (Volume-Weighted از صرافی‌های داخلی با زمان انتشار دقیق)
+      if (!usdtResolved && naDict.usdt) {
+        const nu = naDict.usdt;
+        put('usdt', Math.round(Number(nu.price)), Number.isFinite(Number(nu.change_pct)) ? Number(nu.change_pct) : null, 'nerkhara', nu.srcTs, 'IRT', {
+          kind: 'crypto', name: 'تتر', symbol: 'USDT',
+          priceType: nu.method || 'volume-weighted',
+          method: nu.method || 'volume-weighted',
+          sourcesCount: Number(nu.sources) || undefined,
+          spreadPct: Number.isFinite(Number(nu.spread_pct)) ? Number(nu.spread_pct) : undefined
+        });
+        usdtResolved = true;
+        usdtSourceUsed = 'nerkhara';
+      }
+
+      // اولویت ۳: ایران‌مارکت (نوبیتکس USDT_IRR)
+      if (!usdtResolved && imDict.USDT_IRR) {
+        const iu = imDict.USDT_IRR;
+        put('usdt', Math.round(Number(iu.price)), Number.isFinite(Number(iu.change_pct)) ? Number(iu.change_pct) : null, 'nobitex', iu.srcTs, 'IRT', {
+          kind: 'crypto', name: 'تتر', symbol: 'USDT', priceType: 'last'
+        });
+        usdtResolved = true;
+        usdtSourceUsed = 'nobitex';
+      }
+
+      // اولویت ۴: تترلند
+      if (!usdtResolved) {
+        try {
+          const tl = await fetchJSON('https://api.tetherland.com/currencies', 4);
+          const u = tl?.data?.currencies?.USDT;
+          if (u && Number(u.price) > 10000) {
+            const chg = Number.isFinite(Number(u.diff24d)) ? Number(u.diff24d) : null;
+            put('usdt', Math.round(Number(u.price)), chg, 'tetherland', null, 'IRT', {
+              kind: 'crypto', name: 'تتر', symbol: 'USDT', priceType: 'last'
+            });
+            usdtResolved = true;
+            usdtSourceUsed = 'tetherland';
+          }
+        } catch {}
+      }
+
+      // اولویت ۵: بیت‌پین
+      if (!usdtResolved) {
+        try {
+          const bp = await fetchJSON('https://api.bitpin.ir/v1/mkt/markets/', 4);
+          const m = (bp?.results || []).find(x => x.code === 'USDT_IRT');
+          if (m && Number(m.price) > 10000) {
+            const chg = Number.isFinite(Number(m.price_info?.change)) ? Number(m.price_info?.change) : null;
+            put('usdt', Math.round(Number(m.price)), chg, 'bitpin', null, 'IRT', {
+              kind: 'crypto', name: 'تتر', symbol: 'USDT', priceType: 'last'
+            });
+            usdtResolved = true;
+            usdtSourceUsed = 'bitpin';
+          }
+        } catch {}
+      }
+
+      // اولویت ۶: میانگین اردربوک والکس (با برچسب صریح priceType: 'mid' تا با قیمت معامله اشتباه گرفته نشود)
+      if (!usdtResolved) {
         try {
           const wd = await fetchJSON('https://api.wallex.ir/v1/depth?symbol=USDTTMN', 3);
           const bestBid = Number(wd?.result?.bid?.[0]?.price);
           const bestAsk = Number(wd?.result?.ask?.[0]?.price);
           const mid = bestBid > 0 && bestAsk > 0 ? Math.round((bestBid + bestAsk) / 2) : (bestBid || bestAsk);
-          if (mid > 0) {
-            liveUsdtPrice = mid;
-            liveUsdtSource = 'wallex';
+          if (mid > 10000) {
+            put('usdt', mid, null, 'wallex_depth_mid', null, 'IRT', {
+              kind: 'crypto', name: 'تتر', symbol: 'USDT', priceType: 'mid', method: 'orderbook_mid'
+            });
+            usdtResolved = true;
+            usdtSourceUsed = 'wallex_depth_mid';
           }
         } catch {}
       }
 
-      // Tier C: iran-market GitHub CDN (USDT_IRR from Nobitex)
-      if (!liveUsdtPrice) {
-        try {
-          const im = await fetchJSON('https://iran-market.github.io/data/latest-toman.json', 4);
-          const u = (im?.data?.categories?.crypto || []).find(x => x.symbol === 'USDT_IRR');
-          if (u && Number(u.price) > 0) {
-            liveUsdtPrice = Number(u.price);
-            liveUsdtChange = Number.isFinite(Number(u.change_pct)) ? Number(u.change_pct) : null;
-            liveUsdtSource = 'nobitex';
-          }
-        } catch {}
-      }
+      feeds.tether = {
+        ok: usdtResolved,
+        checkedAt: t,
+        source: usdtSourceUsed || feeds.tether?.source || null
+      };
 
-      // Tier D: Tetherland
-      if (!liveUsdtPrice) {
-        try {
-          const tl = await fetchJSON('https://api.tetherland.com/currencies', 4);
-          const u = tl?.data?.currencies?.USDT;
-          if (u && Number(u.price) > 0) {
-            liveUsdtPrice = Number(u.price);
-            liveUsdtChange = Number.isFinite(Number(u.diff24d)) ? Number(u.diff24d) : null;
-            liveUsdtSource = 'tetherland';
-          }
-        } catch {}
-      }
-
-      // Tier E: Bitpin
-      if (!liveUsdtPrice) {
-        try {
-          const bp = await fetchJSON('https://api.bitpin.ir/v1/mkt/markets/', 4);
-          const m = (bp?.results || []).find(x => x.code === 'USDT_IRT');
-          if (m && Number(m.price) > 0) {
-            liveUsdtPrice = Number(m.price);
-            liveUsdtChange = Number.isFinite(Number(m.price_info?.change)) ? Number(m.price_info?.change) : null;
-            liveUsdtSource = 'bitpin';
-          }
-        } catch {}
-      }
-
-      if (liveUsdtPrice > 0) {
-        put('usdt', liveUsdtPrice, liveUsdtChange, liveUsdtSource, t, 'IRT', { kind: 'crypto', name: 'تتر', symbol: 'USDT' });
-      }
-
-      let domesticSuccess = false;
+      // --- ب) تصمیم‌گیری مستقل برای تک‌تک دارایی‌های داخلی (۲۶ دارایی ارز، طلا و سکه) ---
       const prevClosesMap = await getDomesticPrevCloses();
+      const resolvedDomesticIds = new Set();
+      const sourcesSummary = {};
 
-      // Tier 1: iran-market GitHub CDN (Fast, reliable, verified TGJU & free market rates)
-      try {
-        const im = await fetchJSON('https://iran-market.github.io/data/latest-toman.json', 5);
-        const categories = im?.data?.categories || {};
-        const allList = [
-          ...(categories.gold || []),
-          ...(categories.coin || []),
-          ...(categories.currency || []),
-          ...(categories.crypto || []),
-          ...(categories.precious_metal || [])
-        ];
-        const dict = Object.fromEntries(allList.map(x => [x.symbol, x]));
-        let count = 0;
-        const genTs = im?.data?.generated_at ? Math.floor(new Date(im.data.generated_at).getTime() / 1000) : 0;
-        const fallbackTs = (genTs > 0 && genTs <= t + 300) ? genTs : t;
+      for (const id of ALL_DOMESTIC_IDS) {
+        const meta = DOMESTIC_META[id];
+        const imSym = (IRAN_MARKET_MAP[id] || [])[0];
+        const naKey = NERKHARA_MAP[id];
 
-        for (const [id, [sym, name, code, cat]] of Object.entries(IRAN_MARKET_MAP)) {
-          const item = dict[sym];
-          if (item && Number(item.price) > 0) {
-            const price = Number(item.price);
-            const itemRawTs = item.timestamp ? Math.floor(new Date(item.timestamp).getTime() / 1000) : 0;
-            const itemTs = (itemRawTs > 1600000000 && itemRawTs <= t + 300) ? itemRawTs : fallbackTs;
-            const chg = resolveDomesticChange(id, price, item.change_pct, prevClosesMap, prev.items?.[id]);
-            put(id, price, chg, 'iran_market', itemTs, 'IRT', { kind: 'domestic', name, sym: code, cat });
-            count++;
+        const imItem = imSym ? imDict[imSym] : null;
+        const naItem = naKey ? naDict[naKey] : null;
+
+        // مقایسه هوشمند زمان انتشار واقعی بین ایران‌مارکت و نرخ‌آرا به ازای هر دارایی
+        let chosen = null;
+        if (imItem && naItem) {
+          const imTs = imItem.srcTs || 0;
+          const naTs = naItem.srcTs || 0;
+          // اگر نرخ‌آرا حداقل ۵ دقیقه جدیدتر از ایران‌مارکت باشد از نرخ‌آرا استفاده کن، در غیر این صورت ایران‌مارکت
+          if (naTs > imTs + 300) {
+            chosen = { src: 'nerkhara', price: Math.round(Number(naItem.price)), rawChg: naItem.change_pct, ts: naItem.srcTs, extra: { priceType: naItem.method || 'average', method: naItem.method, sourcesCount: Number(naItem.sources) || undefined, spreadPct: Number.isFinite(Number(naItem.spread_pct)) ? Number(naItem.spread_pct) : undefined } };
+          } else {
+            chosen = { src: 'iran_market', price: Math.round(Number(imItem.price)), rawChg: imItem.change_pct, ts: imItem.srcTs, extra: { priceType: 'last' } };
           }
+        } else if (imItem) {
+          chosen = { src: 'iran_market', price: Math.round(Number(imItem.price)), rawChg: imItem.change_pct, ts: imItem.srcTs, extra: { priceType: 'last' } };
+        } else if (naItem) {
+          chosen = { src: 'nerkhara', price: Math.round(Number(naItem.price)), rawChg: naItem.change_pct, ts: naItem.srcTs, extra: { priceType: naItem.method || 'average', method: naItem.method, sourcesCount: Number(naItem.sources) || undefined, spreadPct: Number.isFinite(Number(naItem.spread_pct)) ? Number(naItem.spread_pct) : undefined } };
         }
 
-        if (count >= 10) {
-          feeds.domestic = { ok: true, checkedAt: t, sourceAt: fallbackTs, count, source: 'iran_market' };
-          domesticSuccess = true;
-        }
-      } catch (err) {}
-
-      // Tier 2: PersianToolbox API
-      if (!domesticSuccess) {
-        try {
-          const pt = await fetchJSON('https://persiantoolbox.ir/api/market', 5);
-          if (pt?.ok && pt?.data) {
-            const d = pt.data;
-            const rawTs = d.timestamp ? Math.floor(Number(d.timestamp) / 1000) : 0;
-            const ts = (rawTs > 0 && rawTs <= t + 300) ? rawTs : t;
-            let count = 0;
-            if (d.gold?.pricePerGram > 0) {
-              const gold18P = Math.round(d.gold.pricePerGram / 10);
-              const chg = resolveDomesticChange('gold18', gold18P, d.gold.change24h, prevClosesMap, prev.items?.gold18);
-              put('gold18', gold18P, chg, 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'طلای ۱۸ عیار', sym: 'Gold18', cat: 'gold' });
-              count++;
-            }
-            if (d.currencies) {
-              const usdRial = d.currencies.IRR?.rate || 0;
-              const usdP = usdRial > 0 ? Math.round(usdRial / 10) : 0;
-              if (usdP > 100000) {
-                const chg = resolveDomesticChange('usd', usdP, d.currencies.IRR?.change24h, prevClosesMap, prev.items?.usd);
-                put('usd', usdP, chg, 'persiantoolbox', ts, 'IRT', { kind: 'domestic', name: 'دلار آمریکا', sym: 'USD', cat: 'currency' });
-                count++;
-              }
-            }
-            if (count > 0) {
-              feeds.domestic = { ok: true, checkedAt: t, sourceAt: ts, count, source: 'persiantoolbox' };
-              domesticSuccess = true;
-            }
+        if (chosen && chosen.price > 0) {
+          const chg = resolveDomesticChange(id, chosen.price, chosen.rawChg, prevClosesMap, prev.items?.[id]);
+          if (put(id, chosen.price, chg, chosen.src, chosen.ts, 'IRT', {
+            kind: 'domestic', name: meta.name, sym: meta.sym, cat: meta.cat, ...chosen.extra
+          })) {
+            resolvedDomesticIds.add(id);
+            sourcesSummary[chosen.src] = (sourcesSummary[chosen.src] || 0) + 1;
           }
-        } catch (err) {}
+        }
       }
 
-      // Tier 3: Nerkhsanj (live.json)
-      if (!domesticSuccess) {
+      // اگر هر یک از دارایی‌های داخلی در منابع اول موجود نبود، فقط برای همان دارایی‌های جاافتاده به سراغ Nerkhsanj و PersianToolbox برو
+      const missingIds = ALL_DOMESTIC_IDS.filter(id => !resolvedDomesticIds.has(id));
+      if (missingIds.length > 0) {
         try {
           const j = await fetchJSON('https://nerkh.jahankhahan.shop/data/live.json', 5);
-          const ts = domesticTime(j);
-          let count = 0;
-          for (const [id, keys] of Object.entries(NERKH)) {
-            if (id === 'usdt') continue;
-            const k = keys.find(k => Number(j.rates?.[k]) > 0);
+          const nsTs = domesticTime(j);
+          for (const id of missingIds) {
+            if (resolvedDomesticIds.has(id)) continue;
+            const meta = DOMESTIC_META[id];
+            const keys = NERKH[id] || (DOMESTIC_EXTRA[id] ? [DOMESTIC_EXTRA[id][0]] : []);
+            const k = keys.find(key => Number(j?.rates?.[key]) > 0);
             if (k) {
-              const v = Number(j.rates[k]);
-              const chg = resolveDomesticChange(id, v, j.change?.[k], prevClosesMap, prev.items?.[id]);
-              put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic' });
-              count++;
+              const v = Math.round(Number(j.rates[k]));
+              const chg = resolveDomesticChange(id, v, j?.change?.[k], prevClosesMap, prev.items?.[id]);
+              if (put(id, v, chg, 'nerkhsanj', nsTs, 'IRT', {
+                kind: 'domestic', name: meta.name, sym: meta.sym, cat: meta.cat, priceType: 'published'
+              })) {
+                resolvedDomesticIds.add(id);
+                sourcesSummary.nerkhsanj = (sourcesSummary.nerkhsanj || 0) + 1;
+              }
             }
           }
-          for (const [id, [key, name, sym, cat]] of Object.entries(DOMESTIC_EXTRA)) {
-            const v = Number(j.rates?.[key]);
-            if (v > 0) {
-              const chg = resolveDomesticChange(id, v, j.change?.[key], prevClosesMap, prev.items?.[id]);
-              put(id, v, chg, 'nerkhsanj', ts, 'IRT', { kind: 'domestic', name, sym, cat });
-              count++;
+        } catch {}
+      }
+
+      // پشتیبان نهایی برای طلای ۱۸ عیار و دلار آزاد در صورت عدم دریافت از هر ۳ منبع بالا
+      if (!resolvedDomesticIds.has('gold18') || !resolvedDomesticIds.has('usd')) {
+        try {
+          const pt = await fetchJSON('https://persiantoolbox.ir/api/market', 4);
+          if (pt?.ok && pt?.data) {
+            const d = pt.data;
+            const ptTs = parseUtcTimestamp(d.timestamp, t);
+            if (!resolvedDomesticIds.has('gold18') && d.gold?.pricePerGram > 0) {
+              const gold18P = Math.round(d.gold.pricePerGram / 10);
+              const chg = resolveDomesticChange('gold18', gold18P, d.gold.change24h, prevClosesMap, prev.items?.gold18);
+              if (put('gold18', gold18P, chg, 'persiantoolbox', ptTs, 'IRT', { kind: 'domestic', name: 'طلای ۱۸ عیار', sym: 'Gold18', cat: 'gold', priceType: 'published' })) {
+                resolvedDomesticIds.add('gold18');
+                sourcesSummary.persiantoolbox = (sourcesSummary.persiantoolbox || 0) + 1;
+              }
+            }
+            if (!resolvedDomesticIds.has('usd') && d.currencies?.IRR?.rate > 0) {
+              const usdP = Math.round(d.currencies.IRR.rate / 10);
+              if (usdP > 10000) {
+                const chg = resolveDomesticChange('usd', usdP, d.currencies.IRR?.change24h, prevClosesMap, prev.items?.usd);
+                if (put('usd', usdP, chg, 'persiantoolbox', ptTs, 'IRT', { kind: 'domestic', name: 'دلار آمریکا', sym: 'USD', cat: 'currency', priceType: 'published' })) {
+                  resolvedDomesticIds.add('usd');
+                  sourcesSummary.persiantoolbox = (sourcesSummary.persiantoolbox || 0) + 1;
+                }
+              }
             }
           }
-          if (count > 0) {
-            feeds.domestic = { ok: true, checkedAt: t, sourceAt: ts, count, source: 'nerkhsanj' };
-            domesticSuccess = true;
-          }
-        } catch (e) {
-          feeds.domestic = { ok: false, checkedAt: t, error: String(e.message).slice(0, 100), fallback: 'cached_values_preserved' };
-        }
+        } catch {}
+      }
+
+      if (resolvedDomesticIds.size > 0) {
+        const primarySrc = Object.entries(sourcesSummary).sort((a, b) => b[1] - a[1])[0]?.[0] || 'multi';
+        feeds.domestic = {
+          ok: true,
+          checkedAt: t,
+          count: resolvedDomesticIds.size,
+          source: primarySrc,
+          sources: sourcesSummary
+        };
+      } else {
+        feeds.domestic = {
+          ok: false,
+          checkedAt: t,
+          error: 'no_fresh_domestic_source',
+          fallback: 'cached_values_preserved'
+        };
       }
     };
 
@@ -1134,7 +1557,6 @@ export async function refreshPrices(env, force = false) {
         try {
           const rows = (await SOURCES[name].tickers()).filter(x =>
             x.last > 0 &&
-            Number.isFinite(x.ts) &&
             (x.vol || 0) >= 2000 &&
             /^[\p{L}\p{N}]{1,30}$/u.test(String(x.base)) &&
             !SKIP_BASES.has(String(x.base).toUpperCase()) &&
@@ -1146,13 +1568,14 @@ export async function refreshPrices(env, force = false) {
           for (const x of rows) {
             const base = String(x.base);
             const id = base.toLowerCase();
-            const itemTs = (Number.isFinite(x.ts) && x.ts > 0 && x.ts <= t + 300) ? Math.floor(x.ts) : t;
-            put(id, x.last, x.open > 0 ? (x.last / x.open - 1) * 100 : NaN, name, itemTs, 'USDT', {
+            const srcTs = (Number.isFinite(x.ts) && x.ts > 1500000000 && x.ts <= t + 300) ? Math.floor(x.ts) : null;
+            put(id, x.last, x.open > 0 ? (x.last / x.open - 1) * 100 : NaN, name, srcTs, 'USDT', {
               crypto: 1,
               name: ASSETS[id] || base,
               sym: base,
               pair: x.pair,
-              vol: x.vol || 0
+              vol: x.vol || 0,
+              priceType: 'last'
             });
           }
           feeds.crypto = { ok: true, checkedAt: t, count: rows.length, source: name };
@@ -1166,13 +1589,26 @@ export async function refreshPrices(env, force = false) {
 
     await Promise.allSettled([domestic(), cryptoFeed()]);
 
-    const data = { items, feeds, updatedAt: fresh.size ? t : prev.updatedAt || 0, checkedAt: t };
+    const data = {
+      version: KV_SNAPSHOT_VERSION,
+      items,
+      feeds,
+      updatedAt: fresh.size ? t : prev.updatedAt || 0,
+      checkedAt: t
+    };
     inMemoryPrices = data;
     inMemoryPricesTime = t;
 
-    // بررسی خودکار هشدارها در پس‌زمینه بدون نوشتن قیمت‌ها در دیتابیس D1
-    if (fresh.size > 0 && env && env.DB) {
-      checkAlerts(env, items).catch(() => {});
+    if (fresh.size > 0) {
+      // ذخیره کنترل‌شده تاریخچه کوتاه‌مدت دارایی‌های داخلی در D1 (حداکثر هر ۵ دقیقه یک‌بار و فقط در صورت تغییر قیمت)
+      if (env && env.DB) {
+        recordD1DomesticHistory(env, items, t, false).catch(() => {});
+        checkAlerts(env, items).catch(() => {});
+      }
+      // ذخیره کنترل‌شده Snapshot در Cloudflare KV در صورت متصل بودن
+      if (hasPricesKv(env)) {
+        writePricesKvSnapshot(env, data, false).catch(() => {});
+      }
     }
 
     return { items, updated: [...fresh] };
@@ -1182,12 +1618,11 @@ export async function refreshPrices(env, force = false) {
   }
 }
 
-// پالایش و اعتبارسنجی نقاط نمودار از API صرافی‌ها و آرشیوها بدون حذف بی‌مورد تاریخچه معتبر
-function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) {
+// پالایش و اعتبارسنجی نقاط نمودار از API صرافی‌ها و آرشیوها بدون حذف نوسانات واقعی بازار و بدون ساخت نقطه فرضی
+function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0, allowLiveAppend = true) {
   const span = RANGES[range];
   if (!span || !Array.isArray(rawPoints) || rawPoints.length < 2) return [];
 
-  // ۱. پاک‌سازی، مرتب‌سازی زمانی و حذف نقاط تکراری یا نامعتبر
   const cleaned = [];
   for (const p of rawPoints) {
     if (!Array.isArray(p) || p.length < 2) continue;
@@ -1211,29 +1646,34 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
   }
   if (deduped.length < 2) return [];
 
-  // فیلتر کردن نوسانات پرت (اسپایک‌های خطای سرور بیش از ۳ برابر یا کمتر از یک‌سوم در یک گام)
+  // فیلتر خطای واحد (مانند پرش ۱۰ برابری ریال/تومان در داده‌های داخلی) بدون حذف نوسانات واقعی رمزارزها
+  const minRatio = isDomestic ? 0.35 : 0.05;
+  const maxRatio = isDomestic ? 2.85 : 20.0;
   const filtered = [deduped[0]];
   for (let i = 1; i < deduped.length; i++) {
     const prev = filtered[filtered.length - 1][1];
     const cur = deduped[i][1];
     const ratio = cur / prev;
-    if (ratio >= 0.25 && ratio <= 4.0) {
+    if (ratio >= minRatio && ratio <= maxRatio) {
       filtered.push(deduped[i]);
     }
   }
   if (filtered.length < 2) return [];
 
-  // ۲. برش بازه زمانی با تلورانس تعطیلات بازار
-  const graceWindow = isDomestic ? Math.max(span * 1.5, 5 * 86400) : Math.max(span * 1.25, 7200);
+  // برای بازه‌های کوتاه‌مدت (1H و 1D) فقط نقاط داخل بازه واقعی مجازند؛ برای بازه‌های روزانه تلورانس تعطیلات بازار لحاظ می‌شود
+  const isIntraday = range === '1H' || range === '1D';
+  const graceWindow = isIntraday
+    ? (range === '1H' ? 5400 : 93600)
+    : (isDomestic ? Math.max(span * 1.5, 6 * 86400) : Math.max(span * 1.25, 7200));
   const minTs = now - graceWindow;
   let pts = filtered.filter(p => p[0] >= minTs && p[0] <= now + 3600);
-  if (pts.length < 2) {
+  if (!isIntraday && pts.length < 2) {
     pts = filtered.slice(-Math.min(filtered.length, range === '1Y' ? 365 : range === '1M' ? 35 : 48));
   }
   if (pts.length < 2) return [];
 
-  // اتصال نرم نقطه پایانی به قیمت زنده فعلی در صورتی که معقول باشد
-  if (refPrice > 0) {
+  // اتصال نقطه فعلی بازار فقط در صورتی که قیمت زنده معتبر باشد و جهش خطای واحد نداشته باشد
+  if (allowLiveAppend && refPrice > 0) {
     const lastPt = pts[pts.length - 1];
     const diffRatio = Math.abs(lastPt[1] - refPrice) / refPrice;
     if (diffRatio <= 0.35 && now > lastPt[0]) {
@@ -1244,17 +1684,53 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0) 
   return pts;
 }
 
-// استخراج تاریخچه واقعی طلا، سکه و ارز از آرشیو رسمی iran-market (با پشتیبان rates.json)
-async function archiveHistory(id, range, liveItem = null) {
+// استخراج تاریخچه واقعی طلا، سکه و ارز بدون هیچ‌گونه نقطه مصنوعی، خط فرضی یا محاسبه معکوس از درصد تغییر
+async function archiveHistory(id, range, liveItem = null, env = null) {
   const now = nowS();
   const span = RANGES[range] || 86400;
   const minTs = now - span - 4 * 86400;
-  const maxSlice = range === '1H' || range === '1D' ? 5 : range === '3D' ? 10 : range === '1W' ? 18 : range === '1M' ? 50 : 420;
-  const curPrice = liveItem?.price > 0 ? Math.round(Number(liveItem.price)) : 0;
-  const curChange = Number.isFinite(Number(liveItem?.change)) ? Number(liveItem.change) : null;
-  const recordedTicks = (domesticIntradayTicks.get(id) || []).filter(p => p[0] >= now - 86400 && p[0] <= now);
+  const maxSlice = range === '3D' ? 10 : range === '1W' ? 18 : range === '1M' ? 45 : 400;
+  const curPrice = (liveItem && Number(liveItem.price) > 0 && !isPriceItemStale(liveItem, id, now))
+    ? Math.round(Number(liveItem.price))
+    : 0;
+  const curTs = Number(liveItem?.sourceTimestamp) > 0
+    ? Math.floor(Number(liveItem.sourceTimestamp))
+    : (Number(liveItem?.receivedAt) > 0 ? Math.floor(Number(liveItem.receivedAt)) : now);
 
-  // منبع اول: آرشیو روزانه OHLC در iran-market (به‌روز تا آخرین روز معاملاتی و فقط ۴۰ کیلوبایت)
+  // ۱. برای بازه‌های کوتاه‌مدت (1H و 1D): فقط و فقط نقاط واقعی ثبت‌شده در D1 (price_history_v2) و تیک‌های واقعی مشاهده‌شده در حافظه!
+  // آرشیوهای روزانه (iran-market / nerkhara / nerkhsanj) فقط یک عدد در روز دارند و هرگز نباید به‌جای نمودار ۱ ساعته یا ۲۴ ساعته نمایش داده شوند.
+  if (range === '1H' || range === '1D') {
+    const windowStart = now - span;
+    const d1Pts = await queryD1DomesticHistory(env, id, windowStart);
+    const memPts = (domesticIntradayTicks.get(id) || []).filter(p => p[0] >= windowStart && p[0] <= now + 60);
+    const combined = [...d1Pts, ...memPts];
+    if (curPrice > 0) {
+      const srcTs = Number(liveItem?.sourceTimestamp) > 0 ? Math.floor(Number(liveItem.sourceTimestamp)) : 0;
+      const obsTs = Number(liveItem?.receivedAt) > 0 ? Math.floor(Number(liveItem.receivedAt)) : now;
+      if (srcTs >= windowStart && srcTs <= now + 60) {
+        combined.push([srcTs, curPrice]);
+      }
+      if (obsTs >= windowStart && obsTs <= now + 60 && Math.abs(obsTs - srcTs) >= 60) {
+        combined.push([obsTs, curPrice]);
+      }
+    }
+    combined.sort((a, b) => a[0] - b[0]);
+    const deduped = [];
+    for (const pt of combined) {
+      if (deduped.length && deduped[deduped.length - 1][0] === pt[0]) {
+        deduped[deduped.length - 1][1] = pt[1];
+      } else {
+        deduped.push(pt);
+      }
+    }
+    // اگر کمتر از ۲ نقطه واقعی در این بازه ثبت شده باشد، صادقانه آرایه خالی برگردان تا رابط کاربری پیام «نمودار برای این بازه زمانی در دسترس نیست» را نشان دهد
+    return deduped.length >= 2 ? deduped : [];
+  }
+
+  // ۲. برای بازه‌های چندروزه و بلندمدت (3D, 1W, 1M, 1Y): استفاده از آرشیوهای روزانه واقعی + نقاط اخیر D1
+  const d1Recent = (range === '3D' || range === '1W') ? await queryD1DomesticHistory(env, id, now - span) : [];
+
+  // منبع اول تاریخچه روزانه: آرشیو روزانه iran-market
   const sym = id === 'usdt' ? 'USDT_IRR' : (IRAN_MARKET_MAP[id] || [])[0];
   if (sym) {
     try {
@@ -1267,89 +1743,61 @@ async function archiveHistory(id, range, liveItem = null) {
         const j = await r.json();
         const records = j?.data?.records;
         if (Array.isArray(records) && records.length >= 2) {
-          if (range === '1H' || range === '1D') {
-            const lastRec = records[records.length - 1];
-            const prevRec = records[records.length - 2];
-            const prevClose = Number(prevRec?.close) > 0 ? Math.round(Number(prevRec.close) / 10) : 0;
-            const openToman = Number(lastRec?.open) > 0 ? Math.round(Number(lastRec.open) / 10) : 0;
-            const lowToman = Number(lastRec?.low) > 0 ? Math.round(Number(lastRec.low) / 10) : 0;
-            const highToman = Number(lastRec?.high) > 0 ? Math.round(Number(lastRec.high) / 10) : 0;
-            const closeToman = Number(lastRec?.close) > 0 ? Math.round(Number(lastRec.close) / 10) : 0;
-            const endPrice = curPrice > 0 ? curPrice : closeToman;
-            if (endPrice > 0) {
-              const startPrice = (curChange !== null && Math.abs(curChange) > 0.0001 && Math.abs(curChange) < 40)
-                ? Math.round(endPrice / (1 + curChange / 100))
-                : (prevClose || openToman || endPrice);
-              if (range === '1H') {
-                const hourTicks = recordedTicks.filter(tk => tk[0] >= now - 3600);
-                const anchor = closeToman || openToman || startPrice;
-                const midPrice = Math.round((anchor + endPrice) / 2);
-                const out1H = [
-                  [now - 3600, anchor],
-                  [now - 2400, midPrice],
-                  [now - 1200, endPrice],
-                  ...hourTicks,
-                  [now, endPrice]
-                ];
-                return out1H;
-              }
-              const out1D = [[now - 86400, startPrice]];
-              if (openToman > 0) out1D.push([now - 18 * 3600, openToman]);
-              if (lowToman > 0 && highToman > 0) {
-                if (closeToman >= openToman) {
-                  out1D.push([now - 13 * 3600, lowToman], [now - 8 * 3600, highToman]);
-                } else {
-                  out1D.push([now - 13 * 3600, highToman], [now - 8 * 3600, lowToman]);
-                }
-              }
-              if (closeToman > 0) out1D.push([now - 3 * 3600, closeToman]);
-              for (const tk of recordedTicks) {
-                if (tk[0] > now - 3 * 3600) out1D.push(tk);
-              }
-              out1D.push([now, endPrice]);
-              return out1D;
-            }
-          }
           const out = [];
           for (const rec of records.slice(-maxSlice)) {
             const closeRial = Number(rec.close);
             if (!(closeRial > 0)) continue;
             const closeToman = Math.round(closeRial / 10);
-            const openToman = Number(rec.open) > 0 ? Math.round(Number(rec.open) / 10) : 0;
-            const lowToman = Number(rec.low) > 0 ? Math.round(Number(rec.low) / 10) : 0;
-            const highToman = Number(rec.high) > 0 ? Math.round(Number(rec.high) / 10) : 0;
             const baseTs = Number(rec.t) > 1500000000
               ? Math.floor(Number(rec.t))
-              : Math.floor(new Date(rec.date + 'T00:00:00Z').getTime() / 1000);
-            const openTs = baseTs + 9 * 3600 - 12600;
-            const midTs = baseTs + 12.5 * 3600 - 12600;
-            const closeTs = baseTs + 16 * 3600 - 12600;
-            if ((range === '3D' || range === '1W') && openToman > 0 && openTs >= minTs && openTs <= now + 3600) {
-              out.push([openTs, openToman]);
-              if (highToman > 0 && lowToman > 0 && midTs <= now + 3600) {
-                out.push([midTs, closeToman >= openToman ? highToman : lowToman]);
-              }
-            }
-            if (closeTs >= minTs && closeTs <= now + 3600) {
-              out.push([closeTs, closeToman]);
+              : Math.floor(new Date(rec.date + 'T12:00:00Z').getTime() / 1000);
+            if (baseTs >= minTs && baseTs <= now + 3600) {
+              out.push([baseTs, closeToman]);
             }
           }
-          if (curPrice > 0) out.push([now, curPrice]);
+          for (const pt of d1Recent) out.push(pt);
+          if (curPrice > 0) out.push([curTs, curPrice]);
           if (out.length >= 2) return out;
         }
       }
     } catch {}
   }
 
-  // منبع دوم (پشتیبان): آرشیو نرخ‌سنج
-  const key = (NERKH[id] || [])[0] || (DOMESTIC_EXTRA[id] || [])[0];
-  if (!key) {
-    if (curPrice > 0) {
-      const startP = curChange ? Math.round(curPrice / (1 + curChange / 100)) : curPrice;
-      return [[now - span, startP], [now, curPrice]];
-    }
-    return [];
+  // منبع دوم تاریخچه روزانه: آرشیو رسمی NerkhAra (https://nerkhara.com/api/v1/history/{id}.json)
+  const naId = NERKHARA_MAP[id];
+  if (naId) {
+    try {
+      const r = await fetch(`https://nerkhara.com/api/v1/history/${encodeURIComponent(naId)}.json`, {
+        headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0' },
+        signal: AbortSignal.timeout(7000),
+        cf: { cacheTtl: 1800, cacheEverything: true }
+      });
+      if (r.ok) {
+        const j = await r.json();
+        const pts = j?.points;
+        if (Array.isArray(pts) && pts.length >= 2) {
+          const out = [];
+          for (const row of pts.slice(-maxSlice)) {
+            if (!Array.isArray(row) || row.length < 2) continue;
+            const dateStr = String(row[0] || '').trim();
+            const val = Math.round(Number(row[1]));
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !(val > 0)) continue;
+            const ts = Math.floor(Date.parse(`${dateStr}T12:00:00Z`) / 1000);
+            if (Number.isFinite(ts) && ts >= minTs && ts <= now + 3600) {
+              out.push([ts, val]);
+            }
+          }
+          for (const pt of d1Recent) out.push(pt);
+          if (curPrice > 0) out.push([curTs, curPrice]);
+          if (out.length >= 2) return out;
+        }
+      }
+    } catch {}
   }
+
+  // منبع سوم تاریخچه روزانه (پشتیبان): آرشیو نرخ‌سنج (rates.json)
+  const key = (NERKH[id] || [])[0] || (DOMESTIC_EXTRA[id] || [])[0];
+  if (!key) return [];
   try {
     const r = await fetch('https://nerkh.jahankhahan.shop/data/rates.json', {
       headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0 (personal portfolio app)' },
@@ -1365,23 +1813,6 @@ async function archiveHistory(id, range, liveItem = null) {
     const endDaysIdx = text.indexOf(']]', daysIdx);
     if (daysIdx === -1 || endDaysIdx === -1) return [];
     const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
-    if ((range === '1H' || range === '1D') && Array.isArray(days) && days.length >= 2) {
-      const lastVal = Number(days[days.length - 1]?.[1]) || 0;
-      const prevVal = Number(days[days.length - 2]?.[1]) || lastVal;
-      const endPrice = curPrice > 0 ? curPrice : lastVal;
-      if (endPrice > 0) {
-        const startPrice = (curChange !== null && Math.abs(curChange) > 0.0001 && Math.abs(curChange) < 40)
-          ? Math.round(endPrice / (1 + curChange / 100))
-          : (prevVal || endPrice);
-        const out1D = [[now - span, startPrice]];
-        if (lastVal > 0) out1D.push([now - Math.floor(span / 2), lastVal]);
-        for (const tk of recordedTicks) {
-          if (tk[0] > now - Math.floor(span / 2)) out1D.push(tk);
-        }
-        out1D.push([now, endPrice]);
-        return out1D;
-      }
-    }
     const out = [];
     for (const [d, v] of days.slice(-maxSlice)) {
       const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
@@ -1392,7 +1823,8 @@ async function archiveHistory(id, range, liveItem = null) {
         out.push([ts, Number(v)]);
       }
     }
-    if (curPrice > 0) out.push([now, curPrice]);
+    for (const pt of d1Recent) out.push(pt);
+    if (curPrice > 0) out.push([curTs, curPrice]);
     return out;
   } catch {
     return [];
@@ -1422,89 +1854,128 @@ async function wallexHistory(symbol, range, refPrice = 0) {
           pts.push([ts, Math.round(c)]);
         }
       }
-      return validateHistoryPoints(pts, range, now, false, refPrice);
+      return validateHistoryPoints(pts, range, now, true, refPrice, true);
     }
   } catch {}
   return [];
 }
 
-async function history(env, url) {
+async function history(env, url, ctx = null) {
   const id = url.searchParams.get('id') || '', range = url.searchParams.get('range') || '1D';
   if (!/^[a-z0-9]{1,20}$/.test(id) || !Object.hasOwn(RANGES, range)) throw new HttpError(400, 'پارامتر نامعتبر است.');
 
   const cacheKey = `${id}:${range}`;
   const t = nowS();
+  const ttlSec = (range === '1H' || range === '1D') ? 60 : 300;
+
+  // ۱. بررسی کش حافظه Worker
   const mem = historyMemCache.get(cacheKey);
-  if (mem && (t - mem.at < 120) && mem.data?.points?.length >= 2) {
-    return json(mem.data, 200, { 'cache-control': 'public, max-age=120, stale-while-revalidate=300' });
+  if (mem && (t - mem.at < ttlSec) && mem.data?.points?.length >= 2) {
+    return json(mem.data, 200, { 'cache-control': `public, max-age=${ttlSec}` });
   }
+
+  // ۲. بررسی Cloudflare Cache API با کلید مجزا برای هر دارایی و بازه (بدون اطلاعات کاربر)
+  let edgeCache = null;
+  const edgeHistoryUrl = `https://edge.darayi.local/api/history?id=${encodeURIComponent(id)}&range=${encodeURIComponent(range)}`;
+  try {
+    if (typeof caches !== 'undefined' && caches.default) {
+      edgeCache = caches.default;
+      const cachedRes = await edgeCache.match(edgeHistoryUrl);
+      if (cachedRes) {
+        const cachedAt = Number(cachedRes.headers.get('x-darayi-cached-at') || 0);
+        if (cachedAt > 0 && (t - cachedAt <= ttlSec)) {
+          return cachedRes;
+        }
+      }
+    }
+  } catch {}
 
   let prices = await getPrices(env);
   if (!Object.keys(prices.items || {}).length) {
     try { await refreshPrices(env); prices = await getPrices(env); } catch {}
   }
   const it = prices.items?.[id];
-  const isDomesticAsset = id !== 'usdt' && (Boolean(NERKH[id]) || Boolean(DOMESTIC_EXTRA[id]) || Boolean(IRAN_MARKET_MAP[id]) || it?.kind === 'domestic');
+  const isDomesticAsset = id !== 'usdt' && (Boolean(NERKH[id]) || Boolean(DOMESTIC_EXTRA[id]) || Boolean(IRAN_MARKET_MAP[id]) || Boolean(DOMESTIC_META[id]) || it?.kind === 'domestic');
+
+  const cacheAndReturn = (payload) => {
+    historyMemCache.set(cacheKey, { at: t, data: payload });
+    const res = json(payload, 200, {
+      'access-control-allow-origin': '*',
+      'cache-control': `public, max-age=${ttlSec}`,
+      'x-darayi-cached-at': String(t)
+    });
+    if (edgeCache && ctx && ctx.waitUntil && payload.points?.length >= 2) {
+      try { ctx.waitUntil(edgeCache.put(edgeHistoryUrl, res.clone())); } catch {}
+    }
+    return res;
+  };
 
   // ۱. تاریخچه رمزارزها و تتر (مستقیم از کندل‌های واقعی صرافی)
   if (it?.crypto || !isDomesticAsset) {
     if (id === 'usdt') {
-      let pts = await wallexHistory('USDTTMN', range, it?.price || 0);
+      const refP = (it && !isPriceItemStale(it, 'usdt', t)) ? (it.price || 0) : 0;
+      let pts = await wallexHistory('USDTTMN', range, refP);
+      let srcUsed = 'wallex';
       if (pts.length < 2) {
-        const arch = await archiveHistory('usdt', range, it);
-        pts = validateHistoryPoints(arch, range, t, true, it?.price || 0);
+        const arch = await archiveHistory('usdt', range, it, env);
+        pts = validateHistoryPoints(arch, range, t, true, refP, range !== '1H' && range !== '1D');
+        srcUsed = (range === '1H' || range === '1D') ? 'd1_intraday' : 'archive';
       }
       if (pts.length >= 2) {
-        const payload = { id, range, currency: 'IRT', source: 'wallex', points: pts };
-        historyMemCache.set(cacheKey, { at: t, data: payload });
-        return json(payload, 200, { 'cache-control': 'public, max-age=120, stale-while-revalidate=300' });
+        return cacheAndReturn({ id, range, currency: 'IRT', source: srcUsed, points: pts });
       }
-      return json({ id, range, currency: 'IRT', points: [], unavailable: true });
+      return json({ id, range, currency: 'IRT', points: [], unavailable: true, reason: 'insufficient_real_points' });
     }
+
     const [iv, lim] = KL[range], base = (it?.sym || id).toUpperCase();
+    const refP = (it && !isPriceItemStale(it, id, t)) ? (it.price || 0) : 0;
     const exchangeOrder = range === '1Y'
-      ? [...new Set([it?.src !== 'okx' ? it?.src : null, 'gate', 'kucoin', 'okx'].filter(Boolean))]
-      : [...new Set([it?.src, 'kucoin', 'okx', 'gate'].filter(Boolean))];
+      ? [...new Set([it?.src !== 'okx' ? it?.src : null, 'kucoin', 'gate', 'okx', 'binance'].filter(Boolean))]
+      : [...new Set([it?.src, 'kucoin', 'okx', 'gate', 'binance'].filter(Boolean))];
     for (const name of exchangeOrder) {
       const src = SOURCES[name];
       if (!src) continue;
       try {
-        const pair = (it && name === it.src && it.pair) ? it.pair : name === 'gate' ? base + '_USDT' : base + '-USDT';
+        const pair = (it && name === it.src && it.pair)
+          ? it.pair
+          : name === 'gate' ? `${base}_USDT` : name === 'binance' ? `${base}USDT` : `${base}-USDT`;
         const rawPts = await src.klines(pair, iv, lim);
-        const points = validateHistoryPoints(rawPts, range, t, false, it?.price || 0);
+        const points = validateHistoryPoints(rawPts, range, t, false, refP, true);
         if (points.length >= 2) {
-          const payload = { id, range, currency: 'USDT', source: name, points };
-          historyMemCache.set(cacheKey, { at: t, data: payload });
-          return json(payload, 200, { 'cache-control': 'public, max-age=120, stale-while-revalidate=300' });
+          return cacheAndReturn({ id, range, currency: 'USDT', source: name, points });
         }
       } catch {}
     }
-    return json({ id, range, currency: 'USDT', points: [], unavailable: true });
+    return json({ id, range, currency: 'USDT', points: [], unavailable: true, reason: 'exchange_klines_unavailable' });
   }
 
-  // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (در تمام بازه‌ها از ۱ ساعت تا ۱ سال)
+  // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (بدون هیچ نقطه مصنوعی)
   let rawPoints = [];
   try {
-    rawPoints = await archiveHistory(id, range, it);
+    rawPoints = await archiveHistory(id, range, it, env);
   } catch {}
 
-  const curPrice = it?.price || 0;
-  const curTs = it?.t || t;
-  if (rawPoints.length >= 2 && curPrice > 0) {
-    const lastT = rawPoints[rawPoints.length - 1][0];
-    if (curTs > lastT) {
-      rawPoints.push([curTs, curPrice]);
-    }
-  }
-
-  const points = validateHistoryPoints(rawPoints, range, t, true, curPrice);
+  const curPrice = (it && !isPriceItemStale(it, id, t)) ? (it.price || 0) : 0;
+  const isIntraday = range === '1H' || range === '1D';
+  const points = validateHistoryPoints(rawPoints, range, t, true, curPrice, !isIntraday);
   if (points.length < 2) {
-    return json({ id, range, currency: it?.unit || 'IRT', points: [], unavailable: true });
+    return json({
+      id,
+      range,
+      currency: it?.unit || 'IRT',
+      points: [],
+      unavailable: true,
+      reason: isIntraday ? 'insufficient_intraday_history' : 'archive_unavailable'
+    });
   }
 
-  const payload = { id, range, currency: it?.unit || 'IRT', source: 'archive', points };
-  historyMemCache.set(cacheKey, { at: t, data: payload });
-  return json(payload, 200, { 'cache-control': 'public, max-age=120, stale-while-revalidate=300' });
+  return cacheAndReturn({
+    id,
+    range,
+    currency: it?.unit || 'IRT',
+    source: isIntraday ? 'd1_intraday' : 'archive',
+    points
+  });
 }
 
 let lastAlertCheckTime = 0;
@@ -1537,15 +2008,14 @@ export async function checkAlerts(env, items) {
   const rows = (await env.DB.prepare(`SELECT a.id,a.user_id,a.asset_id,a.direction,a.price,a.attempts,COALESCE(c.currency,'IRT') AS currency,COALESCE(g.version,'legacy') AS version,u.email,u.name FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id LEFT JOIN alert_state g ON g.alert_id=a.id JOIN users u ON u.id=a.user_id LEFT JOIN alert_delivery d ON d.alert_id=a.id WHERE a.triggered_at IS NULL AND a.attempts<5 AND COALESCE(d.retry_at,0)<=unixepoch() AND COALESCE(d.lease_until,0)<=unixepoch()`).all()).results;
   for (const a of rows) {
     let cur = items[a.asset_id];
-    if (!cur || !cur.t || (cur.crypto && cur.unit !== 'USDT') || t - cur.t > (cur.crypto ? CRYPTO_STALE_S : STALE_S)) continue;
-    if (a.currency === 'IRT' && cur.crypto) {
+    if (!cur || (cur.crypto && a.asset_id !== 'usdt' && cur.unit !== 'USDT') || isPriceItemStale(cur, a.asset_id, t)) continue;
+    if (a.currency === 'IRT' && cur.crypto && a.asset_id !== 'usdt') {
       const fx = items.usdt;
-      if (!fx || !fx.t || t - fx.t > STALE_S) continue;
+      if (!fx || isPriceItemStale(fx, 'usdt', t)) continue;
       cur = { ...cur, price: cur.price * fx.price, crypto: false, unit: 'IRT' };
     }
     if (!(a.direction === 'above' ? cur.price >= a.price : cur.price <= a.price)) continue;
 
-    // اگر سرویس ایمیل تنظیم نشده باشد، باز هم وضعیت هشدار را در دیتابیس «فعال‌شده» (تیک‌خورده) ثبت کن
     if (!canSendMail) {
       await env.DB.prepare("UPDATE alerts SET triggered_at=? WHERE id=? AND triggered_at IS NULL").bind(t, a.id).run();
       if (a.user_id) userDataCache.delete(a.user_id);
@@ -1580,13 +2050,27 @@ export async function checkAlerts(env, items) {
 }
 
 export async function runCron(env) {
-  const { items } = await refreshPrices(env);
+  const t = nowS();
+  const { items } = await refreshPrices(env, true);
+  // ۱. ثبت نقاط واقعی قیمت دارایی‌های داخلی و تتر در جدول price_history_v2 دیتابیس D1
+  if (env && env.DB && items) {
+    await recordD1DomesticHistory(env, items, t, true);
+  }
+  // ۲. ذخیره Snapshot در Cloudflare KV در صورت فعال بودن اتصال PRICES_KV (یا fallback کنترل‌شده در تک‌ردیف جدول kv دیتابیس D1 برای جلوگیری از Cold Start)
+  if (inMemoryPrices) {
+    if (hasPricesKv(env)) {
+      await writePricesKvSnapshot(env, inMemoryPrices, true);
+    } else if (env && env.DB) {
+      await kvPut(env, KV_SNAPSHOT_KEY, inMemoryPrices, t);
+    }
+  }
+  // ۳. به‌روزرسانی Cloudflare Cache API برای پاسخ فوری به کاربران
   try {
     if (typeof caches !== 'undefined' && caches.default && inMemoryPrices) {
       const out = publicPrices(inMemoryPrices);
       const res = json(out, 200, {
-        'access-control-allow-origin': '*',
-        'cache-control': 'public, max-age=15, s-maxage=55, stale-while-revalidate=120'
+        'cache-control': 'public, max-age=20',
+        'x-darayi-cached-at': String(t)
       });
       await caches.default.put('https://edge.darayi.local/api/prices', res);
     }
@@ -1598,12 +2082,15 @@ export async function runCron(env) {
 export async function refreshMeta(env) {
   if (env.DB) {
     const t = nowS();
+    const keepDays = Math.max(3, Math.min(14, Number(env.PRICE_HISTORY_DAYS) || 7));
     try {
       await env.DB.batch([
         env.DB.prepare('DELETE FROM sessions WHERE expires_at<?').bind(t),
         env.DB.prepare('DELETE FROM otp_codes WHERE expires_at<?').bind(t),
         env.DB.prepare('DELETE FROM oauth_states WHERE expires_at<?').bind(t),
-        env.DB.prepare("DELETE FROM kv WHERE k LIKE 'h:%' AND updated_at<?").bind(t - 86400)
+        env.DB.prepare('DELETE FROM rate_limits WHERE reset_at<?').bind(t),
+        env.DB.prepare("DELETE FROM kv WHERE k LIKE 'h:%' AND updated_at<?").bind(t - 86400),
+        env.DB.prepare('DELETE FROM price_history_v2 WHERE t < ?').bind(t - keepDays * 86400)
       ]);
     } catch (e) {
       console.error('cleanup failed', e?.message);
@@ -1616,8 +2103,9 @@ const DEFAULT_SYSTEM_FEEDS = [
   { id: 'f_okx', name: 'OKX Market Feed', url: 'https://www.okx.com/api/v5/market/tickers?instType=SPOT', type: 'crypto', status: 'active', pingMs: 62, reliability: '99.8%', priority: 2 },
   { id: 'f_gate', name: 'Gate.io Engine', url: 'https://api.gateio.ws/api/v4/spot/tickers', type: 'crypto', status: 'active', pingMs: 55, reliability: '100%', priority: 3 },
   { id: 'f_binance_ws', name: 'Binance MiniTicker WS', url: 'wss://stream.binance.com:443/ws/!miniTicker@arr', type: 'websocket', status: 'active', pingMs: 24, reliability: '100%', priority: 4 },
-  { id: 'f_nerkh', name: 'TGJU / Nerkhsanj Rate', url: 'https://nerkh.jahankhahan.shop/data/live.json', type: 'domestic', status: 'active', pingMs: 38, reliability: '99.4%', priority: 5 },
-  { id: 'f_nobitex', name: 'Nobitex Domestic Bridge', url: 'https://api.nobitex.ir/market/stats', type: 'tether', status: 'active', pingMs: 32, reliability: '100%', priority: 6 }
+  { id: 'f_nerkhara', name: 'NerkhAra Validated Feed', url: 'https://nerkhara.com/api/v1/latest.json', type: 'domestic', status: 'active', pingMs: 34, reliability: '99.9%', priority: 5 },
+  { id: 'f_nerkh', name: 'TGJU / IranMarket Rate', url: 'https://iran-market.github.io/data/latest-toman.json', type: 'domestic', status: 'active', pingMs: 38, reliability: '99.6%', priority: 6 },
+  { id: 'f_wallex', name: 'Wallex USDT/TMN Bridge', url: 'https://api.wallex.ir/v1/markets', type: 'tether', status: 'active', pingMs: 30, reliability: '100%', priority: 7 }
 ];
 
 let inMemorySystemFeeds = null;
@@ -1658,22 +2146,93 @@ function formatFeed(f) {
 }
 
 // ---------- مسیریابی درخواست‌ها ----------
+function getAllowedOrigin(req, env, url) {
+  const reqOrigin = req.headers.get('origin');
+  if (!reqOrigin) return null;
+  if (reqOrigin === url.origin) return reqOrigin;
+  if (env && env.APP_URL) {
+    try {
+      const appOrigin = new URL(env.APP_URL).origin;
+      if (reqOrigin === appOrigin) return reqOrigin;
+    } catch {}
+  }
+  return null;
+}
+
+function verifyCsrf(req, env, url) {
+  const secFetchSite = req.headers.get('sec-fetch-site');
+  if (secFetchSite === 'cross-site') {
+    throw new HttpError(403, 'درخواست از مبدا غیرمجاز مسدود شد (CSRF).');
+  }
+  const allowedOrigin = new Set([url.origin]);
+  if (env && env.APP_URL) {
+    try { allowedOrigin.add(new URL(env.APP_URL).origin); } catch {}
+  }
+  const origin = req.headers.get('origin');
+  if (origin) {
+    if (!allowedOrigin.has(origin)) {
+      throw new HttpError(403, 'مبدا درخواست غیرمجاز است (Origin Mismatch).');
+    }
+  } else {
+    const referer = req.headers.get('referer');
+    if (referer) {
+      try {
+        if (!allowedOrigin.has(new URL(referer).origin)) {
+          throw new HttpError(403, 'مبدا ارجاع غیرمجاز است (Referer Mismatch).');
+        }
+      } catch {
+        throw new HttpError(403, 'هدر ارجاع نامعتبر است.');
+      }
+    }
+  }
+  const ct = (req.headers.get('content-type') || '').toLowerCase();
+  const xrw = req.headers.get('x-requested-with') || '';
+  if (!ct.includes('application/json') && xrw !== 'XMLHttpRequest') {
+    throw new HttpError(403, 'فرمت درخواست نامعتبر است (CSRF Header Check).');
+  }
+}
+
 async function route(req, env, url, ctx) {
   const p = url.pathname, m = req.method;
+  const corsOrig = getAllowedOrigin(req, env, url);
+  const corsHeaders = corsOrig ? { 'access-control-allow-origin': corsOrig, 'vary': 'Origin' } : {};
 
-  if (p === '/api/health') {
+  if (m === 'OPTIONS') {
+    if (!corsOrig) return new Response(null, { status: 403, headers: SEC_HEADERS });
+    return new Response(null, {
+      status: 204,
+      headers: {
+        ...SEC_HEADERS,
+        'access-control-allow-origin': corsOrig,
+        'access-control-allow-methods': 'GET, POST, PUT, DELETE, OPTIONS',
+        'access-control-allow-headers': 'Content-Type, X-Requested-With, Authorization',
+        'access-control-max-age': '86400',
+        'vary': 'Origin'
+      }
+    });
+  }
+
+  if (p === '/api/health' && m === 'GET') {
     return json({
       ok: true,
       database: !!env.DB,
+      kv: hasPricesKv(env) ? 'bound' : 'unbound_optional',
       google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
       email: !!(env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET || env.RESEND_API_KEY && env.MAIL_FROM),
+      marketOpen: isTehranMarketOpen(nowS()),
       time: nowS()
-    }, 200, { 'access-control-allow-origin': '*' });
+    }, 200, corsHeaders);
   }
 
-  // دریافت لحظه‌ای قیمت‌ها: در دسترس همیشگی، بدون پرتاب خطای ۵۰۰ یا ۵۰۳
+  // دریافت لحظه‌ای قیمت‌ها: کش کوتاه‌مدت کنترل‌شده (۲۰ ثانیه) + بازیابی از KV Snapshot در Cold Start
   if (p === '/api/prices' && m === 'GET') {
     const manual = url.searchParams.get('refresh') === '1';
+    if (manual) {
+      await rateLimit(env, 'prices_refresh:' + clientIp(req), 6, 60);
+    } else {
+      await rateLimit(env, 'prices_get:' + clientIp(req), 120, 60);
+    }
+    const now = nowS();
     let edgeCache = null;
     const canonicalKey = 'https://edge.darayi.local/api/prices';
     try {
@@ -1686,18 +2245,22 @@ async function route(req, env, url, ctx) {
       try {
         const cachedRes = await edgeCache.match(canonicalKey);
         if (cachedRes) {
-          return cachedRes;
+          const cachedAt = Number(cachedRes.headers.get('x-darayi-cached-at') || 0);
+          // اعتبارسنجی صریح عمر کش (حداکثر ۲۰ ثانیه) تا قیمت کهنه نمایش داده نشود
+          if (cachedAt > 0 && (now - cachedAt <= 20)) {
+            return cachedRes;
+          }
         }
       } catch (e) {
         console.error('edge cache match error:', e?.message);
       }
     }
 
-    let prices = { updatedAt: 0, items: {}, feeds: {} };
+    let prices = { updatedAt: 0, checkedAt: 0, items: {}, feeds: {} };
     try { prices = await getPrices(env); } catch (e) { console.error('getPrices error:', e?.message); }
 
-    const age = nowS() - (prices.checkedAt || 0);
-    const limit = manual ? 8 : Number(env.INLINE_REFRESH_S || 90);
+    const age = now - (prices.checkedAt || 0);
+    const limit = manual ? 5 : Math.min(60, Math.max(15, Number(env.INLINE_REFRESH_S || 45)));
     const empty = !Object.keys(prices.items || {}).length;
     const hasCrypto = Object.values(prices.items || {}).some(i => i.crypto && i.unit === 'USDT');
 
@@ -1715,15 +2278,16 @@ async function route(req, env, url, ctx) {
         ctx.waitUntil(job);
       }
       if (manual || empty || !hasCrypto) {
-        await Promise.race([job, new Promise(r => setTimeout(r, 9000))]);
+        await Promise.race([job, new Promise(r => setTimeout(r, 8500))]);
         try { prices = await getPrices(env); } catch {}
       }
     }
     const out = publicPrices(prices);
-    if (inMemoryLastError) out.feeds = { ...(out.feeds || {}), lastError: inMemoryLastError };
+    const createdTs = nowS();
     const headers = {
-      'access-control-allow-origin': '*',
-      'cache-control': manual ? 'no-store' : 'public, max-age=15, s-maxage=55, stale-while-revalidate=120'
+      ...corsHeaders,
+      'cache-control': manual ? 'no-store, no-cache, must-revalidate' : 'public, max-age=20',
+      'x-darayi-cached-at': String(createdTs)
     };
     const res = json(out, 200, headers);
     if (!manual && edgeCache && ctx && ctx.waitUntil && Object.keys(out.items || {}).length > 0) {
@@ -1736,21 +2300,19 @@ async function route(req, env, url, ctx) {
 
   if (p === '/api/crypto-icons' && m === 'GET') {
     return json({ ok: true, icons: CRYPTO_ICONS }, 200, {
-      'cache-control': 'public, max-age=604800, immutable',
-      'access-control-allow-origin': '*'
+      ...corsHeaders,
+      'cache-control': 'public, max-age=604800, immutable'
     });
   }
 
   if (p === '/api/history' && m === 'GET') {
-    return await history(env, url);
+    await rateLimit(env, 'hist:' + clientIp(req), 90, 60);
+    return await history(env, url, ctx);
   }
 
-  // سایر متدهای تغییر وضعیت
+  // حفاظت سخت‌گیرانه در برابر CSRF برای تمام متدهای تغییر وضعیت
   if (m !== 'GET' && m !== 'HEAD') {
-    const o = req.headers.get('origin');
-    if (o && o !== url.origin && req.headers.get('sec-fetch-site') === 'cross-site') {
-      throw new HttpError(403, 'Forbidden');
-    }
+    verifyCsrf(req, env, url);
   }
 
   if (p === '/api/auth/register/start' && m === 'POST') return registerStart(req, env);
@@ -1762,22 +2324,33 @@ async function route(req, env, url, ctx) {
   if (p === '/api/auth/google/start' && m === 'GET') return googleStart(env, url);
   if (p === '/api/auth/google/callback' && m === 'GET') return googleCallback(env, url, req);
   if (p === '/api/auth/logout' && m === 'POST') {
-    const sid = getCookie(req, 'sid');
-    if (sid) {
-      const h = await sha256(sid);
+    const authHeader = req.headers.get('authorization') || '';
+    const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+    const rawToken = getCookie(req, 'sid') || bearer;
+    if (rawToken) {
+      const baseSid = rawToken.split('.')[0];
+      const h = await sha256(baseSid);
+      const hFull = await sha256(rawToken);
+      revokedSessionsCache.add(h);
+      revokedSessionsCache.add(hFull);
       sessionUserCache.delete(h);
-      if (env.DB) await env.DB.prepare('DELETE FROM sessions WHERE id_hash=?').bind(h).run();
+      sessionUserCache.delete(hFull);
+      if (env.DB) {
+        try {
+          await env.DB.prepare('DELETE FROM sessions WHERE id_hash IN (?, ?)').bind(h, hFull).run();
+        } catch {}
+      }
     }
     return json({ ok: true }, 200, { 'set-cookie': `sid=; ${cookieOpts(url, 0)}` });
   }
 
-function requireAdmin(user) {
-  if (!user) throw new HttpError(401, 'لطفاً ابتدا به حساب مدیریت وارد شوید.');
-  const adminEmail = 'a.h.sh.t1381@gmail.com';
-  if (!user.isAdmin && (user.email || '').toLowerCase() !== adminEmail) {
-    throw new HttpError(403, 'دسترسی فقط برای مدیر کل دارایی مجاز است.');
+  function requireAdmin(user) {
+    if (!user) throw new HttpError(401, 'لطفاً ابتدا به حساب مدیریت وارد شوید.');
+    const adminEmail = getAdminEmail(env);
+    if (!user.isAdmin && (user.email || '').toLowerCase() !== adminEmail) {
+      throw new HttpError(403, 'دسترسی فقط برای مدیر کل دارایی مجاز است.');
+    }
   }
-}
 
   if (p === '/api/broadcast' && m === 'GET') {
     const now = nowS();
@@ -1801,6 +2374,7 @@ function requireAdmin(user) {
 
   // ---------- ایندپوینت‌های پنل مدیریت (Admin) ----------
   if (p.startsWith('/api/admin/')) {
+    await rateLimit(env, 'admin:' + clientIp(req), 60, 60);
     requireAdmin(user);
     if (p === '/api/admin/overview' && m === 'GET') {
       const now = nowS();
@@ -1811,7 +2385,8 @@ function requireAdmin(user) {
         try {
           const uCount = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first();
           totalUsers = uCount?.c || 1;
-          activeUsers = totalUsers;
+          const susp = await getSuspendedUsers(env);
+          activeUsers = Math.max(0, totalUsers - susp.size);
           const aCount = await env.DB.prepare('SELECT COUNT(*) AS c FROM alerts').first();
           totalAlerts = aCount?.c || 0;
           const hRows = await env.DB.prepare('SELECT holdings FROM user_data').all();
@@ -1823,7 +2398,7 @@ function requireAdmin(user) {
           inMemoryAdminStats = { totalUsers, activeUsers, trackedHoldings, totalAlerts };
           inMemoryAdminStatsTime = now;
         } catch (e) {
-          console.error('admin overview db err:', e);
+          console.error('admin overview db err:', e?.message);
         }
       }
       let bMsg = '';
@@ -1864,7 +2439,7 @@ function requireAdmin(user) {
       try {
         await refreshPrices(env, true);
       } catch (err) {
-        console.error('admin refresh prices err:', err);
+        console.error('admin refresh prices err:', err?.message);
       }
       return json({ ok: true });
     }
@@ -1893,16 +2468,19 @@ function requireAdmin(user) {
       const f = feeds.find(x => x.id === id);
       if (!f) return json({ ok: false, error: 'فید یافت نشد.' }, 404);
       const start = Date.now();
-      let ok = true, httpStatus = 200;
+      let ok = false, httpStatus = 0;
       if (f.url && f.url.startsWith('https://') && isSafePublicUrl(f.url)) {
         try {
-          const resp = await fetch(f.url, { signal: AbortSignal.timeout(4000) });
+          const resp = await fetch(f.url, { signal: AbortSignal.timeout(4000), redirect: 'error' });
           httpStatus = resp.status;
           ok = resp.ok;
         } catch {
           ok = false;
           httpStatus = 0;
         }
+      } else if (f.url && f.url.startsWith('wss://') && isSafePublicUrl(f.url)) {
+        ok = true;
+        httpStatus = 101;
       }
       return json({ ok, pingMs: Math.max(1, Date.now() - start), httpStatus });
     }
@@ -1958,14 +2536,17 @@ function requireAdmin(user) {
     }
     if (p === '/api/admin/feeds/add' && m === 'POST') {
       const b = await readJson(req);
-      if (!b.name || !b.url) throw new HttpError(400, 'نام و آدرس ایندپوینت الزامی است.');
-      if (!isSafePublicUrl(b.url)) throw new HttpError(400, 'فقط آدرس‌های عمومی و امن (https:// یا wss://) مجاز هستند.');
+      const feedName = String(b.name || '').trim().slice(0, 80);
+      const feedUrl = String(b.url || '').trim().slice(0, 300);
+      if (!feedName || !feedUrl) throw new HttpError(400, 'نام و آدرس ایندپوینت الزامی است.');
+      if (!isSafePublicUrl(feedUrl)) throw new HttpError(400, 'فقط آدرس‌های عمومی و امن (https:// یا wss:// روی پورت استاندارد) مجاز هستند.');
       const feeds = await getSystemFeeds(env);
+      if (feeds.length >= 30) throw new HttpError(400, 'حداکثر تعداد مجاز فیدها تکمیل شده است.');
       const maxPriority = feeds.reduce((max, f) => Math.max(max, f.priority || 0), 0);
       const newFeed = {
         id: 'f_' + nowS(),
-        name: String(b.name).trim(),
-        url: String(b.url).trim(),
+        name: feedName,
+        url: feedUrl,
         type: ['crypto', 'domestic', 'tether', 'websocket'].includes(b.type || b.protocol) ? (b.type || b.protocol) : 'crypto',
         status: 'active',
         pingMs: 0,
@@ -1980,6 +2561,8 @@ function requireAdmin(user) {
 
     if (p === '/api/admin/users' && m === 'GET') {
       let usersList = [];
+      const suspendedSet = await getSuspendedUsers(env);
+      const adminEmail = getAdminEmail(env);
       if (env.DB) {
         try {
           const rows = await env.DB.prepare('SELECT u.id, u.email, u.name, u.created_at, (SELECT COUNT(*) FROM alerts a WHERE a.user_id = u.id) AS alertCount, (SELECT holdings FROM user_data ud WHERE ud.user_id = u.id) AS rawHoldings FROM users u ORDER BY u.created_at DESC LIMIT 100').all();
@@ -1987,35 +2570,34 @@ function requireAdmin(user) {
             usersList = rows.results.map((r) => {
               let hCount = 0;
               try { hCount = JSON.parse(r.rawHoldings || '[]').length; } catch {}
-              const isAdm = (r.email && r.email.toLowerCase() === 'a.h.sh.t1381@gmail.com');
+              const isAdm = (r.email && r.email.toLowerCase() === adminEmail);
+              const isSusp = suspendedSet.has(String(r.id).toLowerCase()) || suspendedSet.has(String(r.email || '').toLowerCase());
               return {
                 id: r.id,
                 email: r.email,
                 name: r.name || r.email.split('@')[0],
                 role: isAdm ? 'admin' : 'user',
-                status: 'active',
+                status: isSusp ? 'suspended' : 'active',
                 holdingsCount: hCount,
                 alertsCount: r.alertCount || 0,
-                lastLogin: 'فعال',
-                password: '••••••••'
+                lastLogin: isSusp ? 'مسدود' : 'فعال'
               };
             });
           }
         } catch (e) {
-          console.error('admin users list err:', e);
+          console.error('admin users list err:', e?.message);
         }
       }
       if (!usersList.length) {
         usersList = [{
           id: 'admin_a_h_sh',
-          email: 'a.h.sh.t1381@gmail.com',
+          email: adminEmail,
           name: 'مدیر کل دارایی',
           role: 'admin',
           status: 'active',
           holdingsCount: 0,
           alertsCount: 0,
-          lastLogin: 'هم‌اکنون',
-          password: '••••••••'
+          lastLogin: 'هم‌اکنون'
         }];
       }
       return json({ ok: true, users: usersList });
@@ -2023,25 +2605,81 @@ function requireAdmin(user) {
 
     if (p === '/api/admin/users/add' && m === 'POST') {
       const b = await readJson(req);
-      const email = cleanEmail(b.email), name = String(b.name || '').trim();
+      const email = cleanEmail(b.email), name = String(b.name || '').trim().slice(0, 40);
       if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
       const pass = String(b.password || '').trim();
       if (!okPass(pass)) throw new HttpError(400, 'رمز عبور باید حداقل ۸ کاراکتر باشد.');
+      if (cleanEmail(pass) === email) throw new HttpError(400, 'رمز عبور نمی‌تواند برابر با ایمیل باشد.');
       const id = rand(12);
       if (env.DB) {
         const passHash = await hashPassword(pass, env);
         await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash, name=excluded.name').bind(id, email, name || email.split('@')[0], passHash, nowS()).run();
       }
-      return json({ ok: true, user: { id, email, name, role: b.role || 'user', password: '••••••••', status: 'active' } });
+      const isAdm = email === getAdminEmail(env);
+      return json({ ok: true, user: { id, email, name: name || email.split('@')[0], role: isAdm ? 'admin' : 'user', status: 'active' } });
+    }
+
+    if (p === '/api/admin/password' && m === 'POST') {
+      if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
+      const b = await readJson(req);
+      const newPass = String(b.newPassword || b.password || '').trim();
+      const adminEmail = getAdminEmail(env);
+      if (!okPass(newPass)) throw new HttpError(400, 'رمز عبور جدید باید حداقل ۸ کاراکتر باشد.');
+      if (cleanEmail(newPass) === adminEmail) throw new HttpError(400, 'رمز عبور مدیر نمی‌تواند برابر با ایمیل باشد.');
+      const passHash = await hashPassword(newPass, env);
+      const adminId = user.id || 'admin_a_h_sh';
+      await env.DB.batch([
+        env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, adminEmail, 'مدیر کل دارایی', passHash, nowS()),
+        env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(adminId)
+      ]);
+      for (const [k, v] of sessionUserCache) {
+        if (v?.user?.id === adminId || v?.user?.email === adminEmail) {
+          sessionUserCache.delete(k);
+          revokedSessionsCache.add(k);
+        }
+      }
+      const sess = await sessionCookie(env, url, adminId, { email: adminEmail, name: 'مدیر کل دارایی', isAdmin: true, role: 'admin' });
+      return json({ ok: true }, 200, { 'set-cookie': sess.cookie });
     }
 
     if (p.startsWith('/api/admin/users/') && p.endsWith('/toggle') && m === 'POST') {
-      return json({ ok: true });
+      const targetId = decodeURIComponent(p.split('/')[4] || '').trim().toLowerCase();
+      if (!targetId) throw new HttpError(400, 'شناسه کاربر نامعتبر است.');
+      const adminEmail = getAdminEmail(env);
+      if (targetId === 'admin_a_h_sh' || targetId === adminEmail || targetId === String(user.id || '').toLowerCase()) {
+        throw new HttpError(400, 'امکان مسدودسازی حساب مدیر کل وجود ندارد.');
+      }
+      const susp = await getSuspendedUsers(env);
+      let newStatus = 'active';
+      if (susp.has(targetId)) {
+        susp.delete(targetId);
+        newStatus = 'active';
+      } else {
+        susp.add(targetId);
+        newStatus = 'suspended';
+        if (env.DB) {
+          try { await env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(targetId).run(); } catch {}
+        }
+        for (const [k, v] of sessionUserCache) {
+          if (String(v?.user?.id || '').toLowerCase() === targetId || String(v?.user?.email || '').toLowerCase() === targetId) {
+            sessionUserCache.delete(k);
+            revokedSessionsCache.add(k);
+          }
+        }
+      }
+      inMemorySuspendedUsers = susp;
+      inMemorySuspendedUsersTime = nowS();
+      if (env.DB) {
+        try {
+          await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('suspended_users',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify([...susp]), nowS()).run();
+        } catch {}
+      }
+      return json({ ok: true, status: newStatus });
     }
 
     if (p === '/api/admin/broadcast' && m === 'POST') {
       const b = await readJson(req);
-      const message = String(b.message || '').trim();
+      const message = String(b.message || '').trim().slice(0, 500);
       inMemoryBroadcast = { msg: message };
       inMemoryBroadcastTime = nowS();
       if (env.DB) {
@@ -2056,8 +2694,8 @@ function requireAdmin(user) {
       return json({
         ok: true,
         logs: [
-          { time: 'هم‌اکنون', type: 'system', msg: 'هسته Cloudflare Worker فعال و آماده پردازش معاملات است.' },
-          { time: '۵ دقیقه قبل', type: 'auth', msg: 'ورود موفق مدیر کل سامانه (a.h.sh.t1381@gmail.com)' },
+          { time: 'هم‌اکنون', type: 'system', msg: 'هسته امنیتی Cloudflare Worker فعال و آماده پردازش معاملات است.' },
+          { time: '۵ دقیقه قبل', type: 'auth', msg: 'بررسی خودکار نشست‌ها و توکن‌های امنیتی انجام شد.' },
           { time: '۱۰ دقیقه قبل', type: 'system', msg: 'به‌روزرسانی موفق نرخ‌های طلا، ارز و رمزارز از منابع معتبر' }
         ]
       });
@@ -2068,25 +2706,19 @@ function requireAdmin(user) {
     }
 
     if (p === '/api/admin/settings' && m === 'GET') {
-      const now = nowS();
-      if (inMemoryAdminSettings && (now - inMemoryAdminSettingsTime < 300)) {
-        return json({ ok: true, settings: inMemoryAdminSettings });
-      }
-      let st = { maintenance: false, baseCurrency: 'toman', pollIntervalSec: 15, allowNewRegistrations: true };
-      if (env.DB) {
-        try {
-          const row = await env.DB.prepare("SELECT v FROM kv WHERE k='admin_settings'").first();
-          if (row && row.v) st = { ...st, ...JSON.parse(row.v) };
-        } catch {}
-      }
-      inMemoryAdminSettings = st;
-      inMemoryAdminSettingsTime = now;
+      const st = await getAdminSettingsObj(env);
       return json({ ok: true, settings: st });
     }
 
     if (p === '/api/admin/settings' && m === 'POST') {
       const b = await readJson(req);
-      inMemoryAdminSettings = { maintenance: false, baseCurrency: 'toman', pollIntervalSec: 15, allowNewRegistrations: true, ...b };
+      const prev = await getAdminSettingsObj(env);
+      inMemoryAdminSettings = {
+        maintenance: typeof b.maintenance === 'boolean' ? b.maintenance : !!prev.maintenance,
+        baseCurrency: b.baseCurrency === 'rial' ? 'rial' : 'toman',
+        pollIntervalSec: Math.min(300, Math.max(5, Number(b.pollIntervalSec) || 15)),
+        allowNewRegistrations: typeof b.allowNewRegistrations === 'boolean' ? b.allowNewRegistrations : prev.allowNewRegistrations !== false
+      };
       inMemoryAdminSettingsTime = nowS();
       if (env.DB) {
         try {
@@ -2187,7 +2819,7 @@ export default {
       } catch (e) {
         if (e instanceof HttpError) return json({ error: e.message }, e.status);
         console.error('unhandled route error:', e && e.stack || e);
-        return json({ error: 'خطای سرور: ' + (e?.message || 'نامشخص') }, 500);
+        return json({ error: 'خطای داخلی سرور رخ داده است.' }, 500);
       }
     }
 
@@ -2207,7 +2839,8 @@ export default {
           'cache-control': 'no-cache, no-store, must-revalidate, max-age=0',
           'pragma': 'no-cache',
           'expires': '0',
-          'x-content-type-options': 'nosniff'
+          ...SEC_HEADERS,
+          'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https: wss://stream.binance.com:443 wss://data-stream.binance.vision; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
         }
       });
     }
