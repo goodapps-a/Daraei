@@ -5852,7 +5852,7 @@ function buildCleanUserState(u,prevPrefs={}){
     filter:'all',
     query:'',
     lastSync:null,
-    user:{name:u.name||u.email.split('@')[0],email:u.email,role:u.role||(isAdm?'admin':'user'),isAdmin:isAdm,remote:true}
+    user:{name:u.name||u.email.split('@')[0],email:u.email,role:u.role||(isAdm?'admin':'user'),isAdmin:isAdm,isPrimaryAdmin:!!u.isPrimaryAdmin,adminTier:u.adminTier||(isAdm?'secondary':null),remote:true}
   };
 }
 function switchAccountContext(u){
@@ -5860,7 +5860,7 @@ function switchAccountContext(u){
   const newEmail=String(u.email).toLowerCase();
   const prevOwner=(state.ownerEmail||(state.user?.remote?state.user.email:'')||'').toLowerCase()||null;
   const isAdm=!!u.isAdmin;
-  const normalizedUser={name:u.name||u.email.split('@')[0],email:u.email,role:u.role||(isAdm?'admin':'user'),isAdmin:isAdm,remote:true};
+  const normalizedUser={name:u.name||u.email.split('@')[0],email:u.email,role:u.role||(isAdm?'admin':'user'),isAdmin:isAdm,isPrimaryAdmin:!!u.isPrimaryAdmin,adminTier:u.adminTier||(isAdm?'secondary':null),remote:true};
   if(prevOwner===newEmail){
     state.user=normalizedUser;
     state.ownerEmail=newEmail;
@@ -8371,6 +8371,25 @@ async function renderAdmin() {
     try {
       const data = await api('/api/admin/users');
       const users = data.users || [];
+      const viewerIsPrimary = Boolean(state.user && (state.user.isPrimaryAdmin || state.user.adminTier === 'primary'));
+      const renderUserRoleLabel = (u) => {
+        if (u.role !== 'admin') return 'کاربر عادی';
+        return (u.isPrimaryAdmin || u.adminTier === 'primary') ? 'مدیر اصلی' : 'ادمین ثانویه';
+      };
+      const renderUserActions = (u, h = 28, pad = '0 9px') => {
+        const isPrimaryTarget = Boolean(u.isPrimaryAdmin || u.adminTier === 'primary');
+        if (isPrimaryTarget) return '<span class="muted" style="font-size:11px">مالک سیستم</span>';
+        const toggleBtn = `<button class="btn btn-soft" data-toggle-user="${escapeHtml(u.id)}" type="button" style="height:${h}px;padding:${pad};font-size:11px;border-radius:8px">${u.status === 'active' ? 'مسدودسازی' : 'فعال‌سازی'}</button>`;
+        if (u.role === 'admin') {
+          if (!viewerIsPrimary) return '<span class="muted" style="font-size:11px">حساب ارشد</span>';
+          if (u.envPinned) return '<span class="muted" style="font-size:11px">ادمین محیطی</span>';
+          return `<button class="btn btn-soft" data-role-user="${escapeHtml(u.id)}" data-next-role="user" type="button" style="height:${h}px;padding:${pad};font-size:11px;border-radius:8px;margin-left:4px">لغو ادمین</button>${toggleBtn}`;
+        }
+        const promoteBtn = (viewerIsPrimary && u.status === 'active')
+          ? `<button class="btn btn-soft" data-role-user="${escapeHtml(u.id)}" data-next-role="admin" type="button" style="height:${h}px;padding:${pad};font-size:11px;border-radius:8px;margin-left:4px">ارتقا به ادمین</button>`
+          : '';
+        return `${promoteBtn}${toggleBtn}`;
+      };
       container.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;gap:10px;flex-wrap:wrap">
           <div style="display:flex;align-items:center;gap:8px;flex:1;min-width:260px">
@@ -8408,16 +8427,12 @@ async function renderAdmin() {
                   <td><strong>${escapeHtml(u.name)}</strong></td>
                   <td style="direction:ltr;text-align:right">${escapeHtml(u.email)}</td>
                   <td><span class="muted" style="font-size:11px;font-weight:700">رمزنگاری‌شده (PBKDF2)</span></td>
-                  <td><span class="role-badge ${u.role === 'admin' ? 'admin' : 'user'}">${u.role === 'admin' ? 'مدیر کل' : 'کاربر عادی'}</span></td>
+                  <td><span class="role-badge ${u.role === 'admin' ? 'admin' : 'user'}">${renderUserRoleLabel(u)}</span></td>
                   <td>${fmt.format(u.holdingsCount || 0)}</td>
                   <td>${escapeHtml(u.lastLogin || 'هم‌اکنون')}</td>
                   <td><span class="status-pill ${u.status}">${u.status === 'active' ? 'فعال' : 'مسدود'}</span></td>
                   <td>
-                    ${u.role === 'admin' ? '<span class="muted" style="font-size:11px">حساب ارشد</span>' : `
-                      <button class="btn btn-soft" data-toggle-user="${escapeHtml(u.id)}" type="button" style="height:28px;padding:0 9px;font-size:11px;border-radius:8px">
-                        ${u.status === 'active' ? 'مسدودسازی' : 'فعال‌سازی'}
-                      </button>
-                    `}
+                    ${renderUserActions(u, 28, '0 9px')}
                   </td>
                 </tr>
               `).join('')}
@@ -8439,7 +8454,7 @@ async function renderAdmin() {
                     <span style="font-size:11px;color:var(--muted);direction:ltr;display:block;text-align:right">${escapeHtml(u.email)}</span>
                   </div>
                 </div>
-                <span class="role-badge ${u.role === 'admin' ? 'admin' : 'user'}">${u.role === 'admin' ? 'مدیر کل' : 'کاربر عادی'}</span>
+                <span class="role-badge ${u.role === 'admin' ? 'admin' : 'user'}">${renderUserRoleLabel(u)}</span>
               </div>
               <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 10px;background:var(--bg);border:1px solid var(--line);border-radius:10px;font-size:11px">
                 <span class="muted" style="font-weight:700">امنیت رمز:</span>
@@ -8451,11 +8466,7 @@ async function renderAdmin() {
                   <span class="status-pill ${u.status}">${u.status === 'active' ? 'فعال' : 'مسدود'}</span>
                 </div>
                 <div>
-                  ${u.role === 'admin' ? '<span class="muted" style="font-size:11px">حساب ارشد</span>' : `
-                    <button class="btn btn-soft" data-toggle-user="${escapeHtml(u.id)}" type="button" style="height:30px;padding:0 12px;font-size:11px;border-radius:8px">
-                      ${u.status === 'active' ? 'مسدودسازی' : 'فعال‌سازی'}
-                    </button>
-                  `}
+                  ${renderUserActions(u, 30, '0 12px')}
                 </div>
               </div>
             </div>
@@ -8510,7 +8521,7 @@ async function renderAdmin() {
               <label>نقش</label>
               <select id="newUserRole">
                 <option value="user">کاربر عادی</option>
-                <option value="admin">مدیر سیستم</option>
+                ${viewerIsPrimary ? '<option value="admin">ادمین ثانویه</option>' : ''}
               </select>
             </div>
             <div class="form-actions" style="margin-top:10px">
@@ -8544,6 +8555,23 @@ async function renderAdmin() {
           try {
             await api(`/api/admin/users/${encodeURIComponent(btn.dataset.toggleUser)}/toggle`, { method: 'POST' });
             toast('وضعیت کاربر تغییر کرد');
+            renderAdmin();
+          } catch (err) {
+            toast('خطا: ' + err.message);
+            btn.disabled = false;
+          }
+        };
+      });
+
+      container.querySelectorAll('[data-role-user]').forEach(btn => {
+        btn.onclick = async () => {
+          btn.disabled = true;
+          try {
+            await api(`/api/admin/users/${encodeURIComponent(btn.dataset.roleUser)}/role`, {
+              method: 'POST',
+              body: JSON.stringify({ role: btn.dataset.nextRole })
+            });
+            toast(btn.dataset.nextRole === 'admin' ? 'کاربر به ادمین ثانویه ارتقا یافت' : 'دسترسی ادمین لغو شد');
             renderAdmin();
           } catch (err) {
             toast('خطا: ' + err.message);

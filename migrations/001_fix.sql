@@ -120,11 +120,7 @@ CREATE INDEX IF NOT EXISTS idx_oauth_expires ON oauth_states(expires_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(triggered_at);
 
--- ۳. ارتقای غیرمخرب جداول قدیمی در پروداکشن بدون حذف جدول یا ستون و بدون از دست رفتن داده‌ها:
--- (در صورتی که جدول قدیمی از قبل وجود داشته باشد و فاقد این ستون‌ها باشد، دستور مربوطه را به‌صورت دستی روی D1 اجرا کنید)
--- ALTER TABLE rate_limits ADD COLUMN count INTEGER NOT NULL DEFAULT 0;
--- ALTER TABLE rate_limits ADD COLUMN reset_at INTEGER NOT NULL DEFAULT 0;
--- ALTER TABLE alert_delivery ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0;
--- ALTER TABLE alert_delivery ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0;
--- ALTER TABLE alert_state ADD COLUMN version TEXT NOT NULL DEFAULT 'legacy';
+-- ۳. مراحل بعدی مایگریشن:
+-- - برای پشتیبانی از ادمین‌های ثانویه در دیتابیس، فایل کاملاً تکرارپذیر migrations/002_admin_roles.sql را اجرا کنید.
+-- - در صورتی که دیتابیس قدیمی پروداکشن فاقد ستون‌های جدید در جداول از پیش ساخته‌شده است، فایل migrations/003_legacy_columns.sql را بررسی و تنها دستورات ستون‌های مفقود را اجرا کنید.
 

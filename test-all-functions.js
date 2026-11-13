@@ -1088,11 +1088,18 @@ test('multi-admin isolation, live admin revocation, /api/admin/password isolatio
   assert.equal(newPwLogin2.status, 200);
   const freshTok2 = (await newPwLogin2.json()).token;
 
-  // Privilege escalation protection: adding user ignores client-supplied role:'admin', normal user gets 403 on admin routes
+  // Privilege escalation protection: secondary admin cannot create an admin (403); primary creating regular user stays role:'user'
+  const secEscalateRes = await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: freshTok2,
+    body: { email: 'escalate@example.com', name: 'Blocked Admin', password: 'MemberPass!123', role: 'admin' }
+  });
+  assert.equal(secEscalateRes.status, 403);
+
   const addUserRes = await callApi('/api/admin/users/add', {
     method: 'POST',
     token: j1.token,
-    body: { email: normalEmail, name: 'Regular Member', password: 'MemberPass!123', role: 'admin' }
+    body: { email: normalEmail, name: 'Regular Member', password: 'MemberPass!123', role: 'user' }
   });
   assert.equal(addUserRes.status, 200);
   const addUserJson = await addUserRes.json();
@@ -1209,5 +1216,252 @@ test('EXPLAIN QUERY PLAN verifies new expiration cleanup indexes avoid full tabl
 
   assert.match(explain('SELECT k FROM rate_limits WHERE reset_at > 0 AND reset_at < ?'), /USING (?:COVERING )?INDEX idx_rate_limits_reset/);
   assert.doesNotMatch(explain('SELECT k FROM rate_limits WHERE reset_at > 0 AND reset_at < ?'), /\bSCAN\b/);
+
+  assert.match(explain('SELECT user_id FROM admin_roles WHERE email = ?'), /USING (?:COVERING )?INDEX idx_admin_roles_email/);
+  assert.doesNotMatch(explain('SELECT user_id FROM admin_roles WHERE email = ?'), /\bSCAN\b/);
 });
+
+test('DB-backed secondary admin lifecycle: promotion, RBAC limits, live revocation, suspension, and personal data preservation', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+
+  const secret = 'test-auth-secret-key-minimum-32-chars!!';
+  const primaryEmail = 'owner@example.com';
+  const secEmail = 'helper@example.com';
+  const sec2Email = 'helper2@example.com';
+  const env = {
+    DB,
+    ADMIN_EMAIL: primaryEmail,
+    ADMIN_PASSWORD: 'OwnerMasterPassword!1',
+    AUTH_SECRET: secret
+  };
+
+  const callApi = (path, { method = 'GET', body, token } = {}, customEnv = env) =>
+    worker.fetch(
+      new Request(`https://darayi.example${path}`, {
+        method,
+        headers: {
+          origin: 'https://darayi.example',
+          ...(body ? { 'content-type': 'application/json' } : {}),
+          'x-requested-with': 'XMLHttpRequest',
+          ...(token ? { authorization: `Bearer ${token}` } : {})
+        },
+        ...(body ? { body: JSON.stringify(body) } : {})
+      }),
+      customEnv
+    );
+
+  // 1. Primary Admin logs in and gets isPrimaryAdmin: true
+  const pLogin = await (await callApi('/api/auth/login', { method: 'POST', body: { email: primaryEmail, password: 'OwnerMasterPassword!1' } })).json();
+  assert.equal(pLogin.user.isAdmin, true);
+  assert.equal(pLogin.user.isPrimaryAdmin, true);
+  assert.equal(pLogin.user.adminTier, 'primary');
+
+  // 2. Primary creates a normal user and a DB-backed secondary admin
+  const createNormal = await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: pLogin.token,
+    body: { email: secEmail, name: 'Helper User', password: 'HelperPass!123', role: 'user' }
+  });
+  assert.equal(createNormal.status, 200);
+  const helperId = (await createNormal.json()).user.id;
+
+  const createSec2 = await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: pLogin.token,
+    body: { email: sec2Email, name: 'Second Helper', password: 'Helper2Pass!123', role: 'admin' }
+  });
+  assert.equal(createSec2.status, 200);
+  const sec2Json = await createSec2.json();
+  assert.equal(sec2Json.user.role, 'admin');
+  assert.equal(sec2Json.user.adminTier, 'secondary');
+  assert.equal(sec2Json.user.isPrimaryAdmin, false);
+
+  // 3. Helper saves personal user_data + alert before promotion
+  const helperLogin = await (await callApi('/api/auth/login', { method: 'POST', body: { email: secEmail, password: 'HelperPass!123' } })).json();
+  assert.equal(helperLogin.user.isAdmin, false);
+  const saveHelperData = await callApi('/api/me/data', {
+    method: 'PUT',
+    token: helperLogin.token,
+    body: {
+      holdings: [{ id: 'h1', assetId: 'usd', side: 'buy', qty: 50, buyPrice: 80000, wallet: 'اصلی', date: '1403/01/01', createdAt: 1 }],
+      watch: ['usd', 'btc'],
+      featured: ['usd'],
+      alerts: [{ id: 'al_h1', assetId: 'usd', direction: 'above', price: 95000, currency: 'IRT' }],
+      settings: { theme: 'light', unit: 'toman', privacy: false, filter: 'all' }
+    }
+  });
+  assert.equal(saveHelperData.status, 200);
+
+  // Regular user cannot promote anyone (403)
+  const nonAdminPromote = await callApi(`/api/admin/users/${helperId}/role`, {
+    method: 'POST',
+    token: helperLogin.token,
+    body: { role: 'admin' }
+  });
+  assert.equal(nonAdminPromote.status, 403);
+
+  // 4. Primary promotes existing helper user to Secondary Admin without touching env vars
+  const promoteRes = await callApi(`/api/admin/users/${helperId}/role`, {
+    method: 'POST',
+    token: pLogin.token,
+    body: { role: 'admin' }
+  });
+  assert.equal(promoteRes.status, 200);
+  const promoteJson = await promoteRes.json();
+  assert.equal(promoteJson.user.role, 'admin');
+  assert.equal(promoteJson.user.adminTier, 'secondary');
+
+  // Helper's existing active token IMMEDIATELY reflects secondary admin role on /api/me and /api/admin/*
+  const helperMeAfterPromote = await (await callApi('/api/me', { token: helperLogin.token })).json();
+  assert.equal(helperMeAfterPromote.user.isAdmin, true);
+  assert.equal(helperMeAfterPromote.user.isPrimaryAdmin, false);
+  assert.equal(helperMeAfterPromote.user.adminTier, 'secondary');
+  assert.equal((await callApi('/api/admin/overview', { token: helperLogin.token })).status, 200);
+
+  // Secondary admin CANNOT login with Primary's ADMIN_PASSWORD
+  const masterPwBypass = await callApi('/api/auth/login', {
+    method: 'POST',
+    body: { email: secEmail, password: 'OwnerMasterPassword!1' }
+  });
+  assert.equal(masterPwBypass.status, 401);
+
+  // 5. Secondary admin RBAC protections: cannot promote/demote, cannot create admin, cannot suspend Primary or another secondary admin, cannot delete Primary account
+  assert.equal((await callApi(`/api/admin/users/${sec2Json.user.id}/role`, { method: 'POST', token: helperLogin.token, body: { role: 'user' } })).status, 403);
+  assert.equal((await callApi('/api/admin/users/add', { method: 'POST', token: helperLogin.token, body: { email: 'sneaky@example.com', name: 'Sneaky', password: 'Password!123', role: 'admin' } })).status, 403);
+  assert.equal((await callApi(`/api/admin/users/${pLogin.user.id}/toggle`, { method: 'POST', token: helperLogin.token })).status, 400);
+  assert.equal((await callApi(`/api/admin/users/${sec2Json.user.id}/toggle`, { method: 'POST', token: helperLogin.token })).status, 403);
+  assert.equal((await callApi(`/api/admin/users/${pLogin.user.id}/role`, { method: 'POST', token: pLogin.token, body: { role: 'user' } })).status, 400);
+  assert.equal((await callApi('/api/me', { method: 'DELETE', token: pLogin.token })).status, 403);
+
+  // 6. Primary demotes Helper back to user -> active session IMMEDIATELY loses admin access & preserves personal data/alerts!
+  const demoteRes = await callApi(`/api/admin/users/${helperId}/role`, {
+    method: 'POST',
+    token: pLogin.token,
+    body: { role: 'user' }
+  });
+  assert.equal(demoteRes.status, 200);
+  assert.equal((await callApi('/api/admin/overview', { token: helperLogin.token })).status, 403);
+  const helperMeAfterDemote = await (await callApi('/api/me', { token: helperLogin.token })).json();
+  assert.equal(helperMeAfterDemote.user.isAdmin, false);
+  assert.equal(helperMeAfterDemote.user.role, 'user');
+
+  const helperPersonalAfterDemote = await (await callApi('/api/me/data?fresh=1', { token: helperLogin.token })).json();
+  assert.equal(helperPersonalAfterDemote.exists, true);
+  assert.equal(helperPersonalAfterDemote.data.holdings.length, 1);
+  assert.equal(helperPersonalAfterDemote.data.alerts.length, 1);
+
+  // 7. Primary suspends sec2, verifies session rejected, unsuspends, and verifies sec2 keeps admin/user role & personal data intact
+  await callApi('/api/me/data', {
+    method: 'PUT',
+    token: (await (await callApi('/api/auth/login', { method: 'POST', body: { email: sec2Email, password: 'Helper2Pass!123' } })).json()).token,
+    body: { holdings: [{ id: 's2h', assetId: 'btc', side: 'buy', qty: 1, buyPrice: 90000, wallet: 'اصلی', date: '1403/01/01', createdAt: 1 }], watch: ['btc'], featured: ['btc'], alerts: [], settings: { theme: 'light', unit: 'toman', privacy: false, filter: 'all' } }
+  });
+  assert.equal((await callApi(`/api/admin/users/${sec2Json.user.id}/toggle`, { method: 'POST', token: pLogin.token })).status, 200);
+  const sec2SuspendedLogin = await callApi('/api/auth/login', { method: 'POST', body: { email: sec2Email, password: 'Helper2Pass!123' } });
+  assert.equal(sec2SuspendedLogin.status, 403);
+  // Unsuspend
+  assert.equal((await callApi(`/api/admin/users/${sec2Json.user.id}/toggle`, { method: 'POST', token: pLogin.token })).status, 200);
+  const sec2BackLogin = await (await callApi('/api/auth/login', { method: 'POST', body: { email: sec2Email, password: 'Helper2Pass!123' } })).json();
+  const sec2Data = await (await callApi('/api/me/data?fresh=1', { token: sec2BackLogin.token })).json();
+  assert.equal(sec2Data.exists, true);
+  assert.equal(sec2Data.data.holdings.length, 1);
+});
+
+test('fail-closed auth when DB binding is missing even with warm sessionUserCache', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+  const env = { DB, AUTH_SECRET: 'test-auth-secret-key-minimum-32-chars!!' };
+  const passHash = await hashPassword('FailClosed!123', env);
+  db.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').run('u_fc', 'fc@example.com', 'FC', passHash, 1000);
+
+  const loginRes = await worker.fetch(
+    new Request('https://darayi.example/api/auth/login', {
+      method: 'POST',
+      headers: { origin: 'https://darayi.example', 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+      body: JSON.stringify({ email: 'fc@example.com', password: 'FailClosed!123' })
+    }),
+    env
+  );
+  const token = (await loginRes.json()).token;
+  assert.ok(token);
+
+  // Even with warm sessionUserCache on same isolate, missing env.DB MUST fail closed (401 on /api/me/data, null on /api/me)
+  const noDbData = await worker.fetch(
+    new Request('https://darayi.example/api/me/data', { headers: { authorization: `Bearer ${token}` } }),
+    { AUTH_SECRET: env.AUTH_SECRET }
+  );
+  assert.equal(noDbData.status, 401);
+
+  const noDbMe = await (
+    await worker.fetch(
+      new Request('https://darayi.example/api/me', { headers: { authorization: `Bearer ${token}` } }),
+      { AUTH_SECRET: env.AUTH_SECRET }
+    )
+  ).json();
+  assert.equal(noDbMe.user, null);
+});
+
+test('migrations/002_admin_roles.sql is idempotent and 003_legacy_columns.sql + checkAlerts/refreshMeta handle legacy pre-migration schemas cleanly', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./migrations/001_fix.sql', import.meta.url), 'utf8'));
+  const mig002 = fs.readFileSync(new URL('./migrations/002_admin_roles.sql', import.meta.url), 'utf8');
+  assert.doesNotThrow(() => db.exec(mig002));
+  assert.doesNotThrow(() => db.exec(mig002)); // Idempotent repeat execution
+
+  // Legacy DB missing newer columns in rate_limits, sessions, alert_delivery, alert_state, alert_units
+  const legacyDb = new DatabaseSync(':memory:');
+  const now = Math.floor(Date.now() / 1000);
+  legacyDb.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL DEFAULT '', password_hash TEXT, google_sub TEXT UNIQUE, created_at INTEGER NOT NULL);
+    CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE otp_codes (email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(email, purpose));
+    CREATE TABLE oauth_states (state_hash TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE rate_limits (k TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0, win INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE user_data (user_id TEXT PRIMARY KEY, holdings TEXT NOT NULL DEFAULT '[]', watch TEXT NOT NULL DEFAULT '[]', featured TEXT NOT NULL DEFAULT '[]', settings TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL);
+    CREATE TABLE alerts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, direction TEXT NOT NULL, price REAL NOT NULL, triggered_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+    CREATE TABLE alert_units (alert_id TEXT PRIMARY KEY);
+    CREATE TABLE alert_state (alert_id TEXT PRIMARY KEY);
+    CREATE TABLE alert_delivery (alert_id TEXT PRIMARY KEY);
+    CREATE TABLE price_history_v2 (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY (asset_id, t));
+  `);
+
+  // Run 003_legacy_columns.sql to upgrade old columns without losing rows
+  legacyDb.prepare('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?)').run('u_leg', 'leg@example.com', 'Legacy', now);
+  legacyDb.prepare('INSERT INTO rate_limits(k,n,win) VALUES(?,?,?)').run('old_k', 3, now - 100);
+  const mig003 = fs.readFileSync(new URL('./migrations/003_legacy_columns.sql', import.meta.url), 'utf8');
+  assert.doesNotThrow(() => legacyDb.exec(mig003));
+  assert.equal(legacyDb.prepare("SELECT n FROM rate_limits WHERE k='old_k'").get().n, 3);
+
+  // Also test runtime self-heal in checkAlerts & refreshMeta on an unmigrated legacy DB
+  __resetWorkerStateForTests();
+  const unmigratedDb = new DatabaseSync(':memory:');
+  unmigratedDb.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+    CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE otp_codes (email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(email, purpose));
+    CREATE TABLE oauth_states (state_hash TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE rate_limits (k TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0, win INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE user_data (user_id TEXT PRIMARY KEY, holdings TEXT NOT NULL DEFAULT '[]', watch TEXT NOT NULL DEFAULT '[]', featured TEXT NOT NULL DEFAULT '[]', settings TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL);
+    CREATE TABLE alerts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, direction TEXT NOT NULL, price REAL NOT NULL, triggered_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+    CREATE TABLE price_history_v2 (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY (asset_id, t));
+  `);
+  unmigratedDb.prepare('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?)').run('u_unmig', 'unmig@example.com', 'Unmig', now);
+  unmigratedDb.prepare("INSERT INTO alerts(id,user_id,asset_id,direction,price,created_at) VALUES('u_unmig:al1','u_unmig','usd','above',80000,?)").run(now);
+  const { DB } = createSqliteD1Wrapper(unmigratedDb);
+
+  const sentCount = await checkAlerts({ DB }, { usd: { price: 85000, unit: 'IRT', kind: 'domestic', t: now, receivedAt: now, sourceTimestamp: now } });
+  assert.equal(sentCount, 1);
+  await refreshMeta({ DB, PRICE_HISTORY_DAYS: 7 });
+  const cols = unmigratedDb.prepare('PRAGMA table_info(rate_limits)').all().map((c) => c.name);
+  assert.ok(cols.includes('reset_at'));
+});
+
 

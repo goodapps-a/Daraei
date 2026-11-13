@@ -1567,6 +1567,21 @@ let systemUsers: StoredUser[] = [
   { id: 'u_5', name: 'مهدی زرگر', email: 'mehdi.gold@gmail.com', role: 'user', status: 'active', registeredAt: '1403/10/12', holdingsCount: 8, alertsCount: 1, lastLogin: '۱ هفته قبل', passwordHash: '' }
 ];
 
+function getAdminRoleMeta(email: string, storedRole?: string) {
+  const norm = cleanEmail(email);
+  const primary = getPrimaryAdminEmail(process.env);
+  const isEnvAdm = Boolean(norm && isEmailAdmin(norm));
+  const isPrimaryAdmin = Boolean(norm && primary && norm === primary);
+  const isAdmin = isPrimaryAdmin || isEnvAdm || storedRole === 'admin';
+  return {
+    isAdmin,
+    isPrimaryAdmin,
+    adminTier: isAdmin ? (isPrimaryAdmin ? 'primary' : 'secondary') : null,
+    envPinned: isPrimaryAdmin || isEnvAdm,
+    role: (isAdmin ? 'admin' : 'user') as 'admin' | 'user'
+  };
+}
+
 function loadAuthSessionFromDisk() {
   try {
     if (fs.existsSync(AUTH_SESSION_FILE)) {
@@ -1580,21 +1595,23 @@ function loadAuthSessionFromDisk() {
             if (!savedUser || !savedUser.email) continue;
             const norm = String(savedUser.email).toLowerCase();
             const existing = systemUsers.find(u => u.email.toLowerCase() === norm);
+            const resolvedRole = (isEmailAdmin(norm) || savedUser.role === 'admin') ? 'admin' : 'user';
+            const isPrim = norm === getPrimaryAdminEmail(process.env);
             if (existing) {
               if (savedUser.passwordHash && String(savedUser.passwordHash).startsWith('pbkdf2$')) {
                 existing.passwordHash = savedUser.passwordHash;
               }
-              if (savedUser.status === 'suspended' && !isEmailAdmin(norm)) {
+              if (savedUser.status === 'suspended' && !isPrim && !isEmailAdmin(norm)) {
                 existing.status = 'suspended';
               }
-              existing.role = isEmailAdmin(norm) ? 'admin' : 'user';
+              existing.role = resolvedRole;
             } else if (savedUser.passwordHash && String(savedUser.passwordHash).startsWith('pbkdf2$')) {
               systemUsers.push({
                 id: String(savedUser.id || 'u_' + Date.now()),
                 name: String(savedUser.name || norm.split('@')[0]).slice(0, 80),
                 email: norm,
-                role: isEmailAdmin(norm) ? 'admin' : 'user',
-                status: savedUser.status === 'suspended' && !isEmailAdmin(norm) ? 'suspended' : 'active',
+                role: resolvedRole,
+                status: savedUser.status === 'suspended' && !isPrim && !isEmailAdmin(norm) ? 'suspended' : 'active',
                 registeredAt: String(savedUser.registeredAt || 'هم‌اکنون'),
                 holdingsCount: Number(savedUser.holdingsCount) || 0,
                 alertsCount: Number(savedUser.alertsCount) || 0,
@@ -1642,14 +1659,14 @@ function createSessionForUser(res: express.Response, req: express.Request, user:
   const sidHash = sha256Hex(baseSid);
   const ttlSec = 60 * 60 * 24 * 14;
   const nowSec = Math.floor(Date.now() / 1000);
-  const isAdmin = isEmailAdmin(user.email);
+  const meta = getAdminRoleMeta(user.email, user.role);
   const sessionRec: SessionRecord = {
     sidHash,
     userId: user.id,
     email: user.email.toLowerCase(),
     name: user.name,
-    role: isAdmin ? 'admin' : 'user',
-    isAdmin,
+    role: meta.role,
+    isAdmin: meta.isAdmin,
     expiresAt: nowSec + ttlSec
   };
   activeSessions.set(sidHash, sessionRec);
@@ -1663,8 +1680,10 @@ function createSessionForUser(res: express.Response, req: express.Request, user:
     id: user.id,
     name: user.name,
     email: user.email.toLowerCase(),
-    role: sessionRec.role,
-    isAdmin
+    role: meta.role,
+    isAdmin: meta.isAdmin,
+    isPrimaryAdmin: meta.isPrimaryAdmin,
+    adminTier: meta.adminTier
   };
 }
 
@@ -1724,13 +1743,15 @@ function resolveReqUser(req: express.Request) {
     return null;
   }
 
-  const liveAdmin = isEmailAdmin(sess.email);
+  const meta = getAdminRoleMeta(sess.email, usr?.role);
   return {
     id: sess.userId,
     name: usr?.name || sess.name,
     email: sess.email,
-    role: liveAdmin ? 'admin' : 'user',
-    isAdmin: liveAdmin
+    role: meta.role,
+    isAdmin: meta.isAdmin,
+    isPrimaryAdmin: meta.isPrimaryAdmin,
+    adminTier: meta.adminTier
   };
 }
 
@@ -2035,11 +2056,15 @@ app.post('/api/admin/feeds/:id/test', async (req, res) => {
 });
 
 function sanitizeUserForAdmin(u: StoredUser) {
+  const meta = getAdminRoleMeta(u.email, u.role);
   return {
     id: u.id,
     name: u.name,
     email: u.email,
-    role: isEmailAdmin(u.email) ? 'admin' : 'user',
+    role: meta.role,
+    isPrimaryAdmin: meta.isPrimaryAdmin,
+    adminTier: meta.adminTier,
+    envPinned: meta.envPinned,
     status: u.status,
     registeredAt: u.registeredAt,
     holdingsCount: u.holdingsCount,
@@ -2056,8 +2081,12 @@ app.post('/api/admin/users/:id/toggle', (req, res) => {
   const reqAdmin = resolveReqUser(req);
   const u = systemUsers.find(x => x.id === req.params.id);
   if (!u) return res.status(404).json({ error: 'کاربر یافت نشد.' });
-  if (isEmailAdmin(u.email) || (reqAdmin && u.id === reqAdmin.id)) {
-    return res.status(400).json({ error: 'امکان تغییر وضعیت مدیر کل سیستم وجود ندارد.' });
+  const meta = getAdminRoleMeta(u.email, u.role);
+  if (meta.isPrimaryAdmin || meta.envPinned || (reqAdmin && u.id === reqAdmin.id)) {
+    return res.status(400).json({ error: 'امکان تغییر وضعیت مدیر اصلی یا ادمین‌های ثابت وجود ندارد.' });
+  }
+  if (meta.isAdmin && !reqAdmin?.isPrimaryAdmin) {
+    return res.status(403).json({ error: 'فقط مدیر اصلی سیستم می‌تواند وضعیت ادمین‌های ثانویه را تغییر دهد.' });
   }
   u.status = u.status === 'active' ? 'suspended' : 'active';
   if (u.status === 'suspended') {
@@ -2069,6 +2098,43 @@ app.post('/api/admin/users/:id/toggle', (req, res) => {
     time: 'هم‌اکنون',
     type: 'system',
     msg: `وضعیت کاربر ${u.email} به ${u.status === 'active' ? 'فعال' : 'مسدود'} تغییر یافت.`
+  });
+  res.json({ ok: true, user: sanitizeUserForAdmin(u) });
+});
+
+app.post('/api/admin/users/:id/role', (req, res) => {
+  const reqAdmin = resolveReqUser(req);
+  if (!reqAdmin || !reqAdmin.isPrimaryAdmin) {
+    return res.status(403).json({ error: 'تغییر سطح دسترسی ادمین فقط توسط مدیر اصلی سیستم مجاز است.' });
+  }
+  const u = systemUsers.find(x => x.id === req.params.id || x.email.toLowerCase() === decodeURIComponent(req.params.id).toLowerCase());
+  if (!u) return res.status(404).json({ error: 'کاربر یافت نشد.' });
+  const nextRole = req.body?.role === 'admin' ? 'admin' : req.body?.role === 'user' ? 'user' : '';
+  if (!nextRole) return res.status(400).json({ error: 'نقش درخواستی نامعتبر است.' });
+  const meta = getAdminRoleMeta(u.email, u.role);
+  if (meta.isPrimaryAdmin || u.id === reqAdmin.id) {
+    return res.status(400).json({ error: 'نقش مدیر اصلی سیستم قابل تغییر نیست.' });
+  }
+  if (meta.envPinned && nextRole === 'user') {
+    return res.status(400).json({ error: 'این ادمین از طریق تنظیمات محیطی سرور تعریف شده است و از پنل قابل لغو نیست.' });
+  }
+  if (nextRole === 'admin' && u.status === 'suspended') {
+    return res.status(400).json({ error: 'ابتدا حساب کاربر را از حالت مسدود خارج کنید.' });
+  }
+  u.role = nextRole;
+  const normEmail = cleanEmail(u.email);
+  for (const sess of activeSessions.values()) {
+    if (sess.email === normEmail) {
+      sess.role = nextRole;
+      sess.isAdmin = nextRole === 'admin';
+    }
+  }
+  saveAuthSessionToDisk();
+  systemAuditLogs.unshift({
+    id: Date.now(),
+    time: 'هم‌اکنون',
+    type: 'admin',
+    msg: `نقش کاربر ${u.email} به ${nextRole === 'admin' ? 'ادمین ثانویه' : 'کاربر عادی'} تغییر یافت.`
   });
   res.json({ ok: true, user: sanitizeUserForAdmin(u) });
 });
@@ -2085,11 +2151,16 @@ app.post('/api/admin/logs/clear', (req, res) => {
 });
 
 app.post('/api/admin/users/add', (req, res) => {
-  const { name, email, password } = req.body || {};
+  const reqAdmin = resolveReqUser(req);
+  const { name, email, password, role } = req.body || {};
   if (!name || !email) return res.status(400).json({ error: 'نام و ایمیل الزامی است.' });
   const normalizedEmail = cleanEmail(email);
   if (!isEmail(normalizedEmail) || normalizedEmail.length > 120) {
     return res.status(400).json({ error: 'ایمیل معتبر نیست.' });
+  }
+  const requestedAdmin = role === 'admin';
+  if (requestedAdmin && !reqAdmin?.isPrimaryAdmin) {
+    return res.status(403).json({ error: 'فقط مدیر اصلی سیستم می‌تواند کاربر با نقش ادمین ایجاد کند.' });
   }
   if (systemUsers.some(u => u.email.toLowerCase() === normalizedEmail)) {
     return res.status(409).json({ error: 'این ایمیل قبلاً ثبت شده است.' });
@@ -2105,7 +2176,7 @@ app.post('/api/admin/users/add', (req, res) => {
     id: 'u_' + Date.now(),
     name: String(name).trim().slice(0, 80),
     email: normalizedEmail,
-    role: isEmailAdmin(normalizedEmail) ? 'admin' : 'user',
+    role: (requestedAdmin || isEmailAdmin(normalizedEmail)) ? 'admin' : 'user',
     status: 'active',
     registeredAt: 'هم‌اکنون',
     holdingsCount: 0,
@@ -2126,7 +2197,7 @@ app.post('/api/admin/users/add', (req, res) => {
 
 app.post('/api/admin/password', (req, res) => {
   const reqAdmin = resolveReqUser(req);
-  if (!reqAdmin || !isEmailAdmin(reqAdmin.email)) {
+  if (!reqAdmin || !reqAdmin.isAdmin) {
     return res.status(403).json({ error: 'دسترسی فقط برای مدیر سیستم مجاز است.' });
   }
   const newPassword = String(req.body?.newPassword || req.body?.password || '').trim();

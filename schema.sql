@@ -117,3 +117,12 @@ CREATE TABLE IF NOT EXISTS price_history_v2 (
   PRIMARY KEY (asset_id, t)
 );
 CREATE INDEX IF NOT EXISTS idx_ph2_t ON price_history_v2(t);
+
+CREATE TABLE IF NOT EXISTS admin_roles (
+  user_id TEXT PRIMARY KEY,
+  email TEXT NOT NULL,
+  role TEXT NOT NULL DEFAULT 'secondary_admin',
+  granted_by TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_admin_roles_email ON admin_roles(email);
