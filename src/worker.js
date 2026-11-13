@@ -249,8 +249,6 @@ const IRAN_MARKET_MAP = {
 for (const id of Object.keys(DOMESTIC_EXTRA)) NON_CRYPTO.add(id);
 for (const id of Object.keys(IRAN_MARKET_MAP)) NON_CRYPTO.add(id);
 
-const STALE_S = 12 * 3600; // نرخ‌های داخلی تا ۱۲ ساعت (به‌ویژه شب‌ها و تعطیلات بازار تهران) معتبر و استوار می‌مانند
-const CRYPTO_STALE_S = 180;
 const SESSION_S = 30 * 86400;
 const RANGES = { '1H': 3600, '1D': 86400, '3D': 259200, '1W': 604800, '1M': 2592000, '1Y': 31536000 };
 
@@ -404,8 +402,8 @@ function getConfiguredAdminPassword(env) {
   }
   return null;
 }
-const SESSION_CACHE_TTL_S = 60;
-const SUSPENDED_CACHE_TTL_S = 60;
+const SESSION_CACHE_TTL_S = 30;
+const SUSPENDED_CACHE_TTL_S = 30;
 const REVOKED_CACHE_TTL_S = 60;
 const revokedSessionsCache = new Map();
 function markSessionRevoked(h) {
@@ -499,71 +497,103 @@ async function currentUser(req, env) {
   if (!rawToken) return null;
   const now = nowS();
 
+  // ۱. اعتبارسنجی رمزنگاری‌شده توکن الزامی است (هیچ توکن بدون امضای معتبر یا منقضی‌شده پذیرفته نمی‌شود)
   const verified = await verifySignedToken(env, rawToken);
-  const baseSid = verified ? verified.sid : rawToken.split('.')[0];
-  if (!baseSid) return null;
-  const h = await sha256(baseSid);
-  if (isSessionRevoked(h)) return null;
+  if (!verified || !verified.sid || !verified.user) return null;
 
+  const h = await sha256(verified.sid);
+  const hFull = rawToken !== verified.sid ? await sha256(rawToken) : h;
+  if (isSessionRevoked(h) || isSessionRevoked(hFull)) return null;
+
+  // ۲. کش کوتاه‌مدت نشست روی همین Isolate (با بررسی وضعیت مسدودسازی کاربر)
   const cached = sessionUserCache.get(h);
   if (cached && now < cached.exp) {
-    if (await isUserSuspended(env, cached.user.id, cached.user.email)) return null;
+    if (await isUserSuspended(env, cached.user.id, cached.user.email)) {
+      sessionUserCache.delete(h);
+      markSessionRevoked(h);
+      return null;
+    }
     return cached.user;
   }
 
-  if (env.DB) {
-    try {
-      const hFull = rawToken !== baseSid ? await sha256(rawToken) : h;
-      const sRow = await env.DB.prepare('SELECT s.user_id,u.id,u.email,u.name FROM sessions s LEFT JOIN users u ON u.id=s.user_id WHERE s.id_hash IN (?,?) AND s.expires_at>? LIMIT 1').bind(h, hFull, now).first();
-      let u = (sRow && sRow.id && sRow.email) ? { id: sRow.id, email: sRow.email, name: sRow.name } : null;
-      if (!u && sRow && sRow.user_id === 'admin_root') {
-        const admEmail = getAdminEmail(env);
-        if (admEmail) {
-          u = await env.DB.prepare('SELECT id,email,name FROM users WHERE email=? LIMIT 1').bind(admEmail).first();
-          if (!u) u = { id: 'admin_root', email: admEmail, name: 'مدیر کل دارایی' };
-        }
+  // ۳. راستی‌آزمایی اجباری در D1 (Fail-closed: خطای D1 یا نبود سشن معتبر => عدم احراز هویت)
+  if (!env || !env.DB) return null;
+
+  let sRow = null;
+  let admRow = null;
+  try {
+    sRow = await env.DB.prepare(
+      'SELECT s.user_id, s.expires_at, u.id, u.email, u.name FROM sessions s LEFT JOIN users u ON u.id=s.user_id WHERE s.id_hash IN (?,?) AND s.expires_at>? LIMIT 1'
+    ).bind(h, hFull, now).first();
+
+    if (!sRow) {
+      // سشن در دیتابیس ابطال یا منقضی شده است؛ هیچ‌گونه بازگشتی به payload توکن مجاز نیست
+      markSessionRevoked(h);
+      if (hFull !== h) markSessionRevoked(hFull);
+      sessionUserCache.delete(h);
+      return null;
+    }
+
+    if (!sRow.id && sRow.user_id === 'admin_root') {
+      const admEmail = getAdminEmail(env);
+      if (admEmail && cleanEmail(verified.user.email) === admEmail) {
+        admRow = await env.DB.prepare('SELECT id,email,name FROM users WHERE email=? LIMIT 1').bind(admEmail).first();
       }
-      if (!u && verified && verified.user) {
-        const vUid = String(verified.user.id || '');
-        const vEmail = String(verified.user.email || '').toLowerCase();
-        if (vUid || vEmail) {
-          u = await env.DB.prepare('SELECT id,email,name FROM users WHERE id=? OR email=? LIMIT 1').bind(vUid, vEmail).first();
-        }
-        if (!u && vEmail) {
-          u = {
-            id: vUid || ('u_' + vEmail),
-            email: vEmail,
-            name: verified.user.name || vEmail.split('@')[0]
-          };
-        }
-      }
-      if (u) {
-        if (await isUserSuspended(env, u.id, u.email)) return null;
-        u.isAdmin = isEmailAdmin(env, u.email);
-        sessionUserCache.set(h, { user: u, exp: Math.min(now + SESSION_CACHE_TTL_S, now + SESSION_S) });
-        return u;
-      }
-    } catch {}
+    }
+  } catch (err) {
+    console.error('currentUser D1 check failed:', err?.message);
+    return null;
   }
 
-  if (verified && verified.user) {
-    if (await isUserSuspended(env, verified.user.id, verified.user.email)) return null;
-    verified.user.isAdmin = isEmailAdmin(env, verified.user.email);
-    sessionUserCache.set(h, { user: verified.user, exp: Math.min(now + SESSION_CACHE_TTL_S, now + SESSION_S) });
-    return verified.user;
+  let u = (sRow.id && sRow.email) ? { id: sRow.id, email: sRow.email, name: sRow.name } : null;
+  if (!u && sRow.user_id === 'admin_root') {
+    const admEmail = getAdminEmail(env);
+    if (admEmail && cleanEmail(verified.user.email) === admEmail) {
+      u = admRow || { id: 'admin_root', email: admEmail, name: 'مدیر کل دارایی' };
+    }
   }
-  return null;
+  if (!u) {
+    markSessionRevoked(h);
+    sessionUserCache.delete(h);
+    return null;
+  }
+
+  if (await isUserSuspended(env, u.id, u.email)) {
+    markSessionRevoked(h);
+    sessionUserCache.delete(h);
+    return null;
+  }
+
+  u.isAdmin = isEmailAdmin(env, u.email);
+  const sExp = Number(sRow.expires_at) || (now + SESSION_CACHE_TTL_S);
+  sessionUserCache.set(h, { user: u, exp: Math.min(now + SESSION_CACHE_TTL_S, sExp) });
+  return u;
 }
 async function sessionCookie(env, url, uid, userMeta = {}) {
   const { sid, token, payloadObj, exp } = await createSignedToken(env, uid, userMeta);
   const h = await sha256(sid);
-  revokedSessionsCache.delete(h);
-  sessionUserCache.set(h, { user: { id: uid, email: payloadObj.email, name: payloadObj.name, isAdmin: payloadObj.isAdmin }, exp: Math.min(nowS() + SESSION_CACHE_TTL_S, exp) });
-  if (env.DB) {
+  const created = nowS();
+  if (env && env.DB) {
     try {
-      await env.DB.prepare('INSERT OR REPLACE INTO sessions(id_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(h, uid, exp, nowS()).run();
-    } catch {}
+      await env.DB.prepare('INSERT OR REPLACE INTO sessions(id_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(h, uid, exp, created).run();
+    } catch (err) {
+      const msg = String(err?.message || '');
+      if (/has no column named created_at|no such column:\s*created_at/i.test(msg)) {
+        try { await env.DB.prepare('ALTER TABLE sessions ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0').run(); } catch {}
+        try {
+          await env.DB.prepare('INSERT OR REPLACE INTO sessions(id_hash,user_id,expires_at) VALUES(?,?,?)').bind(h, uid, exp).run();
+        } catch (err2) {
+          console.error('sessionCookie legacy D1 insert failed:', err2?.message);
+          throw new HttpError(503, 'امکان ثبت نشست در دیتابیس وجود ندارد؛ دوباره تلاش کن.');
+        }
+      } else {
+        console.error('sessionCookie D1 insert failed:', msg);
+        throw new HttpError(503, 'امکان ثبت نشست در دیتابیس وجود ندارد؛ دوباره تلاش کن.');
+      }
+    }
   }
+  revokedSessionsCache.delete(h);
+  sessionUserCache.set(h, { user: { id: uid, email: payloadObj.email, name: payloadObj.name, isAdmin: payloadObj.isAdmin }, exp: Math.min(created + SESSION_CACHE_TTL_S, exp) });
   return { cookie: `sid=${encodeURIComponent(token)}; ${cookieOpts(url, SESSION_S)}`, token };
 }
 async function upsertUser(env, { email, name, sub }) {
@@ -800,8 +830,10 @@ async function resetFinish(req, env, url) {
   const used = await env.DB.prepare("DELETE FROM otp_codes WHERE email=? AND purpose='reset_ok' AND code_hash=? RETURNING email").bind(email, row.code_hash).first();
   if (!used) throw new HttpError(400, 'این درخواست قبلاً استفاده شده است.');
   await env.DB.batch([env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(await hashPassword(b.password, env), u.id), env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(u.id), env.DB.prepare("DELETE FROM otp_codes WHERE email=? AND purpose='reset_ok'").bind(email)]);
+  const targetUidLower = String(u.id || '').toLowerCase();
   for (const [k, v] of sessionUserCache) {
-    if (v?.user?.id === u.id || v?.user?.email === email) {
+    const cu = v?.user || v?.val;
+    if (String(cu?.id || '').toLowerCase() === targetUidLower || cleanEmail(cu?.email || '') === email) {
       sessionUserCache.delete(k);
       markSessionRevoked(k);
     }
@@ -872,12 +904,45 @@ async function readJson(req) {
   try { const o = JSON.parse(text || '{}'); if (!o || typeof o !== 'object' || Array.isArray(o)) throw 0; return o; } catch { throw new HttpError(400, 'درخواست نامعتبر است.'); }
 }
 export async function loadData(env, uid, forceDb = false) {
-  if (!env.DB) return { exists: false, updatedAt: 0, data: { holdings: [], watch: [], featured: [], alerts: [], settings: {} } };
-  const now = nowS();
-  if (!forceDb) {
-    const cached = userDataCache.get(uid);
-    if (cached && now < cached.exp) return cached.val;
+  if (!env || !env.DB) {
+    throw new HttpError(503, 'دیتابیس موقتاً در دسترس نیست؛ همگام‌سازی متوقف شد.');
   }
+  const now = nowS();
+  const cached = userDataCache.get(uid);
+  if (!forceDb && cached && now < cached.exp) {
+    // در پنجره بسیار کوتاه ۵ ثانیه‌ای از کش حافظه بخوان؛ پس از آن فقط با ۱ خواندن PK روی updated_at تغییرات دستگاه‌های دیگر را بررسی کن
+    if (now - (cached.revCheckedAt || 0) < 5) {
+      return cached.val;
+    }
+    let revRow;
+    try {
+      revRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind(uid).first();
+      let resolvedTargetUid = uid;
+      if (!revRow && uid !== 'admin_root' && getAdminEmail(env)) {
+        const uRow = await env.DB.prepare('SELECT email FROM users WHERE id=?').bind(uid).first();
+        if (uRow && isEmailAdmin(env, uRow.email)) {
+          revRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind('admin_root').first();
+          if (revRow) resolvedTargetUid = 'admin_root';
+        }
+      }
+      cached.targetUid = resolvedTargetUid;
+    } catch (err) {
+      console.error('loadData revision check D1 error:', err?.message);
+      throw new HttpError(503, 'خطا در بررسی نسخه اطلاعات حساب در دیتابیس.');
+    }
+    const dbExists = Boolean(revRow);
+    const dbRev = revRow ? (Number(revRow.updated_at) || 0) : 0;
+    const cachedRev = Number(cached.val?.updatedAt) || 0;
+    // اگر از آخرین بررسی تغییر نکرده باشد و وضعیت وجودی یکسان باشد، بدون خواندن ستون‌های بزرگ و هشدارها پاسخ را برگردان
+    if (dbExists === Boolean(cached.val?.exists) && dbRev === cachedRev) {
+      cached.revCheckedAt = now;
+      cached.exp = now + 900;
+      return cached.val;
+    }
+    // در غیر این صورت (تغییر در Isolate یا دستگاه دیگر) بلافاصله کش بی‌اعتبار می‌شود
+    userDataCache.delete(uid);
+  }
+
   let usedAdminRoot = false;
   let d = null;
   try {
@@ -892,18 +957,29 @@ export async function loadData(env, uid, forceDb = false) {
         }
       }
     }
-  } catch {}
+  } catch (err) {
+    console.error('loadData user_data D1 error:', err?.message);
+    throw new HttpError(503, 'خطا در دریافت اطلاعات حساب از دیتابیس.');
+  }
+
   const loadAlertRowsFor = async (targetUid) => {
     try {
       const al = await env.DB.prepare(`SELECT a.id,asset_id,direction,price,triggered_at,a.attempts,COALESCE(c.currency,'IRT') AS currency FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id WHERE user_id=? ORDER BY created_at,a.id`).bind(targetUid).all();
       return al.results || [];
-    } catch {
-      try {
-        const al2 = await env.DB.prepare(`SELECT id,asset_id,direction,price,triggered_at FROM alerts WHERE user_id=? ORDER BY created_at,id`).bind(targetUid).all();
-        return (al2.results || []).map(r => ({ ...r, attempts: 0, currency: 'IRT' }));
-      } catch {
-        return [];
+    } catch (err) {
+      const msg = String(err?.message || '');
+      // فقط در صورت نبود جدول یا ستون اختیاری قدیمی به کوئری ساده برگرد؛ خطای واقعی دیتابیس نباید سایلنت شود
+      if (/no such table:\s*alert_units|no such column/i.test(msg)) {
+        try {
+          const al2 = await env.DB.prepare(`SELECT id,asset_id,direction,price,triggered_at FROM alerts WHERE user_id=? ORDER BY created_at,id`).bind(targetUid).all();
+          return (al2.results || []).map(r => ({ ...r, attempts: 0, currency: 'IRT' }));
+        } catch (err2) {
+          console.error('loadData alerts fallback D1 error:', err2?.message);
+          throw new HttpError(503, 'خطا در دریافت هشدارهای حساب از دیتابیس.');
+        }
       }
+      console.error('loadData alerts D1 error:', err?.message);
+      throw new HttpError(503, 'خطا در دریافت هشدارهای حساب از دیتابیس.');
     }
   };
   let alertRows = await loadAlertRowsFor(uid);
@@ -922,9 +998,29 @@ export async function loadData(env, uid, forceDb = false) {
     triggeredAt: a.triggered_at ? a.triggered_at * 1000 : null
   }));
   const safeParse = (str, def) => { try { return JSON.parse(str || '') || def; } catch { return def; } };
-  const res = !d ? { exists: false, updatedAt: 0, data: { holdings: [], watch: [], featured: [], alerts, settings: {} } }
-                 : { exists: true, updatedAt: d.updated_at, data: { holdings: safeParse(d.holdings, []), watch: safeParse(d.watch, []), featured: safeParse(d.featured, []), alerts, settings: safeParse(d.settings, {}) } };
-  userDataCache.set(uid, { val: res, exp: now + 900 });
+  const exists = Boolean(d) || alerts.length > 0;
+  const res = !d
+    ? {
+        ok: true,
+        status: exists ? 'loaded' : 'empty',
+        exists,
+        updatedAt: 0,
+        data: { holdings: [], watch: [], featured: [], alerts, settings: {} }
+      }
+    : {
+        ok: true,
+        status: 'loaded',
+        exists: true,
+        updatedAt: Number(d.updated_at) || 0,
+        data: {
+          holdings: safeParse(d.holdings, []),
+          watch: safeParse(d.watch, []),
+          featured: safeParse(d.featured, []),
+          alerts,
+          settings: safeParse(d.settings, {})
+        }
+      };
+  userDataCache.set(uid, { val: res, exp: now + 900, revCheckedAt: now, targetUid: usedAdminRoot ? 'admin_root' : uid });
   return res;
 }
 export async function saveData(env, uid, body) {
@@ -1042,11 +1138,13 @@ export async function saveData(env, uid, body) {
     return { ...a, attempts: same ? (old.attempts || 0) : 0, triggeredAt: same ? (old.triggeredAt || trigMs || null) : (trigMs || null) };
   });
   const updatedVal = {
+    ok: true,
+    status: 'loaded',
     exists: true,
     updatedAt: t,
     data: { holdings: c.holdings, watch: c.watch, featured: c.featured, alerts: mergedAlerts, settings: c.settings }
   };
-  userDataCache.set(uid, { val: updatedVal, exp: nowS() + 900 });
+  userDataCache.set(uid, { val: updatedVal, exp: nowS() + 900, revCheckedAt: nowS(), targetUid: uid });
   return updatedVal;
 }
 async function deleteAccount(env, user) {
@@ -2637,9 +2735,18 @@ export async function checkAlerts(env, items) {
     }
     if (!(a.direction === 'above' ? cur.price >= a.price : cur.price <= a.price)) continue;
 
+    const bumpAlertRev = async (uidTarget) => {
+      if (!uidTarget) return;
+      userDataCache.delete(uidTarget);
+      const revTs = Date.now() * 1000 + randInt(1000);
+      try {
+        await env.DB.prepare('UPDATE user_data SET updated_at=CASE WHEN updated_at>=? THEN updated_at+1 ELSE ? END WHERE user_id=?').bind(revTs, revTs, uidTarget).run();
+      } catch {}
+    };
+
     if (!canSendMail) {
       await env.DB.prepare("UPDATE alerts SET triggered_at=? WHERE id=? AND triggered_at IS NULL").bind(t, a.id).run();
-      if (a.user_id) userDataCache.delete(a.user_id);
+      await bumpAlertRev(a.user_id);
       sent++;
       continue;
     }
@@ -2660,7 +2767,7 @@ export async function checkAlerts(env, items) {
         isAlert: true
       });
       await env.DB.prepare("UPDATE alerts SET triggered_at=? WHERE id=? AND triggered_at IS NULL AND asset_id=? AND price=? AND direction=? AND COALESCE((SELECT version FROM alert_state WHERE alert_id=alerts.id),'legacy')=?").bind(t, a.id, a.asset_id, a.price, a.direction, a.version).run();
-      if (a.user_id) userDataCache.delete(a.user_id);
+      await bumpAlertRev(a.user_id);
       sent++;
     } catch (e) {
       console.error('alert mail failed', e.message);
@@ -2668,7 +2775,7 @@ export async function checkAlerts(env, items) {
         env.DB.prepare("UPDATE alerts SET attempts=attempts+1,triggered_at=CASE WHEN attempts+1>=5 THEN ? ELSE triggered_at END WHERE id=?").bind(t, a.id),
         env.DB.prepare('UPDATE alert_delivery SET lease_until=0,retry_at=? WHERE alert_id=?').bind(t + Math.min(3600, 60 * 2 ** a.attempts), a.id)
       ]);
-      if (a.user_id) userDataCache.delete(a.user_id);
+      await bumpAlertRev(a.user_id);
     }
   }
   return sent;
@@ -2717,7 +2824,20 @@ export async function refreshMeta(env) {
       () => env.DB.prepare('DELETE FROM oauth_states WHERE expires_at < ?').bind(t).run(),
       () => env.DB.prepare('DELETE FROM rate_limits WHERE reset_at > 0 AND reset_at < ?').bind(t).run(),
       () => env.DB.prepare("DELETE FROM kv WHERE k LIKE 'h:%' AND updated_at < ?").bind(t - 86400).run(),
-      () => env.DB.prepare('DELETE FROM price_history_v2 WHERE rowid IN (SELECT rowid FROM price_history_v2 WHERE t < ? LIMIT 5000)').bind(cutoffTs).run()
+      async () => {
+        try {
+          await env.DB.prepare('DELETE FROM price_history_v2 WHERE rowid IN (SELECT rowid FROM price_history_v2 WHERE t < ? LIMIT 5000)').bind(cutoffTs).run();
+        } catch (err) {
+          if (!/no such column:\s*rowid/i.test(String(err?.message || ''))) throw err;
+          // سازگاری با جداول قدیمی که با WITHOUT ROWID ساخته شده‌اند (با استفاده از ایندکس idx_ph2_t و حذف با PK)
+          const oldRows = await env.DB.prepare('SELECT asset_id, t FROM price_history_v2 WHERE t < ? ORDER BY t ASC LIMIT 500').bind(cutoffTs).all();
+          const list = oldRows?.results || [];
+          for (let i = 0; i < list.length; i += 100) {
+            const chunk = list.slice(i, i + 100);
+            await env.DB.batch(chunk.map(r => env.DB.prepare('DELETE FROM price_history_v2 WHERE asset_id=? AND t=?').bind(r.asset_id, r.t)));
+          }
+        }
+      }
     ];
     for (const runCleanup of cleanups) {
       try {
@@ -2757,6 +2877,13 @@ export function __resetWorkerStateForTests() {
   inMemoryAdminSettingsTime = 0;
   inMemorySuspendedUsers = null;
   inMemorySuspendedUsersTime = 0;
+}
+
+export function __ageUserDataCacheForTests(secondsAgo = 10) {
+  const shift = Math.max(0, Number(secondsAgo) || 0);
+  for (const entry of userDataCache.values()) {
+    entry.revCheckedAt = (entry.revCheckedAt || nowS()) - shift;
+  }
 }
 
 const DEFAULT_SYSTEM_FEEDS = [
@@ -3633,17 +3760,27 @@ async function route(req, env, url, ctx) {
     const id = user.id + ':' + localId;
     const row = await env.DB.prepare('SELECT id FROM alerts WHERE id=? AND user_id=?').bind(id, user.id).first();
     if (!row) throw new HttpError(404, 'هشدار پیدا نشد.');
+    const revBump = Date.now() * 1000 + randInt(1000);
     await env.DB.batch([
       env.DB.prepare('UPDATE alerts SET triggered_at=NULL,attempts=0 WHERE id=? AND user_id=?').bind(id, user.id),
       env.DB.prepare('DELETE FROM alert_delivery WHERE alert_id=?').bind(id),
-      env.DB.prepare('INSERT INTO alert_state(alert_id,version) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET version=excluded.version').bind(id, rand(16))
+      env.DB.prepare('INSERT INTO alert_state(alert_id,version) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET version=excluded.version').bind(id, rand(16)),
+      env.DB.prepare('UPDATE user_data SET updated_at=CASE WHEN updated_at>=? THEN updated_at+1 ELSE ? END WHERE user_id=?').bind(revBump, revBump, user.id)
     ]);
     userDataCache.delete(user.id);
     hasActiveAlertsCache = true;
     hasActiveAlertsCacheTime = nowS();
     return json({ ok: true });
   }
-  if (p === '/api/me/data' && m === 'GET') return json(await loadData(env, user.id));
+  if (p === '/api/me/data' && m === 'GET') {
+    const forceDb = url.searchParams.get('fresh') === '1';
+    const clientRevParam = url.searchParams.get('rev');
+    const res = await loadData(env, user.id, forceDb);
+    if (clientRevParam !== null && res.exists && Number(res.updatedAt) > 0 && String(res.updatedAt) === String(clientRevParam)) {
+      return json({ ok: true, status: 'unchanged', unchanged: true, exists: true, updatedAt: res.updatedAt });
+    }
+    return json(res);
+  }
   if (p === '/api/me/data' && m === 'PUT') { await ensureNotMaintenance(user); await rateLimit(env, 'put:' + user.id, 120, 60); return json(await saveData(env, user.id, await readJson(req))); }
   throw new HttpError(404, 'Not found');
 }

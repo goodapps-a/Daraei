@@ -12,7 +12,7 @@ import {
   iterOf,
   normCode
 } from './src/modules/security.js';
-import { D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY } from './src/modules/market-core.js';
+import { D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, getStaleThresholdSec, isPriceItemStale } from './src/modules/market-core.js';
 import worker, {
   loadData,
   saveData,
@@ -20,9 +20,11 @@ import worker, {
   writePricesKvSnapshot,
   getPrices,
   recordD1DomesticHistory,
+  checkAlerts,
   refreshMeta,
   history,
-  __resetWorkerStateForTests
+  __resetWorkerStateForTests,
+  __ageUserDataCacheForTests
 } from './src/worker.js';
 
 test('normCode converts Persian and Arabic digits to ASCII digits and strips non-digits', () => {
@@ -764,4 +766,219 @@ test('admin user toggle blocks suspending admin accounts, revokes mixed-case D1 
   assert.equal(delRes.status, 200);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM users WHERE id=?').get(userId).c, 0);
 });
+
+test('loadData throws 503 on missing DB or D1 read failure instead of returning exists: false', async () => {
+  __resetWorkerStateForTests();
+
+  // Missing DB must fail closed (503) rather than falsely impersonating an empty account
+  await assert.rejects(
+    () => loadData({}, 'u_no_db'),
+    (err) => err.status === 503
+  );
+
+  // Failing D1 query must also fail closed (503)
+  const brokenDB = {
+    prepare() {
+      return {
+        bind() {
+          return {
+            async first() { throw new Error('d1_io_timeout'); },
+            async all() { throw new Error('d1_io_timeout'); }
+          };
+        }
+      };
+    }
+  };
+  await assert.rejects(
+    () => loadData({ DB: brokenDB }, 'u_db_err'),
+    (err) => err.status === 503
+  );
+
+  // Clean empty DB account returns explicit ok: true, status: 'empty', exists: false
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+  const emptyRes = await loadData({ DB }, 'u_truly_empty');
+  assert.equal(emptyRes.ok, true);
+  assert.equal(emptyRes.status, 'empty');
+  assert.equal(emptyRes.exists, false);
+  assert.equal(emptyRes.updatedAt, 0);
+});
+
+test('currentUser fails closed on missing/revoked D1 sessions or D1 failure without falling back to signed token payload', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+
+  const env = { DB, AUTH_SECRET: 'test-auth-secret-key-minimum-32-chars!!' };
+  const passHash = await hashPassword('StrongPass!123', env);
+  db.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)')
+    .run('u_rev_1', 'rev@example.com', 'RevTest', passHash, 1000);
+
+  const loginRes = await worker.fetch(
+    new Request('https://darayi.example/api/auth/login', {
+      method: 'POST',
+      headers: {
+        origin: 'https://darayi.example',
+        'content-type': 'application/json',
+        'x-requested-with': 'XMLHttpRequest'
+      },
+      body: JSON.stringify({ email: 'rev@example.com', password: 'StrongPass!123' })
+    }),
+    env
+  );
+  const loginJson = await loginRes.json();
+  assert.ok(loginJson.token);
+
+  const getMe = (bearer, customEnv = env) =>
+    worker.fetch(
+      new Request('https://darayi.example/api/me', {
+        headers: { authorization: `Bearer ${bearer}` }
+      }),
+      customEnv
+    );
+  const getData = (bearer, customEnv = env) =>
+    worker.fetch(
+      new Request('https://darayi.example/api/me/data', {
+        headers: { authorization: `Bearer ${bearer}` }
+      }),
+      customEnv
+    );
+
+  // Active session succeeds
+  assert.equal((await (await getMe(loginJson.token)).json()).user?.email, 'rev@example.com');
+  assert.equal((await getData(loginJson.token)).status, 200);
+
+  // D1 throws error on fresh isolate -> fail closed (null user on /api/me, 401 on /api/me/data)
+  __resetWorkerStateForTests();
+  const failingEnv = {
+    AUTH_SECRET: env.AUTH_SECRET,
+    DB: {
+      prepare() {
+        return {
+          bind() {
+            return {
+              async first() { throw new Error('d1_unavailable'); },
+              async all() { throw new Error('d1_unavailable'); }
+            };
+          }
+        };
+      }
+    }
+  };
+  assert.equal((await (await getMe(loginJson.token, failingEnv)).json()).user, null);
+  assert.equal((await getData(loginJson.token, failingEnv)).status, 401);
+
+  // Session deleted in D1 (revoked on another device/isolate) -> rejected even with valid HMAC signature
+  __resetWorkerStateForTests();
+  db.prepare('DELETE FROM sessions WHERE user_id=?').run('u_rev_1');
+  assert.equal((await (await getMe(loginJson.token)).json()).user, null);
+  assert.equal((await getData(loginJson.token)).status, 401);
+});
+
+test('loadData invalidates stale userDataCache across isolates via single PK revision check and checkAlerts bumps updated_at', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB, stats } = createSqliteD1Wrapper(db);
+  const env = { DB, AUTH_SECRET: 'test-auth-secret-key-minimum-32-chars!!' };
+  const now = Math.floor(Date.now() / 1000);
+
+  db.prepare('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?)').run('u_sync_1', 'sync1@example.com', 'Sync1', now);
+  db.prepare(`INSERT INTO user_data(user_id,holdings,watch,featured,settings,updated_at) VALUES('u_sync_1','[]','["usd"]','["usd"]','{}',10000)`).run();
+
+  // Warm cache on Isolate B
+  const firstLoad = await loadData(env, 'u_sync_1');
+  assert.deepEqual(firstLoad.data.watch, ['usd']);
+  assert.equal(firstLoad.updatedAt, 10000);
+
+  // After >5s, unchanged DB row only executes 1 PK read (SELECT updated_at) and skips alerts/blob reload
+  stats.reads = 0;
+  __ageUserDataCacheForTests(10);
+  const unchangedLoad = await loadData(env, 'u_sync_1');
+  assert.equal(unchangedLoad.updatedAt, 10000);
+  assert.equal(stats.reads, 1, 'Expected 1 PK updated_at read when DB revision is unchanged');
+
+  // Device A writes directly in D1 (simulating another Worker isolate updating user_data)
+  db.prepare(`UPDATE user_data SET watch='["usd","btc"]', updated_at=20000 WHERE user_id='u_sync_1'`).run();
+  __ageUserDataCacheForTests(10);
+  const freshLoad = await loadData(env, 'u_sync_1');
+  assert.equal(freshLoad.updatedAt, 20000);
+  assert.deepEqual(freshLoad.data.watch, ['usd', 'btc']);
+
+  // Triggering an alert in checkAlerts bumps user_data.updated_at so polling clients detect triggered alerts across isolates
+  db.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,created_at) VALUES('u_sync_1:al_trig','u_sync_1','usd','above',80000,?)`).run(now);
+  const sent = await checkAlerts(env, {
+    usd: { price: 85000, unit: 'IRT', kind: 'domestic', t: now, receivedAt: now, sourceTimestamp: now }
+  });
+  assert.equal(sent, 1);
+  const bumpedRow = db.prepare('SELECT updated_at FROM user_data WHERE user_id=?').get('u_sync_1');
+  assert.ok(Number(bumpedRow.updated_at) > 20000);
+});
+
+test('migrations/001_fix.sql succeeds cleanly on a completely empty DB and refreshMeta cleans up legacy WITHOUT ROWID price_history_v2', async () => {
+  // Part A: Empty DB executes migrations/001_fix.sql cleanly without index-before-table errors
+  const emptyDb = new DatabaseSync(':memory:');
+  const migSql = fs.readFileSync(new URL('./migrations/001_fix.sql', import.meta.url), 'utf8');
+  assert.doesNotThrow(() => emptyDb.exec(migSql));
+  const phPlan = emptyDb
+    .prepare('EXPLAIN QUERY PLAN SELECT rowid FROM price_history_v2 WHERE t < ? LIMIT 5000')
+    .all()
+    .map((r) => r.detail)
+    .join(' | ');
+  assert.match(phPlan, /USING COVERING INDEX idx_ph2_t/);
+
+  // Part B: Legacy production table created WITH WITHOUT ROWID still cleans up expired rows in refreshMeta without throwing
+  __resetWorkerStateForTests();
+  const legacyDb = new DatabaseSync(':memory:');
+  legacyDb.exec(`
+    CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE otp_codes (email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(email, purpose));
+    CREATE TABLE oauth_states (state_hash TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE rate_limits (k TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, reset_at INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE price_history_v2 (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY (asset_id, t)) WITHOUT ROWID;
+    CREATE INDEX idx_ph2_t ON price_history_v2(t);
+  `);
+  const now = Math.floor(Date.now() / 1000);
+  legacyDb.prepare('INSERT INTO price_history_v2(asset_id, t, price) VALUES (?, ?, ?)').run('usd', now - 10 * 86400, 70000);
+  legacyDb.prepare('INSERT INTO price_history_v2(asset_id, t, price) VALUES (?, ?, ?)').run('usd', now - 1800, 86000);
+  const { DB } = createSqliteD1Wrapper(legacyDb);
+
+  await refreshMeta({ DB, PRICE_HISTORY_DAYS: 7 });
+  const rows = legacyDb.prepare('SELECT price FROM price_history_v2').all();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].price, 86000);
+});
+
+test('getStaleThresholdSec and isPriceItemStale distinguish 24/7 crypto/USDT from Tehran weekend & overnight domestic hours', () => {
+  // Active Tehran Tuesday midday: 2026-11-10 10:30 UTC == 14:00 Tehran Time (Tue)
+  const tueMidday = Math.floor(Date.parse('2026-11-10T10:30:00Z') / 1000);
+  assert.equal(getStaleThresholdSec('btc', true, tueMidday), 900);
+  assert.equal(getStaleThresholdSec('usdt', false, tueMidday), 1800);
+  assert.equal(getStaleThresholdSec('usd', false, tueMidday), 14400);
+  assert.equal(getStaleThresholdSec('try', false, tueMidday), 21600);
+
+  // 20-minute-old BTC quote is stale; 10-minute-old BTC quote is fresh
+  assert.equal(isPriceItemStale({ price: 90000, crypto: 1, unit: 'USDT', t: tueMidday - 1200 }, 'btc', tueMidday), true);
+  assert.equal(isPriceItemStale({ price: 90000, crypto: 1, unit: 'USDT', t: tueMidday - 600 }, 'btc', tueMidday), false);
+
+  // 5-hour-old major domestic USD quote during active Tuesday market hours is stale; 5-hour-old secondary TRY is still within 6h threshold
+  assert.equal(isPriceItemStale({ price: 85000, unit: 'IRT', kind: 'domestic', t: tueMidday - 5 * 3600 }, 'usd', tueMidday), true);
+  assert.equal(isPriceItemStale({ price: 2400, unit: 'IRT', kind: 'domestic', t: tueMidday - 5 * 3600 }, 'try', tueMidday), false);
+
+  // Friday Tehran afternoon: 2026-11-13 12:00 UTC == 15:30 Tehran Time (Fri closed)
+  // Valid Thursday 15:00 Tehran quote (~24.5h old) MUST remain fresh on Friday!
+  const friAfternoon = Math.floor(Date.parse('2026-11-13T12:00:00Z') / 1000);
+  const thuClose = friAfternoon - Math.floor(24.5 * 3600);
+  assert.ok(getStaleThresholdSec('gold18', false, friAfternoon) >= 52 * 3600);
+  assert.equal(isPriceItemStale({ price: 4500000, unit: 'IRT', kind: 'domestic', sourceTimestamp: thuClose }, 'gold18', friAfternoon), false);
+
+  // Overnight Tuesday 04:00 Tehran (00:30 UTC): Monday 19:00 Tehran close (~9h old) remains fresh
+  const tueNight = Math.floor(Date.parse('2026-11-10T00:30:00Z') / 1000);
+  const monClose = tueNight - 9 * 3600;
+  assert.equal(isPriceItemStale({ price: 85000, unit: 'IRT', kind: 'domestic', sourceTimestamp: monClose }, 'usd', tueNight), false);
+});
+
 

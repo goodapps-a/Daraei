@@ -97,19 +97,49 @@ export function isTehranMarketOpen(nowSec = Math.floor(Date.now() / 1000)) {
   return hour >= 10 && hour <= 19.5;
 }
 
-// محاسبه آستانه کهنگی (Stale) — فقط وقتی بیش از ۲۴ ساعت (۸۶۴۰۰ ثانیه) از آخرین قیمت بگذرد قدیمی محسوب می‌شود
+const DOMESTIC_MAJOR_IDS = new Set(['usd', 'eur', 'gold18', 'gold24', 'coin', 'gram']);
+
+// محاسبه آستانه کهنگی (Stale) بر اساس نوع دارایی و ساعات واقعی بازار تهران/جهانی
 export function getStaleThresholdSec(id, isCrypto, nowSec = Math.floor(Date.now() / 1000)) {
-  return 86400;
+  const normId = String(id || '').toLowerCase();
+  if (normId === 'usdt') return 1800; // تتر: صرافی‌های داخلی ۲۴/۷ هستند (حداکثر ۳۰ دقیقه بدون آپدیت)
+  if (isCrypto) return 900; // رمزارزهای اسپات ۲۴/۷: حداکثر ۱۵ دقیقه (پوشش ۳ چرخه کران ۵ دقیقه‌ای)
+
+  if (normId === 'sp500' || normId === 'silver') {
+    const d = new Date(nowSec * 1000);
+    const utcDow = d.getUTCDay(); // 0=Sun..5=Fri, 6=Sat
+    const utcHour = d.getUTCHours() + d.getUTCMinutes() / 60;
+    const isGlobalWeekend = (utcDow === 5 && utcHour >= 22) || utcDow === 6 || utcDow === 0 || (utcDow === 1 && utcHour < 2);
+    return isGlobalWeekend ? 64 * 3600 : 14400;
+  }
+
+  // دارایی‌های داخلی (طلا، سکه، ارز): وقت تهران (UTC+3:30)
+  const tehranEpochMs = (nowSec + 12600) * 1000;
+  const d = new Date(tehranEpochMs);
+  const dow = d.getUTCDay(); // 0=Sun..4=Thu, 5=Fri, 6=Sat
+  const hour = d.getUTCHours() + d.getUTCMinutes() / 60;
+
+  // پنجره تعطیلی پایان هفته: بعد از بسته شدن پنجشنبه (۱۵:۳۰)، کل جمعه و تا ۱.۵ ساعت بعد از بازگشایی شنبه (۱۱:۳۰)
+  if ((dow === 4 && hour > 15.5) || dow === 5 || (dow === 6 && hour < 11.5)) {
+    return 52 * 3600;
+  }
+  // پنجره شبانه بین روزهای کاری یا ۱.۵ ساعت ابتدای بازگشایی بازار در یکشنبه تا پنجشنبه
+  if (!isTehranMarketOpen(nowSec) || hour < 11.5) {
+    return 20 * 3600;
+  }
+  // ساعات فعال روزانه بازار تهران
+  return DOMESTIC_MAJOR_IDS.has(normId) ? 14400 : 21600;
 }
 
 export function isPriceItemStale(item, id, nowSec = Math.floor(Date.now() / 1000)) {
   if (!item || !(Number(item.price) > 0)) return true;
   if (item.upstreamStale === true) return true;
-  const isCrypto = Boolean(item.crypto && id !== 'usdt' && item.unit === 'USDT');
+  const normId = String(id || '').toLowerCase();
+  const isCrypto = Boolean((item.crypto || item.kind === 'crypto' || item.unit === 'USDT') && normId !== 'usdt');
   const refTs = Number(item.sourceTimestamp) > 0
     ? Number(item.sourceTimestamp)
     : (Number(item.t) > 0 ? Number(item.t) : Number(item.receivedAt) || 0);
   if (!(refTs > 0)) return true;
-  const threshold = getStaleThresholdSec(id, isCrypto, nowSec);
+  const threshold = getStaleThresholdSec(normId, isCrypto, nowSec);
   return (nowSec - refTs) > threshold;
 }

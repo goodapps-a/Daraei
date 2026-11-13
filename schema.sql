@@ -98,12 +98,12 @@ CREATE TABLE IF NOT EXISTS mail_deliveries (
 
 CREATE TABLE IF NOT EXISTS alert_units (
   alert_id TEXT PRIMARY KEY,
-  currency TEXT NOT NULL DEFAULT 'IRT'
+  currency TEXT NOT NULL DEFAULT 'IRT' CHECK(currency IN ('IRT','USD','USDT'))
 );
 
 CREATE TABLE IF NOT EXISTS alert_state (
   alert_id TEXT PRIMARY KEY,
-  version TEXT NOT NULL
+  version TEXT NOT NULL DEFAULT 'legacy'
 );
 
 CREATE TABLE IF NOT EXISTS price_history_v2 (

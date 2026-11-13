@@ -2891,19 +2891,38 @@ app.get('/api/me/data', (req, res) => {
   const target = userStore[email];
   if (target?.data?.alerts) {
     if (evaluateAlertsForRecord(target.data.alerts, email)) {
-      target.updatedAt = Math.floor(Date.now() / 1000);
+      target.updatedAt = Math.max(Date.now() * 1000, (Number(target.updatedAt) || 0) + 1);
       target.revision = (Number(target.revision) || 1) + 1;
       saveAuthSessionToDisk();
     }
   }
-  res.json(target || {
+  const clientRev = req.query?.rev;
+  if (target && clientRev !== undefined && Number(target.updatedAt) > 0 && String(target.updatedAt) === String(clientRev)) {
+    return res.json({
+      ok: true,
+      status: 'unchanged',
+      unchanged: true,
+      exists: true,
+      updatedAt: target.updatedAt
+    });
+  }
+  if (target) {
+    return res.json({
+      ok: true,
+      status: 'loaded',
+      ...target
+    });
+  }
+  res.json({
+    ok: true,
+    status: 'empty',
     exists: false,
     revision: 0,
     updatedAt: 0,
     data: {
       holdings: [],
       watch: [],
-      featured: ['usd', 'gold18', 'btc', 'usdt', 'eur', 'sol'],
+      featured: [],
       alerts: [],
       settings: {}
     }
@@ -2949,9 +2968,11 @@ app.put('/api/me/data', (req, res) => {
   }
 
   const updated = {
+    ok: true,
+    status: 'loaded',
     exists: true,
     revision: nextRev,
-    updatedAt: Math.max(Math.floor(Date.now() / 1000), currentRev + 1),
+    updatedAt: Math.max(Date.now() * 1000, currentRev + 1),
     data: cleaned
   };
 
