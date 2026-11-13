@@ -22,9 +22,23 @@ const PORT = 3000;
 
 app.disable('x-powered-by');
 app.use(express.json({ limit: '256kb' }));
+function isPreviewRequest(req: express.Request): boolean {
+  const host = String(req.headers.host || '').toLowerCase();
+  const origin = String(req.headers.origin || req.headers.referer || '').toLowerCase();
+  return (
+    host.includes('.run.app') ||
+    host.startsWith('localhost') ||
+    host.startsWith('127.0.0.1') ||
+    origin.includes('aistudio.google.com') ||
+    origin.includes('.googleusercontent.com')
+  );
+}
+
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
-  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  if (!isPreviewRequest(req)) {
+    res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  }
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
@@ -1040,7 +1054,7 @@ function validateHistoryPoints(
 
   const isIntraday = range === '1H' || range === '1D';
   const graceWindow = isIntraday
-    ? (range === '1H' ? 5400 : 93600)
+    ? (range === '1H' ? 4500 : 88200)
     : (isDomestic ? Math.max(span * 1.5, 6 * 86400) : Math.max(span * 1.25, 7200));
   const minTs = now - graceWindow;
   let pts = filtered.filter((p) => p[0] >= minTs && p[0] <= now + 3600);
@@ -1061,6 +1075,51 @@ function validateHistoryPoints(
 }
 
 const historyMemCache = new Map<string, { at: number; data: any }>();
+const dailyArchiveMemCache = new Map<string, { at: number; im?: any; na?: any }>();
+
+async function fetchIranMarketDailyRaw(sym: string): Promise<any | null> {
+  const now = Math.floor(Date.now() / 1000);
+  const hit = dailyArchiveMemCache.get('im:' + sym);
+  if (hit && now - hit.at < 900) return hit.im;
+  try {
+    const j = await fetchJSON(`https://iran-market.github.io/data/history/${encodeURIComponent(sym)}.json`, 7);
+    if (j) {
+      dailyArchiveMemCache.set('im:' + sym, { at: now, im: j });
+      return j;
+    }
+  } catch {}
+  return hit?.im || null;
+}
+
+async function fetchNerkharaDailyRaw(naId: string): Promise<any | null> {
+  const now = Math.floor(Date.now() / 1000);
+  const hit = dailyArchiveMemCache.get('na:' + naId);
+  if (hit && now - hit.at < 900) return hit.na;
+  try {
+    const j = await fetchJSON(`https://nerkhara.com/api/v1/history/${encodeURIComponent(naId)}.json`, 7);
+    if (j) {
+      dailyArchiveMemCache.set('na:' + naId, { at: now, na: j });
+      return j;
+    }
+  } catch {}
+  return hit?.na || null;
+}
+
+function parseArchiveRecTs(rec: any): number {
+  if (!rec) return 0;
+  if (typeof rec.t === 'number' && Number.isFinite(rec.t)) {
+    return rec.t > 1e12 ? Math.floor(rec.t / 1000) : Math.floor(rec.t);
+  }
+  if (typeof rec.t === 'string' && rec.t.trim()) {
+    const ms = Date.parse(rec.t);
+    if (Number.isFinite(ms) && ms > 1500000000000) return Math.floor(ms / 1000);
+  }
+  if (typeof rec.date === 'string' && /^\d{4}-\d{2}-\d{2}/.test(rec.date)) {
+    const ms = Date.parse(rec.date.slice(0, 10) + 'T12:00:00Z');
+    if (Number.isFinite(ms)) return Math.floor(ms / 1000);
+  }
+  return 0;
+}
 
 // Real history extraction with ZERO synthetic/interpolated points
 async function archiveHistory(id: string, range: string, liveItem: any = null): Promise<[number, number][]> {
@@ -1075,7 +1134,7 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
     ? Math.floor(Number(liveItem.sourceTimestamp))
     : (Number(liveItem?.receivedAt) > 0 ? Math.floor(Number(liveItem.receivedAt)) : now);
 
-  // 1. For 1H and 1D: ONLY real recorded intraday ticks (no daily archive points disguised as intraday, no synthetic points)
+  // 1. For 1H and 1D: real recorded intraday ticks + genuine 24h boundary from daily archive when ticks don't span 24h yet
   if (range === '1H' || range === '1D') {
     const windowStart = now - span;
     const ticks = (domesticIntradayTicks.get(id) || []).filter((p) => p[0] >= windowStart && p[0] <= now + 60);
@@ -1092,6 +1151,93 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
         deduped.push(pt);
       }
     }
+
+    if (range === '1D' && (!deduped.length || deduped[0][0] > windowStart + 3600)) {
+      const sym = id === 'usdt' ? 'USDT_IRR' : (IRAN_MARKET_MAP[id] || [])[0];
+      const naId = (NERKHARA_MAP as any)[id];
+      const anchorPoints: [number, number][] = [];
+      let foundAnchorAtWindowStart = false;
+
+      if (sym) {
+        const j = await fetchIranMarketDailyRaw(sym);
+        const records = Array.isArray(j?.data) ? j.data : j?.data?.records;
+        const isToman = j?.meta?.unit === 'toman' || j?.meta?.currency === 'IRT';
+        const div = isToman ? 1 : 10;
+        if (Array.isArray(records) && records.length) {
+          const recent = records.slice(-5);
+          let prevCloseForWindow: number | null = null;
+          for (const rec of recent) {
+            const startTs = parseArchiveRecTs(rec);
+            if (!startTs) continue;
+            const openVal = Number(rec.open) > 0 ? Math.round(Number(rec.open) / div) : 0;
+            const closeVal = Number(rec.close) > 0 ? Math.round(Number(rec.close) / div) : 0;
+            if (startTs <= windowStart && (closeVal > 0 || openVal > 0)) {
+              prevCloseForWindow = closeVal || openVal;
+            }
+            if (openVal > 0 && startTs >= windowStart && startTs < (deduped[0]?.[0] || curTs)) {
+              anchorPoints.push([startTs, openVal]);
+            }
+            if (closeVal > 0) {
+              const pubMs = typeof j?.meta?.published_at === 'string' ? Date.parse(j.meta.published_at) : NaN;
+              const recEndTs = (rec === recent[recent.length - 1] && Number.isFinite(pubMs))
+                ? Math.floor(pubMs / 1000)
+                : (startTs + 45000);
+              if (recEndTs >= windowStart && recEndTs <= now && (!deduped.length || recEndTs < deduped[0][0] - 300)) {
+                anchorPoints.push([recEndTs, closeVal]);
+              }
+            }
+          }
+          if (prevCloseForWindow && prevCloseForWindow > 0) {
+            anchorPoints.unshift([windowStart, prevCloseForWindow]);
+            foundAnchorAtWindowStart = true;
+          }
+        }
+      }
+
+      if (!foundAnchorAtWindowStart && naId) {
+        const nj = await fetchNerkharaDailyRaw(naId);
+        const pts = nj?.points;
+        if (Array.isArray(pts) && pts.length) {
+          const recentNa = pts.slice(-4);
+          let bestVal = 0;
+          for (const row of recentNa) {
+            if (!Array.isArray(row) || row.length < 2) continue;
+            const dStr = String(row[0] || '').trim();
+            const v = Math.round(Number(row[1]));
+            if (!/^\d{4}-\d{2}-\d{2}$/.test(dStr) || !(v > 0)) continue;
+            const ts = Math.floor(Date.parse(`${dStr}T12:00:00Z`) / 1000);
+            if (ts <= windowStart + 43200) bestVal = v;
+            if (ts >= windowStart && ts < (deduped[0]?.[0] || curTs)) {
+              anchorPoints.push([ts, v]);
+            }
+          }
+          if (bestVal > 0) {
+            anchorPoints.unshift([windowStart, bestVal]);
+            foundAnchorAtWindowStart = true;
+          }
+        }
+      }
+
+      if (anchorPoints.length) {
+        const merged = [...anchorPoints, ...deduped];
+        if (curPrice > 0 && curTs > (merged.at(-1)?.[0] || 0)) {
+          merged.push([curTs, curPrice]);
+        } else if (curPrice > 0 && merged.length && now > (merged.at(-1)?.[0] || 0)) {
+          merged.push([now, curPrice]);
+        }
+        merged.sort((a, b) => a[0] - b[0]);
+        const finalOut: [number, number][] = [];
+        for (const pt of merged) {
+          if (finalOut.length && finalOut[finalOut.length - 1][0] === pt[0]) {
+            finalOut[finalOut.length - 1][1] = pt[1];
+          } else {
+            finalOut.push(pt);
+          }
+        }
+        if (finalOut.length >= 2) return finalOut;
+      }
+    }
+
     return deduped.length >= 2 ? deduped : [];
   }
 
@@ -1103,17 +1249,17 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
   const sym = id === 'usdt' ? 'USDT_IRR' : (IRAN_MARKET_MAP[id] || [])[0];
   if (sym) {
     try {
-      const j = await fetchJSON(`https://iran-market.github.io/data/history/${sym}.json`, 7);
-      const records = j?.data?.records;
+      const j = await fetchIranMarketDailyRaw(sym);
+      const records = Array.isArray(j?.data) ? j.data : j?.data?.records;
+      const isToman = j?.meta?.unit === 'toman' || j?.meta?.currency === 'IRT';
+      const div = isToman ? 1 : 10;
       if (Array.isArray(records) && records.length >= 2) {
         const out: [number, number][] = [];
         for (const rec of records.slice(-maxSlice)) {
-          const closeRial = Number(rec.close);
-          if (!(closeRial > 0)) continue;
-          const closeToman = Math.round(closeRial / 10);
-          const baseTs = Number(rec.t) > 1500000000
-            ? Math.floor(Number(rec.t))
-            : Math.floor(new Date(rec.date + 'T12:00:00Z').getTime() / 1000);
+          const closeRaw = Number(rec.close);
+          if (!(closeRaw > 0)) continue;
+          const closeToman = Math.round(closeRaw / div);
+          const baseTs = parseArchiveRecTs(rec);
           if (baseTs >= minTs && baseTs <= now + 3600) {
             out.push([baseTs, closeToman]);
           }
@@ -1129,7 +1275,7 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
   const naId = (NERKHARA_MAP as any)[id];
   if (naId) {
     try {
-      const j = await fetchJSON(`https://nerkhara.com/api/v1/history/${encodeURIComponent(naId)}.json`, 7);
+      const j = await fetchNerkharaDailyRaw(naId);
       const pts = j?.points;
       if (Array.isArray(pts) && pts.length >= 2) {
         const out: [number, number][] = [];
@@ -1498,9 +1644,10 @@ function createSessionForUser(res: express.Response, req: express.Request, user:
   };
   activeSessions.set(sidHash, sessionRec);
   const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+  const sameSiteAttr = (isSecure && isPreviewRequest(req)) ? 'SameSite=None; Secure' : `SameSite=Lax${isSecure ? '; Secure' : ''}`;
   res.setHeader(
     'Set-Cookie',
-    `sid=${signedToken}; Path=/; Max-Age=${ttlSec}; HttpOnly; SameSite=Lax${isSecure ? '; Secure' : ''}`
+    `sid=${signedToken}; Path=/; Max-Age=${ttlSec}; HttpOnly; ${sameSiteAttr}`
   );
   return {
     id: user.id,
@@ -1513,9 +1660,10 @@ function createSessionForUser(res: express.Response, req: express.Request, user:
 
 function clearSessionCookie(res: express.Response, req: express.Request) {
   const isSecure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+  const sameSiteAttr = (isSecure && isPreviewRequest(req)) ? 'SameSite=None; Secure' : `SameSite=Lax${isSecure ? '; Secure' : ''}`;
   res.setHeader(
     'Set-Cookie',
-    `sid=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax${isSecure ? '; Secure' : ''}`
+    `sid=; Path=/; Max-Age=0; HttpOnly; ${sameSiteAttr}`
   );
 }
 
@@ -1598,6 +1746,33 @@ app.get('/api/download/worker.js', (req, res) => {
 
 app.get('/api/me', (req, res) => {
   res.json({ user: resolveReqUser(req) });
+});
+
+app.post('/api/auth/check-email', (req, res) => {
+  const ip = getClientIp(req);
+  const normalizedEmail = String(req.body?.email || '').trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || normalizedEmail.length > 120) {
+    return res.status(400).json({ error: 'ایمیل معتبر نیست.' });
+  }
+  if (!checkRateLimit(`check_email_ip:${ip}`, 25, 900) || !checkRateLimit(`check_email:${ip}:${normalizedEmail}`, 12, 900)) {
+    return res.status(429).json({ error: 'تعداد درخواست‌ها بیش از حد مجاز است. لطفاً کمی صبر کنید.' });
+  }
+  const isAdmin = normalizedEmail === ADMIN_EMAIL.toLowerCase();
+  const existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
+  const storeRec = userStore[normalizedEmail];
+  if (existing || storeRec || isAdmin) {
+    return res.json({
+      ok: true,
+      exists: true,
+      hasPassword: Boolean(existing?.passwordHash || (isAdmin && getConfiguredAdminPassword())),
+      hasGoogle: false
+    });
+  }
+  return res.json({
+    ok: true,
+    exists: false,
+    allowRegister: systemSettings.allowNewRegistrations !== false
+  });
 });
 
 app.post('/api/auth/login', (req, res) => {
@@ -2366,9 +2541,94 @@ const CRYPTO_ICONS: Record<string, string> = {
   sonic: 'https://cdn.arz.digital/cr-odin/img/assets/sonic/64x64.png'
 };
 
-app.get('/api/crypto-icons', (req, res) => {
-  res.setHeader('Cache-Control', 'public, max-age=604800, immutable');
-  res.json({ ok: true, icons: CRYPTO_ICONS });
+let dynamicCryptoIconsCache: Record<string, string> | null = null;
+let dynamicCryptoIconsTime = 0;
+let dynamicCryptoIconsJob: Promise<Record<string, string>> | null = null;
+
+async function fetchJsonQuick(url: string, timeoutMs = 5500): Promise<any> {
+  const res = await fetch(url, {
+    headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0' },
+    signal: AbortSignal.timeout(timeoutMs)
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+
+async function getDynamicCryptoIcons(): Promise<Record<string, string>> {
+  const now = Math.floor(Date.now() / 1000);
+  if (dynamicCryptoIconsCache && (now - dynamicCryptoIconsTime < 43200)) {
+    return dynamicCryptoIconsCache;
+  }
+  if (dynamicCryptoIconsJob) return dynamicCryptoIconsJob;
+  dynamicCryptoIconsJob = (async () => {
+    const base: Record<string, string> = {};
+    const [cmcRes, cpRes, cgRes] = await Promise.allSettled([
+      fetchJsonQuick('https://api.coinmarketcap.com/data-api/v3/cryptocurrency/listing?start=1&limit=3500&sortBy=market_cap&sortType=desc&convert=USD', 6500),
+      fetchJsonQuick('https://api.coinpaprika.com/v1/coins', 6500),
+      fetchJsonQuick('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1', 5500)
+    ]);
+
+    const cpMap: Record<string, string> = {};
+    if (cpRes.status === 'fulfilled' && Array.isArray(cpRes.value)) {
+      const sortedCp = cpRes.value
+        .filter((c: any) => c && c.is_active !== false && c.id && c.symbol)
+        .sort((a: any, b: any) => ((a.rank > 0 ? a.rank : 999999) - (b.rank > 0 ? b.rank : 999999)));
+      for (const c of sortedCp) {
+        const s = String(c.symbol).toLowerCase().trim();
+        if (s && !cpMap[s]) cpMap[s] = `https://static.coinpaprika.com/coin/${c.id}/logo.png`;
+      }
+    }
+
+    const cmcList = (cmcRes.status === 'fulfilled' && cmcRes.value?.data?.cryptoCurrencyList) || [];
+    const cmcTop1500 = new Set<string>();
+    for (let idx = 0; idx < cmcList.length; idx++) {
+      const c = cmcList[idx];
+      const s = String(c?.symbol || '').toLowerCase().trim();
+      if (!s || !c?.id) continue;
+      if (idx < 1500) cmcTop1500.add(s);
+      if (!base[s]) base[s] = `https://s2.coinmarketcap.com/static/img/coins/64x64/${c.id}.png`;
+    }
+
+    if (cgRes.status === 'fulfilled' && Array.isArray(cgRes.value)) {
+      const cgSeen = new Set<string>();
+      for (const c of cgRes.value) {
+        const s = String(c?.symbol || '').toLowerCase().trim();
+        if (s && c?.image && !cgSeen.has(s)) {
+          cgSeen.add(s);
+          base[s] = c.image;
+        }
+      }
+    }
+
+    const activeKeys = new Set(Object.keys(cachedPrices?.items || {}).map(k => k.toLowerCase()));
+    const out: Record<string, string> = {};
+    for (const k of cmcTop1500) {
+      if (base[k]) out[k] = base[k];
+    }
+    for (const k of activeKeys) {
+      if (base[k]) out[k] = base[k];
+      else if (cpMap[k]) out[k] = cpMap[k];
+    }
+    Object.assign(out, CRYPTO_ICONS);
+
+    dynamicCryptoIconsCache = out;
+    dynamicCryptoIconsTime = now;
+    return out;
+  })().finally(() => {
+    dynamicCryptoIconsJob = null;
+  });
+  return dynamicCryptoIconsJob;
+}
+
+app.get('/api/crypto-icons', async (req, res) => {
+  try {
+    const icons = await getDynamicCryptoIcons();
+    res.setHeader('Cache-Control', 'public, max-age=43200');
+    res.json({ ok: true, icons });
+  } catch {
+    res.setHeader('Cache-Control', 'public, max-age=3600');
+    res.json({ ok: true, icons: CRYPTO_ICONS });
+  }
 });
 
 function evaluateAlertsForRecord(alerts: any[], ownerEmail?: string): boolean {
@@ -2657,9 +2917,12 @@ app.get(['/', '/index.html'], (req, res) => {
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     res.setHeader('Surrogate-Control', 'no-store');
+    const frameAncestors = isPreviewRequest(req)
+      ? "frame-ancestors 'self' https://aistudio.google.com https://*.aistudio.google.com https://*.googleusercontent.com https://*.google.com;"
+      : "frame-ancestors 'self';";
     res.setHeader(
       'Content-Security-Policy',
-      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: https:; connect-src 'self' https: wss:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+      `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; worker-src 'self' blob:; connect-src 'self' https: wss:; ${frameAncestors} base-uri 'self'; form-action 'self'`
     );
     return res.sendFile(htmlPath);
   }
