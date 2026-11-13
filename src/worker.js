@@ -270,7 +270,38 @@ const json = (o, status = 200, h = {}) => new Response(JSON.stringify(o), {
 class HttpError extends Error { constructor(status, msg, extra = null) { super(msg); this.status = status; this.extra = extra; } }
 
 const inMemoryRateLimits = new Map();
-async function rateLimit(env, key, limit, windowS, persistDb = false) {
+let rateLimitSchemaMode = 'standard'; // 'standard' | 'legacy_altered'
+
+async function executeRateLimitDbUpsert(env, key, resetAt, now) {
+  const sqlStandard =
+    'INSERT INTO rate_limits(k, count, reset_at) VALUES(?, 1, ?) ON CONFLICT(k) DO UPDATE SET count = CASE WHEN rate_limits.reset_at <= ? THEN 1 ELSE rate_limits.count + 1 END, reset_at = CASE WHEN rate_limits.reset_at <= ? THEN excluded.reset_at ELSE rate_limits.reset_at END RETURNING count, reset_at';
+  const sqlLegacyAltered =
+    'INSERT INTO rate_limits(k, n, win, count, reset_at) VALUES(?, 0, 0, 1, ?) ON CONFLICT(k) DO UPDATE SET count = CASE WHEN rate_limits.reset_at <= ? THEN 1 ELSE rate_limits.count + 1 END, reset_at = CASE WHEN rate_limits.reset_at <= ? THEN excluded.reset_at ELSE rate_limits.reset_at END RETURNING count, reset_at';
+
+  if (rateLimitSchemaMode === 'legacy_altered') {
+    return await env.DB.prepare(sqlLegacyAltered).bind(key, resetAt, now, now).first();
+  }
+  try {
+    return await env.DB.prepare(sqlStandard).bind(key, resetAt, now, now).first();
+  } catch (err) {
+    const msg = String(err?.message || '');
+    // اگر جدول قدیمی پروداکشن فقط ستون‌های (k, n, win) را داشته باشد، بدون حذف جدول یا حدس مقادیر، ستون‌های جدید را غیرمخرب اضافه کن
+    if (msg.includes('no column named count') || msg.includes('no column named reset_at')) {
+      try { await env.DB.prepare('ALTER TABLE rate_limits ADD COLUMN count INTEGER NOT NULL DEFAULT 0').run(); } catch {}
+      try { await env.DB.prepare('ALTER TABLE rate_limits ADD COLUMN reset_at INTEGER NOT NULL DEFAULT 0').run(); } catch {}
+      rateLimitSchemaMode = 'legacy_altered';
+      return await env.DB.prepare(sqlLegacyAltered).bind(key, resetAt, now, now).first();
+    }
+    // اگر ستون‌های count و reset_at قبلاً با ALTER اضافه شده‌اند اما ستون‌های قدیمی n و win محدودیت NOT NULL دارند
+    if (msg.includes('rate_limits.n') || msg.includes('rate_limits.win')) {
+      rateLimitSchemaMode = 'legacy_altered';
+      return await env.DB.prepare(sqlLegacyAltered).bind(key, resetAt, now, now).first();
+    }
+    throw err;
+  }
+}
+
+export async function rateLimit(env, key, limit, windowS, persistDb = false) {
   const now = nowS();
   if (inMemoryRateLimits.size > 2000) {
     for (const [k, v] of inMemoryRateLimits) {
@@ -289,9 +320,7 @@ async function rateLimit(env, key, limit, windowS, persistDb = false) {
   if (persistDb && env && env.DB) {
     try {
       const resetAt = now + windowS;
-      const row = await env.DB.prepare(
-        'INSERT INTO rate_limits(k, count, reset_at) VALUES(?, 1, ?) ON CONFLICT(k) DO UPDATE SET count = CASE WHEN rate_limits.reset_at <= ? THEN 1 ELSE rate_limits.count + 1 END, reset_at = CASE WHEN rate_limits.reset_at <= ? THEN excluded.reset_at ELSE rate_limits.reset_at END RETURNING count, reset_at'
-      ).bind(key, resetAt, now, now).first();
+      const row = await executeRateLimitDbUpsert(env, key, resetAt, now);
       if (row && Number(row.count) > limit) {
         inMemoryRateLimits.set(key, { count: Number(row.count), resetAt: Number(row.reset_at) || resetAt });
         throw new HttpError(429, 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کن.');
@@ -829,8 +858,18 @@ export async function saveData(env, uid, body) {
 
   const hasBaseRev = body.baseRevision !== undefined && body.baseRevision !== null;
   const baseRev = hasBaseRev ? Number(body.baseRevision) : null;
-  const curRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind(uid).first();
-  const currentRev = curRow ? (Number(curRow.updated_at) || 0) : 0;
+  const cachedEntry = userDataCache.get(uid);
+  const hasWarmCache = Boolean(cachedEntry && nowS() < cachedEntry.exp);
+  let prev = hasWarmCache ? cachedEntry.val : null;
+  let currentRev = 0;
+
+  if (hasBaseRev || hasWarmCache) {
+    const curRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind(uid).first();
+    currentRev = curRow ? (Number(curRow.updated_at) || 0) : 0;
+  } else {
+    prev = await loadData(env, uid, true);
+    currentRev = Number(prev.updatedAt) || 0;
+  }
 
   if (hasBaseRev && (!Number.isFinite(baseRev) || baseRev !== currentRev)) {
     const latest = await loadData(env, uid, true);
@@ -838,7 +877,9 @@ export async function saveData(env, uid, body) {
   }
 
   const t = Math.max(Date.now() * 1000 + randInt(1000), currentRev + 1);
-  const prev = await loadData(env, uid);
+  if (!prev || (hasWarmCache && Number(prev.updatedAt || 0) !== currentRev)) {
+    prev = await loadData(env, uid, true);
+  }
 
   const prevAlertsSig = JSON.stringify((prev.data?.alerts || []).map(a => [a.id, a.assetId, a.direction, a.price, a.currency, Boolean(a.triggeredAt)]));
   const newAlertsSig = JSON.stringify(c.alerts.map(a => [a.id, a.assetId, a.direction, a.price, a.currency, Boolean(a.triggeredAt)]));
@@ -930,12 +971,56 @@ const kvGet = async (env, k) => env.DB ? env.DB.prepare('SELECT v,updated_at FRO
 const kvPut = async (env, k, v, t) => env.DB ? env.DB.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v,updated_at=excluded.updated_at').bind(k, JSON.stringify(v), t).run() : null;
 
 const hasPricesKv = (env) => Boolean(env && env.PRICES_KV && typeof env.PRICES_KV.get === 'function' && typeof env.PRICES_KV.put === 'function');
+let lastKvSnapshotSig = '';
+
+function serializeLastHistoryMap(existing = {}) {
+  const out = { ...(existing && typeof existing === 'object' ? existing : {}) };
+  for (const [id, entry] of lastD1RecordedMap.entries()) {
+    if (entry && Number(entry.price) > 0 && Number(entry.t) > 0) {
+      out[id] = [Math.round(Number(entry.price)), Math.floor(Number(entry.t))];
+    }
+  }
+  return out;
+}
+
+function hydrateLastHistoryFromSnapshot(snap) {
+  if (!snap || typeof snap !== 'object') return;
+  const lh = snap.lastHistory;
+  if (lh && typeof lh === 'object') {
+    for (const [id, val] of Object.entries(lh)) {
+      if (lastD1RecordedMap.has(id)) continue;
+      if (Array.isArray(val) && Number(val[0]) > 0 && Number(val[1]) > 0) {
+        lastD1RecordedMap.set(id, { price: Math.round(Number(val[0])), t: Math.floor(Number(val[1])) });
+      } else if (val && typeof val === 'object' && Number(val.price) > 0 && Number(val.t) > 0) {
+        lastD1RecordedMap.set(id, { price: Math.round(Number(val.price)), t: Math.floor(Number(val.t)) });
+      }
+    }
+  }
+}
+
+function computeSnapshotSignature(items, lastHistory = {}) {
+  if (!items || typeof items !== 'object') return '';
+  const keys = Object.keys(items).sort();
+  const parts = [];
+  for (const k of keys) {
+    const it = items[k];
+    if (!it || !(Number(it.price) > 0)) continue;
+    parts.push(`${k}:${it.price}:${it.change ?? ''}`);
+  }
+  const histKeys = Object.keys(lastHistory || {}).sort();
+  for (const hk of histKeys) {
+    const hv = lastHistory[hk];
+    if (Array.isArray(hv)) parts.push(`h_${hk}:${hv[0]}:${hv[1]}`);
+  }
+  return parts.join('|');
+}
 
 async function readPricesKvSnapshot(env) {
   if (!hasPricesKv(env)) return null;
   try {
     const snap = await env.PRICES_KV.get(KV_SNAPSHOT_KEY, { type: 'json', cacheTtl: 60 });
     if (snap && typeof snap === 'object' && snap.items && typeof snap.items === 'object' && Object.keys(snap.items).length > 0) {
+      hydrateLastHistoryFromSnapshot(snap);
       return snap;
     }
   } catch (e) {
@@ -944,10 +1029,18 @@ async function readPricesKvSnapshot(env) {
   return null;
 }
 
-async function writePricesKvSnapshot(env, data, forceWrite = false) {
+export async function writePricesKvSnapshot(env, data, forceWrite = false) {
   if (!hasPricesKv(env) || !data || !data.items || !Object.keys(data.items).length) return false;
   const now = nowS();
-  // کنترل строго دفعات نوشتن در KV برای رعایت کامل سقف پلن رایگان Cloudflare (۱۰۰۰ نوشتن در روز؛ کران ۵ دقیقه‌ای = ۲۸۸ نوشتن در روز)
+  const lastHistory = serializeLastHistoryMap(data.lastHistory);
+  data.lastHistory = lastHistory;
+  const sig = computeSnapshotSignature(data.items, lastHistory);
+
+  // جلوگیری از نوشتن تکراری Snapshot بدون تغییر در KV (حتی در کران ۵ دقیقه‌ای) مگر پس از گذشت ۳۰ دقیقه برای حفظ طراوت checkedAt
+  if (lastKvWriteTime > 0 && sig && sig === lastKvSnapshotSig && (now - lastKvWriteTime < 1800)) {
+    return false;
+  }
+  // کنترل دفعات نوشتن در KV برای رعایت کامل سقف پلن رایگان Cloudflare (۱۰۰۰ نوشتن در روز؛ کران ۵ دقیقه‌ای = حداکثر ۲۸۸ نوشتن در روز)
   if (!forceWrite && lastKvWriteTime > 0 && (now - lastKvWriteTime < 280)) {
     return false;
   }
@@ -957,10 +1050,12 @@ async function writePricesKvSnapshot(env, data, forceWrite = false) {
       updatedAt: data.updatedAt || now,
       checkedAt: data.checkedAt || now,
       items: data.items,
-      feeds: data.feeds || {}
+      feeds: data.feeds || {},
+      lastHistory
     };
     await env.PRICES_KV.put(KV_SNAPSHOT_KEY, JSON.stringify(payload));
     lastKvWriteTime = now;
+    lastKvSnapshotSig = sig;
     return true;
   } catch (e) {
     console.error('KV snapshot write error:', e?.message);
@@ -968,7 +1063,7 @@ async function writePricesKvSnapshot(env, data, forceWrite = false) {
   }
 }
 
-const getPrices = async (env) => {
+export const getPrices = async (env) => {
   if (inMemoryPrices && inMemoryPrices.items && Object.keys(inMemoryPrices.items).length > 0) {
     return inMemoryPrices;
   }
@@ -979,6 +1074,7 @@ const getPrices = async (env) => {
       if (snap) {
         inMemoryPrices = snap;
         inMemoryPricesTime = snap.checkedAt || snap.updatedAt || 0;
+        lastKvSnapshotSig = computeSnapshotSignature(snap.items, snap.lastHistory);
         return inMemoryPrices;
       }
     } else if (env && env.DB) {
@@ -987,6 +1083,7 @@ const getPrices = async (env) => {
         if (row && row.v) {
           const parsed = JSON.parse(row.v);
           if (parsed && parsed.items && Object.keys(parsed.items).length > 0) {
+            hydrateLastHistoryFromSnapshot(parsed);
             inMemoryPrices = parsed;
             inMemoryPricesTime = parsed.checkedAt || parsed.updatedAt || row.updated_at || 0;
             return inMemoryPrices;
@@ -1238,6 +1335,7 @@ function resolveDomesticChange(id, price, rawChange, prevClosesMap, prevItem) {
 }
 
 let inMemoryRefreshLock = 0;
+let inFlightRefreshJob = null;
 let lastD1HistoryWriteTime = 0;
 const lastD1RecordedMap = new Map(); // asset_id -> { price, t }
 const domesticIntradayTicks = new Map();
@@ -1274,11 +1372,29 @@ export async function recordD1DomesticHistory(env, items, now = nowS(), forceCro
   lastD1HistoryWriteTime = now;
 
   try {
-    // اگر حافظه آخرین نقاط D1 خالی است، یک بار آخرین نقطه هر دارایی را با PK از D1 بخوان تا از نوشتن قیمت‌های تکراری و اسکن کامل جدول جلوگیری شود
-    if (lastD1RecordedMap.size === 0) {
+    // ۱. ابتدا بازیابی آخرین نقاط ثبت‌شده از حافظه و KV Snapshot برای حذف کامل ۲۷ کوئری Cold Start از D1
+    if (inMemoryPrices) {
+      hydrateLastHistoryFromSnapshot(inMemoryPrices);
+    }
+    if (lastD1RecordedMap.size === 0 && !inMemoryKvLoaded && hasPricesKv(env)) {
+      try {
+        const snap = await readPricesKvSnapshot(env);
+        if (snap && !inMemoryPrices) {
+          inMemoryPrices = snap;
+          inMemoryPricesTime = snap.checkedAt || snap.updatedAt || 0;
+          inMemoryKvLoaded = true;
+        }
+      } catch {}
+    }
+
+    // ۲. فقط برای دارایی‌هایی که در KV Snapshot نیز سابقهٔ ثبت‌شده ندارند و در items فعلی قیمت معتبر دارند، با PK از D1 استعلام بگیر
+    const missingIds = D1_HISTORY_ASSET_IDS.filter(
+      (id) => !lastD1RecordedMap.has(id) && items[id] && Number(items[id].price) > 0
+    );
+    if (missingIds.length > 0) {
       try {
         const batchRes = await env.DB.batch(
-          D1_HISTORY_ASSET_IDS.map((id) =>
+          missingIds.map((id) =>
             env.DB.prepare('SELECT asset_id,t,price FROM price_history_v2 WHERE asset_id=? ORDER BY t DESC LIMIT 1').bind(id)
           )
         );
@@ -1314,6 +1430,10 @@ export async function recordD1DomesticHistory(env, items, now = nowS(), forceCro
       }
     }
 
+    if (inMemoryPrices) {
+      inMemoryPrices.lastHistory = serializeLastHistoryMap(inMemoryPrices.lastHistory);
+    }
+
     if (stmts.length > 0) {
       await env.DB.batch(stmts);
     }
@@ -1339,7 +1459,10 @@ async function queryD1DomesticHistory(env, id, sinceTs) {
   }
 }
 
-export async function refreshPrices(env, force = false) {
+export async function refreshPrices(env, force = false, skipSideEffects = false) {
+  if (inFlightRefreshJob) {
+    return await inFlightRefreshJob;
+  }
   const t = nowS();
   const current = await getPrices(env);
   const hasCryptoNow = Object.values(current.items || {}).some(i => i.crypto && i.unit === 'USDT');
@@ -1348,9 +1471,10 @@ export async function refreshPrices(env, force = false) {
   }
   inMemoryRefreshLock = t;
 
-  try {
-    const prev = current;
-    const items = { ...prev.items }, fresh = new Set(), feeds = { ...(prev.feeds || {}) };
+  inFlightRefreshJob = (async () => {
+    try {
+      const prev = current;
+      const items = { ...prev.items }, fresh = new Set(), feeds = { ...(prev.feeds || {}) };
 
     const put = (id, price, change, src, sourceTimestamp, unit = 'IRT', extra = {}) => {
       if (!(price > 0) || !Number.isFinite(price)) return false;
@@ -1704,33 +1828,40 @@ export async function refreshPrices(env, force = false) {
 
     await Promise.allSettled([domestic(), cryptoFeed()]);
 
-    const data = {
-      version: KV_SNAPSHOT_VERSION,
-      items,
-      feeds,
-      updatedAt: fresh.size ? t : prev.updatedAt || 0,
-      checkedAt: t
-    };
-    inMemoryPrices = data;
-    inMemoryPricesTime = t;
+      const data = {
+        version: KV_SNAPSHOT_VERSION,
+        items,
+        feeds,
+        updatedAt: fresh.size ? t : prev.updatedAt || 0,
+        checkedAt: t,
+        lastHistory: serializeLastHistoryMap(prev.lastHistory)
+      };
+      inMemoryPrices = data;
+      inMemoryPricesTime = t;
 
-    if (fresh.size > 0) {
-      // ذخیره کنترل‌شده تاریخچه کوتاه‌مدت دارایی‌های داخلی در D1 (حداکثر هر ۵ دقیقه یک‌بار و فقط در صورت تغییر قیمت)
-      if (env && env.DB) {
-        recordD1DomesticHistory(env, items, t, false).catch(() => {});
-        checkAlerts(env, items).catch(() => {});
+      if (!skipSideEffects && fresh.size > 0) {
+        // ذخیره کنترل‌شده تاریخچه کوتاه‌مدت دارایی‌های داخلی در D1 و سپس Snapshot در KV با آخرین وضعیت تاریخچه
+        (async () => {
+          if (env && env.DB) {
+            try { await recordD1DomesticHistory(env, items, t, false); } catch {}
+            checkAlerts(env, items).catch(() => {});
+          }
+          if (hasPricesKv(env)) {
+            try { await writePricesKvSnapshot(env, data, false); } catch {}
+          }
+        })();
       }
-      // ذخیره کنترل‌شده Snapshot در Cloudflare KV در صورت متصل بودن
-      if (hasPricesKv(env)) {
-        writePricesKvSnapshot(env, data, false).catch(() => {});
-      }
+
+      return { items, updated: [...fresh] };
+    } catch (err) {
+      console.error('refreshPrices failed:', err?.message);
+      return { items: inMemoryPrices?.items || {}, updated: [], error: err?.message };
     }
+  })().finally(() => {
+    inFlightRefreshJob = null;
+  });
 
-    return { items, updated: [...fresh] };
-  } catch (err) {
-    console.error('refreshPrices failed:', err?.message);
-    return { items: inMemoryPrices?.items || {}, updated: [], error: err?.message };
-  }
+  return await inFlightRefreshJob;
 }
 
 // پالایش و اعتبارسنجی نقاط نمودار از API صرافی‌ها و آرشیوها بدون حذف نوسانات واقعی بازار و بدون ساخت نقطه فرضی
@@ -1987,9 +2118,7 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
     return deduped.length >= 2 ? deduped : [];
   }
 
-  // ۲. برای بازه‌های چندروزه و بلندمدت (3D, 1W, 1M, 1Y): استفاده از آرشیوهای روزانه واقعی + نقاط اخیر D1
-  const d1Recent = (range === '3D' || range === '1W') ? await queryD1DomesticHistory(env, id, now - span) : [];
-
+  // ۲. برای بازه‌های چندروزه و بلندمدت (3D, 1W, 1M, 1Y): استفاده از آرشیوهای روزانه واقعی (کش‌شده در Edge) بدون تحمیل Read اضافه به D1
   // منبع اول تاریخچه روزانه: آرشیو روزانه iran-market
   const sym = id === 'usdt' ? 'USDT_IRR' : (IRAN_MARKET_MAP[id] || [])[0];
   if (sym) {
@@ -2009,7 +2138,6 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
             out.push([baseTs, closeToman]);
           }
         }
-        for (const pt of d1Recent) out.push(pt);
         if (curPrice > 0) out.push([curTs, curPrice]);
         if (out.length >= 2) return out;
       }
@@ -2034,7 +2162,6 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
             out.push([ts, val]);
           }
         }
-        for (const pt of d1Recent) out.push(pt);
         if (curPrice > 0) out.push([curTs, curPrice]);
         if (out.length >= 2) return out;
       }
@@ -2043,42 +2170,81 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
 
   // منبع سوم تاریخچه روزانه (پشتیبان): آرشیو نرخ‌سنج (rates.json)
   const key = (NERKH[id] || [])[0] || (DOMESTIC_EXTRA[id] || [])[0];
-  if (!key) return [];
-  try {
-    const r = await fetch('https://nerkh.jahankhahan.shop/data/rates.json', {
-      headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0 (personal portfolio app)' },
-      signal: AbortSignal.timeout(10000),
-      cf: { cacheTtl: 3600, cacheEverything: true }
-    });
-    if (!r.ok) return [];
-    const text = await r.text();
-    const marker = '"key":"' + key + '"';
-    const idx = text.indexOf(marker);
-    if (idx === -1) return [];
-    const daysIdx = text.indexOf('"days":', idx);
-    const endDaysIdx = text.indexOf(']]', daysIdx);
-    if (daysIdx === -1 || endDaysIdx === -1) return [];
-    const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
-    const out = [];
-    for (const [d, v] of days.slice(-maxSlice)) {
-      const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
-      if (!m || !(v > 0)) continue;
-      const [gy, gm, gd] = jalaliToGregorian(+m[1], +m[2], +m[3]);
-      const ts = Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600;
-      if (ts >= minTs && ts <= now + 3600) {
-        out.push([ts, Number(v)]);
+  if (key) {
+    try {
+      const r = await fetch('https://nerkh.jahankhahan.shop/data/rates.json', {
+        headers: { accept: 'application/json', 'user-agent': 'Darayi/1.0 (personal portfolio app)' },
+        signal: AbortSignal.timeout(10000),
+        cf: { cacheTtl: 3600, cacheEverything: true }
+      });
+      if (r.ok) {
+        const text = await r.text();
+        const marker = '"key":"' + key + '"';
+        const idx = text.indexOf(marker);
+        if (idx !== -1) {
+          const daysIdx = text.indexOf('"days":', idx);
+          const endDaysIdx = text.indexOf(']]', daysIdx);
+          if (daysIdx !== -1 && endDaysIdx !== -1) {
+            const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
+            const out = [];
+            for (const [d, v] of days.slice(-maxSlice)) {
+              const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
+              if (!m || !(v > 0)) continue;
+              const [gy, gm, gd] = jalaliToGregorian(+m[1], +m[2], +m[3]);
+              const ts = Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600;
+              if (ts >= minTs && ts <= now + 3600) {
+                out.push([ts, Number(v)]);
+              }
+            }
+            if (curPrice > 0) out.push([curTs, curPrice]);
+            if (out.length >= 2) return out;
+          }
+        }
       }
-    }
-    for (const pt of d1Recent) out.push(pt);
-    if (curPrice > 0) out.push([curTs, curPrice]);
-    return out;
-  } catch {
-    return [];
+    } catch {}
   }
+
+  // فقط در صورتی که هر سه آرشیو روزانه برای بازه 3D یا 1W در دسترس نباشند، به تاریخچه D1 مراجعه کن
+  if (range === '3D' || range === '1W') {
+    const d1Fallback = await queryD1DomesticHistory(env, id, now - span);
+    if (curPrice > 0) d1Fallback.push([curTs, curPrice]);
+    if (d1Fallback.length >= 2) return d1Fallback;
+  }
+  return [];
 }
 
 const historyMemCache = new Map();
+const historyInFlight = new Map();
 const histKvWriteAt = new Map();
+
+async function saveUsdtHistoryCache(env, cacheKey, payload, now) {
+  if (hasPricesKv(env)) {
+    await env.PRICES_KV.put(cacheKey, JSON.stringify(payload), { expirationTtl: 21600 });
+    return;
+  }
+  if (env && env.DB) {
+    await kvPut(env, cacheKey, payload, now);
+  }
+}
+
+async function loadUsdtHistoryCache(env, cacheKey) {
+  if (hasPricesKv(env)) {
+    try {
+      const saved = await env.PRICES_KV.get(cacheKey, { type: 'json', cacheTtl: 300 });
+      if (saved && Array.isArray(saved.points)) return saved;
+    } catch {}
+  }
+  if (env && env.DB) {
+    try {
+      const row = await kvGet(env, cacheKey);
+      if (row && row.v) {
+        const parsed = typeof row.v === 'string' ? JSON.parse(row.v) : row.v;
+        if (parsed && Array.isArray(parsed.points)) return parsed;
+      }
+    } catch {}
+  }
+  return null;
+}
 
 async function wallexHistory(symbol, range, refPrice = 0) {
   const now = nowS();
@@ -2132,13 +2298,13 @@ async function wallexHistory(symbol, range, refPrice = 0) {
   return [];
 }
 
-async function history(env, url, ctx = null) {
+export async function history(env, url, ctx = null) {
   const id = url.searchParams.get('id') || '', range = url.searchParams.get('range') || '1D';
   if (!/^[a-z0-9]{1,20}$/.test(id) || !Object.hasOwn(RANGES, range)) throw new HttpError(400, 'پارامتر نامعتبر است.');
 
   const cacheKey = `${id}:${range}`;
   const t = nowS();
-  const ttlSec = (range === '1H' || range === '1D') ? 60 : 300;
+  const ttlSec = (range === '1H' || range === '1D') ? 60 : 900;
 
   // ۱. بررسی کش حافظه Worker
   const mem = historyMemCache.get(cacheKey);
@@ -2162,110 +2328,127 @@ async function history(env, url, ctx = null) {
     }
   } catch {}
 
-  let prices = await getPrices(env);
-  if (!Object.keys(prices.items || {}).length) {
-    try { await refreshPrices(env); prices = await getPrices(env); } catch {}
+  // ۳. ادغام درخواست‌های هم‌زمان (In-Flight Request Coalescing) برای جلوگیری از کوئری تکراری به D1 یا صرافی
+  if (historyInFlight.has(cacheKey)) {
+    const sharedPayload = await historyInFlight.get(cacheKey);
+    return json(sharedPayload.body, 200, sharedPayload.headers);
   }
-  const it = prices.items?.[id];
-  const isDomesticAsset = id !== 'usdt' && (Boolean(NERKH[id]) || Boolean(DOMESTIC_EXTRA[id]) || Boolean(IRAN_MARKET_MAP[id]) || Boolean(DOMESTIC_META[id]) || it?.kind === 'domestic');
 
-  const cacheAndReturn = (payload) => {
-    historyMemCache.set(cacheKey, { at: t, data: payload });
-    const res = json(payload, 200, {
-      'access-control-allow-origin': '*',
-      'cache-control': `public, max-age=${ttlSec}`,
-      'x-darayi-cached-at': String(t)
-    });
-    if (edgeCache && ctx && ctx.waitUntil && payload.points?.length >= 2) {
-      try { ctx.waitUntil(edgeCache.put(edgeHistoryUrl, res.clone())); } catch {}
+  const job = (async () => {
+    let prices = await getPrices(env);
+    if (!Object.keys(prices.items || {}).length) {
+      try { await refreshPrices(env); prices = await getPrices(env); } catch {}
     }
-    return res;
-  };
+    const it = prices.items?.[id];
+    const isDomesticAsset = id !== 'usdt' && (Boolean(NERKH[id]) || Boolean(DOMESTIC_EXTRA[id]) || Boolean(IRAN_MARKET_MAP[id]) || Boolean(DOMESTIC_META[id]) || it?.kind === 'domestic');
 
-  // ۱. تاریخچه رمزارزها و تتر (مستقیم از کندل‌های واقعی صرافی)
-  if (it?.crypto || !isDomesticAsset) {
-    if (id === 'usdt') {
-      const refP = (it && !isPriceItemStale(it, 'usdt', t)) ? (it.price || 0) : 0;
-      const d1CacheKey = `hist_cache:usdt:${range}`;
-      let pts = await wallexHistory('USDTTMN', range, refP);
-      let srcUsed = 'wallex';
-      if (pts.length >= 2 && env?.DB) {
-        const lastW = histKvWriteAt.get(d1CacheKey) || 0;
-        if (t - lastW >= 120) {
-          histKvWriteAt.set(d1CacheKey, t);
-          const saveJob = kvSet(env, d1CacheKey, { t, points: pts }).catch(() => {});
-          if (ctx?.waitUntil) ctx.waitUntil(saveJob);
+    const buildCachedResult = (payload) => {
+      historyMemCache.set(cacheKey, { at: t, data: payload });
+      const headers = {
+        'access-control-allow-origin': '*',
+        'cache-control': `public, max-age=${ttlSec}`,
+        'x-darayi-cached-at': String(t)
+      };
+      if (edgeCache && ctx && ctx.waitUntil && payload.points?.length >= 2) {
+        try { ctx.waitUntil(edgeCache.put(edgeHistoryUrl, json(payload, 200, headers))); } catch {}
+      }
+      return { body: payload, headers };
+    };
+
+    // ۱. تاریخچه رمزارزها و تتر (مستقیم از کندل‌های واقعی صرافی)
+    if (it?.crypto || !isDomesticAsset) {
+      if (id === 'usdt') {
+        const refP = (it && !isPriceItemStale(it, 'usdt', t)) ? (it.price || 0) : 0;
+        const usdtCacheKey = `hist_cache:usdt:${range}`;
+        let pts = await wallexHistory('USDTTMN', range, refP);
+        let srcUsed = 'wallex';
+        if (pts.length >= 2) {
+          const lastW = histKvWriteAt.get(usdtCacheKey) || 0;
+          if (t - lastW >= 300) {
+            histKvWriteAt.set(usdtCacheKey, t);
+            const saveJob = saveUsdtHistoryCache(env, usdtCacheKey, { t, points: pts }, t).catch(() => {});
+            if (ctx?.waitUntil) ctx.waitUntil(saveJob);
+          }
+        } else {
+          try {
+            const saved = await loadUsdtHistoryCache(env, usdtCacheKey);
+            const maxAge = (range === '1H' || range === '1D') ? 1800 : 21600;
+            if (saved && Array.isArray(saved.points) && saved.points.length >= 2 && (t - (saved.t || 0) <= maxAge)) {
+              pts = validateHistoryPoints(saved.points, range, t, true, refP, true);
+              srcUsed = 'wallex_cache';
+            }
+          } catch {}
         }
-      } else if (pts.length < 2 && env?.DB) {
+        if (pts.length < 2) {
+          const arch = await archiveHistory('usdt', range, it, env);
+          pts = validateHistoryPoints(arch, range, t, true, refP, range !== '1H' && range !== '1D');
+          srcUsed = (range === '1H' || range === '1D') ? 'd1_intraday' : 'archive';
+        }
+        if (pts.length >= 2) {
+          return buildCachedResult({ id, range, currency: 'IRT', source: srcUsed, points: pts });
+        }
+        return { body: { id, range, currency: 'IRT', points: [], unavailable: true, reason: 'insufficient_real_points' }, headers: {} };
+      }
+
+      const [iv, lim] = KL[range], base = (it?.sym || id).toUpperCase();
+      const refP = (it && !isPriceItemStale(it, id, t)) ? (it.price || 0) : 0;
+      const exchangeOrder = range === '1Y'
+        ? [...new Set([it?.src !== 'okx' ? it?.src : null, 'kucoin', 'gate', 'okx', 'binance'].filter(Boolean))]
+        : [...new Set([it?.src, 'kucoin', 'okx', 'gate', 'binance'].filter(Boolean))];
+      for (const name of exchangeOrder) {
+        const src = SOURCES[name];
+        if (!src) continue;
         try {
-          const saved = await kvGet(env, d1CacheKey);
-          const maxAge = (range === '1H' || range === '1D') ? 1800 : 21600;
-          if (saved && Array.isArray(saved.points) && saved.points.length >= 2 && (t - (saved.t || 0) <= maxAge)) {
-            pts = validateHistoryPoints(saved.points, range, t, true, refP, true);
-            srcUsed = 'wallex_cache';
+          const pair = (it && name === it.src && it.pair)
+            ? it.pair
+            : name === 'gate' ? `${base}_USDT` : name === 'binance' ? `${base}USDT` : `${base}-USDT`;
+          const rawPts = await src.klines(pair, iv, lim);
+          const points = validateHistoryPoints(rawPts, range, t, false, refP, true);
+          if (points.length >= 2) {
+            return buildCachedResult({ id, range, currency: 'USDT', source: name, points });
           }
         } catch {}
       }
-      if (pts.length < 2) {
-        const arch = await archiveHistory('usdt', range, it, env);
-        pts = validateHistoryPoints(arch, range, t, true, refP, range !== '1H' && range !== '1D');
-        srcUsed = (range === '1H' || range === '1D') ? 'd1_intraday' : 'archive';
-      }
-      if (pts.length >= 2) {
-        return cacheAndReturn({ id, range, currency: 'IRT', source: srcUsed, points: pts });
-      }
-      return json({ id, range, currency: 'IRT', points: [], unavailable: true, reason: 'insufficient_real_points' });
+      return { body: { id, range, currency: 'USDT', points: [], unavailable: true, reason: 'exchange_klines_unavailable' }, headers: {} };
     }
 
-    const [iv, lim] = KL[range], base = (it?.sym || id).toUpperCase();
-    const refP = (it && !isPriceItemStale(it, id, t)) ? (it.price || 0) : 0;
-    const exchangeOrder = range === '1Y'
-      ? [...new Set([it?.src !== 'okx' ? it?.src : null, 'kucoin', 'gate', 'okx', 'binance'].filter(Boolean))]
-      : [...new Set([it?.src, 'kucoin', 'okx', 'gate', 'binance'].filter(Boolean))];
-    for (const name of exchangeOrder) {
-      const src = SOURCES[name];
-      if (!src) continue;
-      try {
-        const pair = (it && name === it.src && it.pair)
-          ? it.pair
-          : name === 'gate' ? `${base}_USDT` : name === 'binance' ? `${base}USDT` : `${base}-USDT`;
-        const rawPts = await src.klines(pair, iv, lim);
-        const points = validateHistoryPoints(rawPts, range, t, false, refP, true);
-        if (points.length >= 2) {
-          return cacheAndReturn({ id, range, currency: 'USDT', source: name, points });
-        }
-      } catch {}
+    // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (بدون هیچ نقطه مصنوعی)
+    let rawPoints = [];
+    try {
+      rawPoints = await archiveHistory(id, range, it, env);
+    } catch {}
+
+    const curPrice = (it && !isPriceItemStale(it, id, t)) ? (it.price || 0) : 0;
+    const isIntraday = range === '1H' || range === '1D';
+    const points = validateHistoryPoints(rawPoints, range, t, true, curPrice, !isIntraday);
+    if (points.length < 2) {
+      return {
+        body: {
+          id,
+          range,
+          currency: it?.unit || 'IRT',
+          points: [],
+          unavailable: true,
+          reason: isIntraday ? 'insufficient_intraday_history' : 'archive_unavailable'
+        },
+        headers: {}
+      };
     }
-    return json({ id, range, currency: 'USDT', points: [], unavailable: true, reason: 'exchange_klines_unavailable' });
-  }
 
-  // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (بدون هیچ نقطه مصنوعی)
-  let rawPoints = [];
-  try {
-    rawPoints = await archiveHistory(id, range, it, env);
-  } catch {}
-
-  const curPrice = (it && !isPriceItemStale(it, id, t)) ? (it.price || 0) : 0;
-  const isIntraday = range === '1H' || range === '1D';
-  const points = validateHistoryPoints(rawPoints, range, t, true, curPrice, !isIntraday);
-  if (points.length < 2) {
-    return json({
+    return buildCachedResult({
       id,
       range,
       currency: it?.unit || 'IRT',
-      points: [],
-      unavailable: true,
-      reason: isIntraday ? 'insufficient_intraday_history' : 'archive_unavailable'
+      source: isIntraday ? 'd1_intraday' : 'archive',
+      points
     });
-  }
-
-  return cacheAndReturn({
-    id,
-    range,
-    currency: it?.unit || 'IRT',
-    source: isIntraday ? 'd1_intraday' : 'archive',
-    points
+  })().finally(() => {
+    historyInFlight.delete(cacheKey);
   });
+
+  historyInFlight.set(cacheKey, job);
+  const resPayload = await job;
+  return json(resPayload.body, 200, resPayload.headers);
 }
 
 let lastAlertCheckTime = 0;
@@ -2345,8 +2528,9 @@ export async function checkAlerts(env, items) {
 
 export async function runCron(env) {
   const t = nowS();
-  const { items } = await refreshPrices(env, true);
-  // ۱. ثبت نقاط واقعی قیمت دارایی‌های داخلی و تتر در جدول price_history_v2 دیتابیس D1
+  // اجرای refreshPrices با skipSideEffects=true تا ثبت تاریخچه، نوشتن KV و بررسی هشدارها دوبار در یک سیکل کران اجرا نشوند
+  const { items } = await refreshPrices(env, true, true);
+  // ۱. ثبت نقاط واقعی قیمت دارایی‌های داخلی و تتر در جدول price_history_v2 دیتابیس D1 (قبل از نوشتن KV تا lastHistory به‌روز باشد)
   if (env && env.DB && items) {
     await recordD1DomesticHistory(env, items, t, true);
   }
@@ -2355,6 +2539,7 @@ export async function runCron(env) {
     if (hasPricesKv(env)) {
       await writePricesKvSnapshot(env, inMemoryPrices, true);
     } else if (env && env.DB) {
+      inMemoryPrices.lastHistory = serializeLastHistoryMap(inMemoryPrices.lastHistory);
       await kvPut(env, KV_SNAPSHOT_KEY, inMemoryPrices, t);
     }
   }
@@ -2374,16 +2559,17 @@ export async function runCron(env) {
 }
 
 export async function refreshMeta(env) {
-  if (env.DB) {
+  if (env && env.DB) {
     const t = nowS();
     const keepDays = Math.max(3, Math.min(14, Number(env.PRICE_HISTORY_DAYS) || 7));
+    const cutoffTs = t - keepDays * 86400;
     const cleanups = [
-      () => env.DB.prepare('DELETE FROM sessions WHERE expires_at<?').bind(t).run(),
-      () => env.DB.prepare('DELETE FROM otp_codes WHERE expires_at<?').bind(t).run(),
-      () => env.DB.prepare('DELETE FROM oauth_states WHERE expires_at<?').bind(t).run(),
-      () => env.DB.prepare('DELETE FROM rate_limits WHERE reset_at<?').bind(t).run(),
-      () => env.DB.prepare("DELETE FROM kv WHERE k LIKE 'h:%' AND updated_at<?").bind(t - 86400).run(),
-      () => env.DB.prepare('DELETE FROM price_history_v2 WHERE t < ?').bind(t - keepDays * 86400).run()
+      () => env.DB.prepare('DELETE FROM sessions WHERE expires_at < ?').bind(t).run(),
+      () => env.DB.prepare('DELETE FROM otp_codes WHERE expires_at < ?').bind(t).run(),
+      () => env.DB.prepare('DELETE FROM oauth_states WHERE expires_at < ?').bind(t).run(),
+      () => env.DB.prepare('DELETE FROM rate_limits WHERE reset_at > 0 AND reset_at < ?').bind(t).run(),
+      () => env.DB.prepare("DELETE FROM kv WHERE k LIKE 'h:%' AND updated_at < ?").bind(t - 86400).run(),
+      () => env.DB.prepare('DELETE FROM price_history_v2 WHERE rowid IN (SELECT rowid FROM price_history_v2 WHERE t < ? LIMIT 5000)').bind(cutoffTs).run()
     ];
     for (const runCleanup of cleanups) {
       try {
@@ -2393,6 +2579,29 @@ export async function refreshMeta(env) {
       }
     }
   }
+}
+
+export function __resetWorkerStateForTests() {
+  inMemoryPrices = null;
+  inMemoryPricesTime = 0;
+  inMemoryKvLoaded = false;
+  lastKvWriteTime = 0;
+  lastKvSnapshotSig = '';
+  inMemoryRefreshLock = 0;
+  inFlightRefreshJob = null;
+  lastD1HistoryWriteTime = 0;
+  lastD1RecordedMap.clear();
+  domesticIntradayTicks.clear();
+  inMemoryRateLimits.clear();
+  rateLimitSchemaMode = 'standard';
+  historyMemCache.clear();
+  historyInFlight.clear();
+  histKvWriteAt.clear();
+  lastAlertCheckTime = 0;
+  hasActiveAlertsCache = null;
+  hasActiveAlertsCacheTime = 0;
+  userDataCache.clear();
+  sessionUserCache.clear();
 }
 
 const DEFAULT_SYSTEM_FEEDS = [
@@ -2796,7 +3005,31 @@ async function route(req, env, url, ctx) {
     if (inMemoryBroadcast && (now - inMemoryBroadcastTime < 3600)) {
       return json({ ok: true, message: inMemoryBroadcast.msg }, 200, { 'cache-control': 'public, max-age=300' });
     }
+    const edgeBroadcastUrl = 'https://edge.darayi.local/api/broadcast';
+    let edgeCache = null;
+    try {
+      if (typeof caches !== 'undefined' && caches.default) {
+        edgeCache = caches.default;
+        const cachedRes = await edgeCache.match(edgeBroadcastUrl);
+        if (cachedRes) return cachedRes;
+      }
+    } catch {}
     let msg = '';
+    if (hasPricesKv(env)) {
+      try {
+        const kvVal = await env.PRICES_KV.get('broadcast:v1', { type: 'json', cacheTtl: 600 });
+        if (kvVal && typeof kvVal.message === 'string') {
+          msg = kvVal.message;
+          inMemoryBroadcast = { msg };
+          inMemoryBroadcastTime = now;
+          const res = json({ ok: true, message: msg }, 200, { 'cache-control': 'public, max-age=300' });
+          if (edgeCache && ctx?.waitUntil) {
+            try { ctx.waitUntil(edgeCache.put(edgeBroadcastUrl, res.clone())); } catch {}
+          }
+          return res;
+        }
+      } catch {}
+    }
     if (env.DB) {
       try {
         const row = await env.DB.prepare("SELECT v FROM kv WHERE k='broadcast'").first();
@@ -2805,7 +3038,14 @@ async function route(req, env, url, ctx) {
     }
     inMemoryBroadcast = { msg };
     inMemoryBroadcastTime = now;
-    return json({ ok: true, message: msg }, 200, { 'cache-control': 'public, max-age=300' });
+    if (hasPricesKv(env) && ctx?.waitUntil) {
+      try { ctx.waitUntil(env.PRICES_KV.put('broadcast:v1', JSON.stringify({ message: msg, t: now }))); } catch {}
+    }
+    const res = json({ ok: true, message: msg }, 200, { 'cache-control': 'public, max-age=300' });
+    if (edgeCache && ctx?.waitUntil) {
+      try { ctx.waitUntil(edgeCache.put(edgeBroadcastUrl, res.clone())); } catch {}
+    }
+    return res;
   }
 
   const user = await currentUser(req, env);
@@ -3129,13 +3369,22 @@ async function route(req, env, url, ctx) {
     if (p === '/api/admin/broadcast' && m === 'POST') {
       const b = await readJson(req);
       const message = String(b.message || '').trim().slice(0, 500);
+      const now = nowS();
       inMemoryBroadcast = { msg: message };
-      inMemoryBroadcastTime = nowS();
+      inMemoryBroadcastTime = now;
+      if (hasPricesKv(env)) {
+        try { await env.PRICES_KV.put('broadcast:v1', JSON.stringify({ message, t: now })); } catch {}
+      }
       if (env.DB) {
         try {
-          await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('broadcast',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify({ message }), nowS()).run();
+          await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('broadcast',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify({ message }), now).run();
         } catch {}
       }
+      try {
+        if (typeof caches !== 'undefined' && caches.default) {
+          await caches.default.delete('https://edge.darayi.local/api/broadcast');
+        }
+      } catch {}
       return json({ ok: true, message });
     }
 

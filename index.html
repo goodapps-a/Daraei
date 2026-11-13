@@ -6378,7 +6378,7 @@ function loadPriceCache(){
   }catch{return null}
 }
 let lastPriceFetchTime = Date.now(), lastSparkClearTime = Date.now(), hasFreshPricesLoaded = false, serverConnected = null, lastServerReceiveTime = 0, consecutivePriceFails = 0;
-async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();lastServerReceiveTime=Date.now();consecutivePriceFails=0;serverConnected=true;const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(manual||!hasFreshPricesLoaded||Date.now()-lastSparkClearTime>300000){sparkSvgCache.clear();sparkSeen.clear();if(manual&&typeof histories!=='undefined')histories.clear();lastSparkClearTime=Date.now();}hasFreshPricesLoaded=true;}
+async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();lastServerReceiveTime=Date.now();consecutivePriceFails=0;serverConnected=true;const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(manual||!hasFreshPricesLoaded||Date.now()-lastSparkClearTime>900000){sparkSvgCache.clear();sparkSeen.clear();if(manual&&typeof histories!=='undefined')histories.clear();lastSparkClearTime=Date.now();}hasFreshPricesLoaded=true;}
 state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};evaluateAlerts();if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();if($('#portfolio')?.classList.contains('active'))renderPortfolio();}lastPriceSig=sig;snapshot();updateTrust();if(!splashPending&&!statusIntroTriggered)triggerServerStatusIntro();hydrateSparks();if(manual)toast(n?'قیمت‌ها از سرور دریافت شدند.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){consecutivePriceFails++;const wsAlive=Boolean(lastWs&&Date.now()-lastWs<25000);const recentHttp=Boolean(lastServerReceiveTime>0&&Date.now()-lastServerReceiveTime<45000);if(navigator.onLine===false){serverConnected=false;}else if(serverConnected===true){if(consecutivePriceFails>=3&&!wsAlive&&!recentHttp){serverConnected=false;}else if(consecutivePriceFails===1&&!manual){setTimeout(()=>{if(!document.hidden)loadPrices(false);},2500);}}else{if(wsAlive){serverConnected=true;if(!lastServerReceiveTime)lastServerReceiveTime=Date.now();}else if(consecutivePriceFails>=2||manual){serverConnected=false;}else{setTimeout(()=>{if(!document.hidden)loadPrices(false);},2000);}}if($('#syncStatus'))$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();if(!splashPending&&!statusIntroTriggered&&serverConnected!==null)triggerServerStatusIntro();hydrateSparks();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
 let syncCryptoActive = false;
 async function syncCrypto(){
@@ -6662,7 +6662,8 @@ const histories=new Map(),historyBusy=new Map();
 async function getHistory(id,range='1D'){
   const a=asset(id);
   const key=id+':'+range,old=histories.get(key);
-  if(old&&old.points?.length>=2&&Date.now()-old.at<60000){
+  const ttlMs=(range==='1H'||range==='1D')?60000:600000;
+  if(old&&old.points?.length>=2&&Date.now()-old.at<ttlMs){
     const validOld=validateClientHistory(old.points,range,a);
     if(validOld.length>=2)return validOld;
     histories.delete(key);
@@ -8310,7 +8311,7 @@ async function renderAdmin() {
         try {
           await api('/api/admin/broadcast', { method: 'POST', body: JSON.stringify({ message: msg }) });
           toast('اعلان عمومی ذخیره و منتشر شد');
-          updateBroadcastBanner();
+          updateBroadcastBanner(true);
         } catch (err) {
           toast('خطا: ' + err.message);
         }
@@ -8322,7 +8323,7 @@ async function renderAdmin() {
           inp.value = '';
           inp.dispatchEvent(new Event('input'));
           toast('اعلان عمومی حذف شد');
-          updateBroadcastBanner();
+          updateBroadcastBanner(true);
         } catch (err) {
           toast('خطا: ' + err.message);
         }
@@ -8478,21 +8479,30 @@ async function renderAdmin() {
   }
 }
 
-async function updateBroadcastBanner() {
+let lastBroadcastFetchAt = 0, broadcastJob = null;
+async function updateBroadcastBanner(force = false) {
   const b = $('#systemBroadcastBanner');
   if (!b) return;
-  try {
-    const j = await api('/api/broadcast');
-    if (j?.message) {
-      b.innerHTML = `<span style="display:flex;align-items:center;gap:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 18-5v12L3 13v-2z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg><span>${escapeHtml(j.message)}</span></span>`;
-      b.style.display = 'flex';
-    } else {
+  if (!force && lastBroadcastFetchAt > 0 && Date.now() - lastBroadcastFetchAt < 600000) return;
+  if (broadcastJob && !force) return broadcastJob;
+  broadcastJob = (async () => {
+    try {
+      const j = await api('/api/broadcast');
+      lastBroadcastFetchAt = Date.now();
+      if (j?.message) {
+        b.innerHTML = `<span style="display:flex;align-items:center;gap:6px"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m3 11 18-5v12L3 13v-2z"/><path d="M11.6 16.8a3 3 0 1 1-5.8-1.6"/></svg><span>${escapeHtml(j.message)}</span></span>`;
+        b.style.display = 'flex';
+      } else {
+        b.style.display = 'none';
+        b.innerHTML = '';
+      }
+    } catch {
       b.style.display = 'none';
-      b.innerHTML = '';
+    } finally {
+      broadcastJob = null;
     }
-  } catch {
-    b.style.display = 'none';
-  }
+  })();
+  return broadcastJob;
 }
 
 function renderAll() {
@@ -9045,11 +9055,6 @@ function detail(id) {
     loadChart(a, b.dataset.detailRange, false);
   });
   loadChart(a, defaultRange, true);
-  const allRanges = has1H ? ['1H', '1D', '3D', '1W', '1M', '1Y'] : ['1D', '3D', '1W', '1M', '1Y'];
-  for (const rng of allRanges) {
-    if (rng === defaultRange) continue;
-    getHistory(a.id, rng).catch(() => {});
-  }
 }
 function setupFeaturedDrag(){const grid=$('#featuredGrid');if(!grid)return;let pend=null,raf=0,px=0,py=0;const reduce=matchMedia('(prefers-reduced-motion:reduce)').matches;
 const cards=()=>[...grid.querySelectorAll('.market-card')];
