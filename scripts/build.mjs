@@ -1,5 +1,7 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { extractInlineScriptBodies } from '../src/modules/security.js';
 
 const rootDir = process.cwd();
 const indexHtmlPath = path.join(rootDir, 'src', 'index.html');
@@ -53,9 +55,19 @@ const facePngPath = path.join(rootDir, 'public', 'coin-face.png');
 const splashJsContent = fs.existsSync(splashJsPath) ? fs.readFileSync(splashJsPath, 'utf8') : '';
 const facePngBase64 = fs.existsSync(facePngPath) ? fs.readFileSync(facePngPath).toString('base64') : '';
 
+const inlineScripts = extractInlineScriptBodies(htmlContent);
+if (inlineScripts.length === 0) {
+  throw new Error('No inline <script> blocks found in src/index.html');
+}
+const appScriptHashes = inlineScripts.map(
+  (body) => `sha256-${crypto.createHash('sha256').update(body, 'utf8').digest('base64')}`
+);
+console.log(`Computed CSP hashes for ${appScriptHashes.length} inline <script> blocks.`);
+
 const bundled = `// دارایی من (Darayi) — Cloudflare Worker Full Single-File Bundle
 // Build generated: ${new Date().toISOString()}
 const APP_HTML = ${JSON.stringify(htmlContent)};
+const APP_SCRIPT_HASHES = ${JSON.stringify(appScriptHashes)};
 const COIN_SPLASH_JS = ${JSON.stringify(splashJsContent)};
 const COIN_FACE_PNG = ${JSON.stringify(facePngBase64)};
 

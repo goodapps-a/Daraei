@@ -10,11 +10,19 @@ import {
   verifyPassword,
   parsePbkdf2Hash,
   iterOf,
+  PBKDF2_DEFAULT,
   normCode,
   getAdminEmails,
   getPrimaryAdminEmail,
-  isEmailAdmin
+  isEmailAdmin,
+  getConfiguredAdminPassword,
+  extractInlineScriptBodies,
+  buildHtmlCsp,
+  sha256Hex,
+  hmacHex,
+  createMemoryRateLimiter
 } from './src/modules/security.js';
+import crypto from 'node:crypto';
 import { D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, getStaleThresholdSec, isPriceItemStale } from './src/modules/market-core.js';
 import worker, {
   loadData,
@@ -134,21 +142,22 @@ test('isSafePublicUrl blocks SSRF vectors (numeric IPs, IPv6, octal/hex, nip.io,
 });
 
 test('hashPassword, verifyPassword, and PBKDF2_ITER clamping work and detect older iterations', async () => {
-  assert.equal(iterOf({}), 10000);
+  assert.equal(PBKDF2_DEFAULT, 25000);
+  assert.equal(iterOf({}), 25000);
   assert.equal(iterOf({ PBKDF2_ITER: '500' }), 1000);
   assert.equal(iterOf({ PBKDF2_ITER: '250000' }), 100000);
   assert.equal(iterOf({ PBKDF2_ITER: '15000' }), 15000);
 
-  const lowEnv = { PBKDF2_ITER: '4000' };
-  const highEnv = { PBKDF2_ITER: '12000' };
-  const hashLow = await hashPassword('MyStrongPass!99', lowEnv);
-  const parsed = parsePbkdf2Hash(hashLow);
+  const legacyEnv = { PBKDF2_ITER: '10000' };
+  const hashLegacy = await hashPassword('MyStrongPass!99', legacyEnv);
+  const parsed = parsePbkdf2Hash(hashLegacy);
   assert.ok(parsed);
-  assert.equal(parsed.iter, 4000);
+  assert.equal(parsed.iter, 10000);
 
-  assert.equal(await verifyPassword('MyStrongPass!99', hashLow, highEnv), true);
-  assert.equal(await verifyPassword('WrongPass!99', hashLow, highEnv), false);
-  assert.equal(parsed.iter < iterOf(highEnv), true);
+  // Legacy 10k hash still verifies cleanly under the 25k default and is flagged for lazy re-hash on login
+  assert.equal(await verifyPassword('MyStrongPass!99', hashLegacy, {}), true);
+  assert.equal(await verifyPassword('WrongPass!99', hashLegacy, {}), false);
+  assert.equal(parsed.iter < iterOf({}), true);
 });
 
 test('saveData throws 409 Conflict with latest data when baseRevision does not match D1 updated_at', async () => {
@@ -1464,4 +1473,51 @@ test('migrations/002_admin_roles.sql is idempotent and 003_legacy_columns.sql + 
   assert.ok(cols.includes('reset_at'));
 });
 
+test('src/index.html has 6 inline scripts covered by hash-based CSP, narrow connect-src, single escapeHtml, and zero inline event handlers', () => {
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+  const bodies = extractInlineScriptBodies(html);
+  assert.equal(bodies.length, 6, `Expected 6 inline <script> blocks in src/index.html, got ${bodies.length}`);
 
+  const hashes = bodies.map((b) => `sha256-${crypto.createHash('sha256').update(b, 'utf8').digest('base64')}`);
+  const csp = buildHtmlCsp(false, hashes);
+
+  const scriptSrcMatch = /script-src\s+([^;]+)/.exec(csp);
+  assert.ok(scriptSrcMatch);
+  assert.doesNotMatch(scriptSrcMatch[1], /'unsafe-inline'/);
+  for (const h of hashes) {
+    assert.ok(scriptSrcMatch[1].includes(`'${h}'`), `Missing hash ${h} in script-src`);
+  }
+
+  const connectSrcMatch = /connect-src\s+([^;]+)/.exec(csp);
+  assert.ok(connectSrcMatch);
+  assert.equal(connectSrcMatch[1].trim(), "'self' wss://stream.binance.com:443 wss://data-stream.binance.vision");
+
+  // Exactly one escapeHtml definition (using ??'')
+  const escapeMatches = html.match(/function\s+escapeHtml\s*\(/g) || [];
+  assert.equal(escapeMatches.length, 1);
+  assert.match(html, /function\s+escapeHtml\s*\(\s*s\s*\)\s*\{\s*return\s+String\s*\(\s*s\s*\?\?\s*''\s*\)/);
+
+  // Zero inline onerror= / onsubmit= attributes in HTML/template strings
+  assert.equal(/\bon(?:error|submit)\s*=\s*["']/.test(html), false);
+});
+
+test('shared security helpers: sha256Hex, hmacHex, createMemoryRateLimiter, getConfiguredAdminPassword', async () => {
+  const h = await sha256Hex('darayi');
+  assert.equal(h.length, 64);
+  assert.equal(h, crypto.createHash('sha256').update('darayi').digest('hex'));
+
+  const mac = await hmacHex('secret-key', 'payload');
+  assert.equal(mac.length, 64);
+  assert.equal(mac, crypto.createHmac('sha256', 'secret-key').update('payload').digest('hex'));
+
+  const rl = createMemoryRateLimiter(10);
+  const now = 1700000000;
+  assert.equal(rl.check('k1', 2, 60, now).allowed, true);
+  assert.equal(rl.check('k1', 2, 60, now + 1).allowed, true);
+  assert.equal(rl.check('k1', 2, 60, now + 2).allowed, false);
+  assert.equal(rl.check('k1', 2, 60, now + 61).allowed, true);
+
+  assert.equal(getConfiguredAdminPassword({ ADMIN_EMAILS: 'admin@example.com', ADMIN_PASSWORD: 'StrongAdminPassword!' }), 'StrongAdminPassword!');
+  assert.equal(getConfiguredAdminPassword({ ADMIN_EMAILS: 'admin@example.com', ADMIN_PASSWORD: 'admin@example.com' }), null);
+  assert.equal(getConfiguredAdminPassword({ ADMIN_PASSWORD: 'StrongAdminPassword!' }), null);
+});

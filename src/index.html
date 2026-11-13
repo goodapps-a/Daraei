@@ -4041,6 +4041,12 @@ window.handleFlagImgError=function(img,fallbackText){
   parent.style.fontWeight='900';
   parent.textContent=fbText||'¤';
 };
+document.addEventListener('error', (e) => {
+  const t = e.target;
+  if (!(t instanceof HTMLImageElement)) return;
+  if (t.classList.contains('country-flag-img')) window.handleFlagImgError(t);
+  else if (t.classList.contains('crypto-logo-img')) window.handleCryptoImgError(t);
+}, true);
 
 const SUN_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>`;
 const MOON_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></svg>`;
@@ -4166,7 +4172,7 @@ function quote(a, n = a.price, maxDec = undefined) {
   const isTomanOrRial = a.currency === 'IRT';
   const val = n * (isTomanOrRial && rialOn() ? 10 : 1);
   const effectiveDec = maxDec !== undefined ? maxDec : (isTomanOrRial ? 0 : undefined);
-  return `<span class="price-wrap" style="direction:ltr;unicode-bidi:isolate;display:inline-flex;align-items:baseline"><span class="p-num">${formatEnPrice(val, effectiveDec)}</span><span class="p-unit">${quoteUnit(a)}</span></span>`;
+  return `<span class="price-wrap" style="direction:ltr;unicode-bidi:isolate;display:inline-flex;align-items:baseline"><span class="p-num">${formatEnPrice(val, effectiveDec)}</span><span class="p-unit">${escapeHtml(quoteUnit(a))}</span></span>`;
 }
 
 function quoteText(a, n = a.price, maxDec = undefined) {
@@ -4308,9 +4314,9 @@ function spark(a){
   }
   const label = (a.cat === 'crypto' || a.id === 'usdt') ? 'نمودار ۲۴ ساعت' : 'نمودار هفتگی';
   if (sparkSvgCache.has(a.id)) {
-    return `<span data-spark="${a.id}" aria-label="${label}">${instantiateSparkSvg(sparkSvgCache.get(a.id))}</span>`;
+    return `<span data-spark="${escapeHtml(a.id)}" aria-label="${escapeHtml(label)}">${instantiateSparkSvg(sparkSvgCache.get(a.id))}</span>`;
   }
-  return `<span data-spark="${a.id}" aria-label="${label}"></span>`;
+  return `<span data-spark="${escapeHtml(a.id)}" aria-label="${escapeHtml(label)}"></span>`;
 }
 function lineChart(values,color='#d7ff61',fill=true){return chartSVG(values.map((v,i)=>[i,v]),color,fill)}
 function chartGeometry(points){const n=points.length,min=Math.min(...points.map(p=>p[1])),max=Math.max(...points.map(p=>p[1])),span=(max-min)||Math.max(Math.abs(min)*.01,1),t0=points[0][0],t1=points.at(-1)[0];return points.map((p,i)=>[8+(p[0]-t0)/(t1-t0||1)*624,168-(p[1]-min+span*.05)/(span*1.1)*140])}
@@ -5708,7 +5714,7 @@ function assetIcon(a) {
   if (flagUrl || a.cat === 'currency' || a.cat === 'domestic') {
     if (flagUrl) {
       const fb = escapeHtml(a.icon || a.symbol || a.id);
-      return `<span class="asset-icon asset-icon-flag"><img src="${escapeHtml(flagUrl)}" alt="${escapeHtml(a.name)}" class="country-flag-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-fb="${fb}" onerror="handleFlagImgError(this)"></span>`;
+      return `<span class="asset-icon asset-icon-flag"><img src="${escapeHtml(flagUrl)}" alt="${escapeHtml(a.name)}" class="country-flag-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-fb="${fb}"></span>`;
     }
   }
 
@@ -5718,7 +5724,7 @@ function assetIcon(a) {
     const badgeText = (a.symbol || sym || a.name || '?').slice(0, 3).toUpperCase();
     const [c1, c2] = getBadgeColors(badgeText);
     if (iconUrl) {
-      return `<span class="asset-icon asset-icon-crypto"><img src="${escapeHtml(iconUrl)}" alt="${escapeHtml(a.symbol || a.name)}" class="crypto-logo-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-sym="${escapeHtml(sym || id)}" data-fb="${escapeHtml(badgeText)}" data-c1="${safeColor(c1,'#3b82f6')}" data-c2="${safeColor(c2,'#1d4ed8')}" onerror="handleCryptoImgError(this)"></span>`;
+      return `<span class="asset-icon asset-icon-crypto"><img src="${escapeHtml(iconUrl)}" alt="${escapeHtml(a.symbol || a.name)}" class="crypto-logo-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-sym="${escapeHtml(sym || id)}" data-fb="${escapeHtml(badgeText)}" data-c1="${safeColor(c1,'#3b82f6')}" data-c2="${safeColor(c2,'#1d4ed8')}"></span>`;
     }
   }
 
@@ -5731,7 +5737,7 @@ function ticker(a){
 }
 function marketCard(a){
   const t = assetTitles(a);
-  const srcHtml = isAdminUser() ? `<div class="source">${srcLabel(a)}</div>` : '';
+  const srcHtml = isAdminUser() ? `<div class="source">${escapeHtml(srcLabel(a))}</div>` : '';
   return `<article class="market-card" data-detail="${escapeHtml(a.id)}" style="--ticker:${safeColor(a.color)}"><div class="card-top">${assetIcon(a)}<div style="min-width:0;flex:1;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="asset-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="asset-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10.5px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="price">${quote(a)}</div><div class="card-bottom"><span class="change ${a.change>=0?'up':'down'}">${a.change>=0?'↗':'↘'} ${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div>${srcHtml}</article>`;
 }
 const srcLabel=a=>quality(a);
@@ -5739,7 +5745,7 @@ const srcLabel=a=>quality(a);
 function featCard(a){
   const up=a.change>=0;
   const t = assetTitles(a);
-  const srcHtml = isAdminUser() ? `<div class="source">${srcLabel(a)}</div>` : '';
+  const srcHtml = isAdminUser() ? `<div class="source">${escapeHtml(srcLabel(a))}</div>` : '';
   return `<article class="market-card" data-detail="${escapeHtml(a.id)}" style="--ticker:${safeColor(a.color)}"><div class="card-top">${assetIcon(a)}<div style="min-width:0;flex:1;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="asset-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="asset-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10.5px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="price">${quote(a)}</div><div class="card-bottom"><span class="change ${up?'up':'down'}">${up?'+':'−'}${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div>${srcHtml}</article>`;
 }
 function renderFeatured(){if(fd)return;$('#featuredGrid').innerHTML=state.featured.map(id=>assets.find(a=>a.id===id)).filter(Boolean).slice(0,24).map(a=>featCard(a)).join('')}
@@ -6145,6 +6151,8 @@ function authWire(go){
       b.setAttribute('aria-label', show?'پنهان کردن رمز':'نمایش رمز');
     };
   });
+  const af=$('#authForm');
+  if(af)af.addEventListener('submit',e=>e.preventDefault());
   $$('#modalBody input').forEach(i=>i.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();go()}}));
 }
 const authErr=(m,t)=>{m.className='auth-msg err';m.textContent=t};
@@ -6196,7 +6204,7 @@ function authModal(initialOpt = 'email', prefill = {}) {
     if (isEmailStep) {
       bodyHtml = `
         <div class="auth-box">
-          <form id="authForm" onsubmit="return false;" style="display:flex;flex-direction:column;gap:10px">
+          <form id="authForm" style="display:flex;flex-direction:column;gap:10px">
             <div class="field">
               <label for="aEmail">ایمیل</label>
               <div class="modern-input-wrap">
@@ -6225,7 +6233,7 @@ function authModal(initialOpt = 'email', prefill = {}) {
           ${(!formState.hasPassword && formState.hasGoogle) ? `
             <p class="muted" style="font-size:11.5px;margin:0;line-height:1.7">این ایمیل قبلاً با گوگل ثبت شده است؛ می‌توانی با گوگل وارد شوی یا از «فراموشی رمز عبور» برای تنظیم رمز استفاده کنی.</p>
           ` : ''}
-          <form id="authForm" onsubmit="return false;" style="display:flex;flex-direction:column;gap:10px">
+          <form id="authForm" style="display:flex;flex-direction:column;gap:10px">
             <div class="field">
               <label for="aPass">رمز عبور</label>
               <div class="pw-wrap modern-input-wrap">
@@ -6255,7 +6263,7 @@ function authModal(initialOpt = 'email', prefill = {}) {
             <button type="button" id="aChangeEmail">تغییر ایمیل</button>
           </div>
           <p class="muted" style="font-size:11.5px;margin:0;line-height:1.7">حسابی با این ایمیل ثبت نشده است؛ برای ثبت‌نام نام و رمز عبورت را وارد کن.</p>
-          <form id="authForm" onsubmit="return false;" style="display:flex;flex-direction:column;gap:10px">
+          <form id="authForm" style="display:flex;flex-direction:column;gap:10px">
             <div class="field">
               <label for="aName">نام و نام خانوادگی</label>
               <div class="modern-input-wrap">
@@ -7573,14 +7581,14 @@ function calculateConversion() {
 function marketListRow(a) {
   const up = (a.change || 0) >= 0;
   const t = assetTitles(a);
-  const srcHtml = isAdminUser() ? `<div class="source" style="font-size:8.5px;color:var(--muted);margin-top:2px;border-top:0;padding-top:0">${srcLabel(a)}</div>` : '';
+  const srcHtml = isAdminUser() ? `<div class="source" style="font-size:8.5px;color:var(--muted);margin-top:2px;border-top:0;padding-top:0">${escapeHtml(srcLabel(a))}</div>` : '';
   return `
-    <article class="market-list-row" data-detail="${a.id}">
+    <article class="market-list-row" data-detail="${escapeHtml(a.id)}">
       <div style="display:flex;align-items:center;gap:10px;min-width:0">
         ${assetIcon(a)}
         <div style="min-width:0;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">
           <div style="font-weight:900;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">${escapeHtml(t.title)}</div>
-          <div class="asset-symbol" style="font-size:10px;color:var(--muted);text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">${escapeHtml(t.sub)} · ${catName(a.cat)}</div>
+          <div class="asset-symbol" style="font-size:10px;color:var(--muted);text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">${escapeHtml(t.sub)} · ${escapeHtml(catName(a.cat))}</div>
         </div>
       </div>
       <div class="list-spark" style="width:75px;height:24px">${spark(a)}</div>
@@ -7745,10 +7753,10 @@ function renderMarketMovers(){
     const el = $(sel);
     if (!el) return;
     if (sig !== lastMoversSig || !el.children.length) {
-      el.innerHTML = arr.length ? arr.map(ticker).join('') : `<div class="empty" style="flex:1">${msg}</div>`;
+      el.innerHTML = arr.length ? arr.map(ticker).join('') : `<div class="empty" style="flex:1">${escapeHtml(msg)}</div>`;
     } else {
       arr.forEach(a => {
-        const card = el.querySelector(`[data-detail="${a.id}"]`);
+        const card = el.querySelector(`[data-detail="${CSS.escape(String(a.id))}"]`);
         if (card) {
           const pr = card.querySelector('.ticker-price');
           if (pr) pr.innerHTML = quote(a);
@@ -7862,7 +7870,7 @@ function renderPortfolio(){
     const diffPct = (hCost > 0) ? (diff / hCost) * 100 : 0;
     const isUp = diff >= 0;
 
-    return `<article class="holding holding-card-responsive clickable" data-edit-holding="${h.id}" style="cursor:pointer">
+    return `<article class="holding holding-card-responsive clickable" data-edit-holding="${escapeHtml(h.id)}" style="cursor:pointer">
       <div class="holding-info-col">
         ${assetIcon(a)}
         <div class="holding-meta">
@@ -8071,8 +8079,8 @@ async function renderAdmin() {
             <tr>
               <td><strong>${escapeHtml(f.name)}</strong></td>
               <td><span class="role-badge user">${escapeHtml(f.protocol || f.type || 'api')}</span></td>
-              <td style="direction:ltr;text-align:right">${f.pingMs ? f.pingMs + ' ms' : '—'}</td>
-              <td>${f.reliability || '100%'}</td>
+              <td style="direction:ltr;text-align:right">${f.pingMs ? escapeHtml(String(f.pingMs)) + ' ms' : '—'}</td>
+              <td>${escapeHtml(f.reliability || '100%')}</td>
               <td><span class="status-pill active">آنلاین و فعال</span></td>
             </tr>
           `).join('');
@@ -8088,8 +8096,8 @@ async function renderAdmin() {
                 <span class="status-pill active">آنلاین</span>
               </div>
               <div class="admin-card-item-footer" style="padding-top:6px">
-                <span class="muted" style="font-size:11px">تأخیر: <strong style="direction:ltr;color:var(--ink)">${f.pingMs ? f.pingMs + ' ms' : '—'}</strong></span>
-                <span class="muted" style="font-size:11px">پایداری: <strong style="color:var(--ink)">${f.reliability || '100%'}</strong></span>
+                <span class="muted" style="font-size:11px">تأخیر: <strong style="direction:ltr;color:var(--ink)">${f.pingMs ? escapeHtml(String(f.pingMs)) + ' ms' : '—'}</strong></span>
+                <span class="muted" style="font-size:11px">پایداری: <strong style="color:var(--ink)">${escapeHtml(f.reliability || '100%')}</strong></span>
               </div>
             </div>
           `).join('');
@@ -8640,7 +8648,7 @@ async function renderAdmin() {
                     </div>
                   </td>
                   <td style="text-align:right"><span style="direction:rtl;text-align:right;display:inline-block">${escapeHtml(a.symbol)}</span></td>
-                  <td><span class="role-badge user">${catName(a.cat)}</span></td>
+                  <td><span class="role-badge user">${escapeHtml(catName(a.cat))}</span></td>
                   <td><span class="muted" style="font-size:11px">${escapeHtml(a.source || 'KuCoin/OKX')}</span></td>
                   <td>${quote(a)}</td>
                   <td style="color:${(a.change || 0) >= 0 ? 'var(--green)' : 'var(--red)'};direction:ltr;text-align:right">
@@ -8664,7 +8672,7 @@ async function renderAdmin() {
                     <small style="color:var(--muted);font-size:10px;display:block;text-align:right;direction:rtl">${escapeHtml(a.symbol)}</small>
                   </div>
                 </div>
-                <span class="role-badge user">${catName(a.cat)}</span>
+                <span class="role-badge user">${escapeHtml(catName(a.cat))}</span>
               </div>
               <div class="admin-card-item-footer" style="padding-top:6px">
                 <div>
@@ -9432,7 +9440,6 @@ function alertForm(selectedId=null,editIdx=null){
 }
 function safeColor(c,def='#7357ff'){return /^#[0-9a-f]{3,8}$/i.test(String(c||'').trim())?String(c).trim():def}
 function safeImgUrl(u){const s=String(u||'').trim();return (/^https:\/\//i.test(s)||s.startsWith('/'))?s:''}
-function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function detail(id) {
   const a = asset(id);
   const fxUsdt = asset('usdt').price > 0 ? asset('usdt').price : (asset('usd').price > 0 ? asset('usd').price : 0);
@@ -9489,7 +9496,7 @@ function detail(id) {
         <b data-detail-live>${quote(a)}</b>
       </div>
       <div class="detail-metric">
-        <small>${altLabel || 'نرخ برابری'}</small>
+        <small>${escapeHtml(altLabel || 'نرخ برابری')}</small>
         <b style="color:var(--primary)">${altVal || '—'}</b>
       </div>
       <div class="detail-metric">
@@ -9498,7 +9505,7 @@ function detail(id) {
       </div>
       <div class="detail-metric">
         <small>دسته‌بندی</small>
-        <b>${catName(a.cat)}</b>
+        <b>${escapeHtml(catName(a.cat))}</b>
       </div>
     </div>
     <div class="page-actions" style="margin-top:14px">

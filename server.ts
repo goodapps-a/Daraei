@@ -16,6 +16,11 @@ import {
 } from './src/modules/market-core.js';
 import {
   buildHtmlCsp,
+  extractInlineScriptBodies,
+  teq,
+  sha256Hex,
+  hmacHex,
+  createMemoryRateLimiter,
   cleanEmail,
   isEmail,
   okPass,
@@ -23,6 +28,11 @@ import {
   getAdminEmails,
   getPrimaryAdminEmail,
   isEmailAdmin as isEnvAdminEmail,
+  getConfiguredAdminPassword as getSharedAdminPassword,
+  hashPassword,
+  verifyPassword,
+  parsePbkdf2Hash,
+  iterOf,
   isSafePublicUrl,
   cleanData,
   validateTransactions
@@ -64,7 +74,7 @@ app.use((req, res, next) => {
   next();
 });
 
-const rateBuckets = new Map<string, { n: number; reset: number }>();
+const memRateLimiter = createMemoryRateLimiter(5000);
 function getClientIp(req: express.Request): string {
   const cf = req.headers['cf-connecting-ip'];
   if (typeof cf === 'string' && cf.trim()) return cf.trim().slice(0, 64);
@@ -74,19 +84,7 @@ function getClientIp(req: express.Request): string {
 }
 
 function checkRateLimit(key: string, limit: number, windowSec: number): boolean {
-  const now = Math.floor(Date.now() / 1000);
-  if (rateBuckets.size > 5000) {
-    for (const [k, v] of rateBuckets) {
-      if (v.reset <= now) rateBuckets.delete(k);
-    }
-  }
-  const cur = rateBuckets.get(key);
-  if (!cur || cur.reset <= now) {
-    rateBuckets.set(key, { n: 1, reset: now + windowSec });
-    return true;
-  }
-  cur.n += 1;
-  return cur.n <= limit;
+  return memRateLimiter.check(key, limit, windowSec).allowed;
 }
 
 function verifyCsrf(req: express.Request): boolean {
@@ -1473,46 +1471,25 @@ const AUTH_SECRET = (process.env.AUTH_SECRET && process.env.AUTH_SECRET.trim().l
   : crypto.randomBytes(32).toString('hex');
 const AUTH_SESSION_FILE = path.join(__dirname, '.auth-session.json');
 
-function sha256Hex(input: string): string {
-  return crypto.createHash('sha256').update(String(input)).digest('hex');
-}
-
-function hmacHex(secret: string, data: string): string {
-  return crypto.createHmac('sha256', secret).update(String(data)).digest('hex');
-}
-
-function safeEqualStr(a: string, b: string): boolean {
-  const bufA = Buffer.from(String(a || ''));
-  const bufB = Buffer.from(String(b || ''));
-  if (bufA.length !== bufB.length) return false;
-  return crypto.timingSafeEqual(bufA, bufB);
-}
-
-function hashPasswordSync(password: string, saltHex?: string): string {
-  const salt = saltHex || crypto.randomBytes(16).toString('hex');
-  const derived = crypto.pbkdf2Sync(String(password), salt, 100000, 32, 'sha256').toString('hex');
-  return `pbkdf2$${salt}$${derived}`;
-}
-
-function verifyPasswordSync(password: string, storedHash: string): boolean {
+async function verifyStoredPassword(password: string, storedHash: string): Promise<boolean> {
   if (!storedHash || typeof storedHash !== 'string') return false;
-  if (storedHash.startsWith('pbkdf2$')) {
-    const parts = storedHash.split('$');
-    if (parts.length !== 3) return false;
+  if (parsePbkdf2Hash(storedHash)) {
+    return verifyPassword(password, storedHash, process.env);
+  }
+  // پشتیبانی موقت از فرمت قدیمی ۳بخشی ذخیره‌شده در .auth-session.json و ارتقای خودکار هنگام ورود
+  const parts = storedHash.split('$');
+  if (parts.length === 3 && parts[0] === 'pbkdf2') {
     const [, salt, hash] = parts;
     const candidate = crypto.pbkdf2Sync(String(password), salt, 100000, 32, 'sha256').toString('hex');
-    return safeEqualStr(candidate, hash);
+    return teq(candidate, hash);
   }
   return false;
 }
 
-function getConfiguredAdminPassword(): string | null {
-  const adminEmails = getAdminEmails(process.env);
-  if (!adminEmails.length) return null;
-  const raw = String(process.env.ADMIN_PASSWORD || '').trim();
-  if (!raw || raw.length < 8) return null;
-  if (isEmailAdmin(cleanEmail(raw))) return null;
-  return raw;
+function shouldUpgradeStoredHash(storedHash: string): boolean {
+  const parsed = parsePbkdf2Hash(storedHash);
+  if (!parsed) return Boolean(storedHash && storedHash.startsWith('pbkdf2$'));
+  return parsed.iter < iterOf(process.env);
 }
 
 interface StoredUser {
@@ -1545,7 +1522,8 @@ const activeSessions = new Map<string, SessionRecord>();
 const revokedSessions = new Set<string>();
 let broadcastMessage: string = '';
 
-const initialAdminPass = getConfiguredAdminPassword();
+const initialAdminPass = getSharedAdminPassword(process.env);
+const initialAdminPassHash = initialAdminPass ? await hashPassword(initialAdminPass, process.env) : '';
 const configuredAdminList = getAdminEmails(process.env);
 const primaryAdminEmail = getPrimaryAdminEmail(process.env);
 let systemUsers: StoredUser[] = [
@@ -1559,7 +1537,7 @@ let systemUsers: StoredUser[] = [
     holdingsCount: 0,
     alertsCount: 0,
     lastLogin: 'هم‌اکنون',
-    passwordHash: initialAdminPass ? hashPasswordSync(initialAdminPass) : ''
+    passwordHash: initialAdminPassHash
   })),
   { id: 'u_2', name: 'امیرحسین رضایی', email: 'amir.financial@yahoo.com', role: 'user', status: 'active', registeredAt: '1403/06/10', holdingsCount: 12, alertsCount: 3, lastLogin: '۲ ساعت قبل', passwordHash: '' },
   { id: 'u_3', name: 'سارا تهرانی', email: 'sara.trader@gmail.com', role: 'user', status: 'active', registeredAt: '1403/08/22', holdingsCount: 5, alertsCount: 2, lastLogin: 'دیروز', passwordHash: '' },
@@ -1652,11 +1630,11 @@ let systemAuditLogs = [
   { id: 4, time: '۳۵ دقیقه قبل', type: 'system', msg: 'بررسی سلامت کش قیمت‌ها و ارتباط با دیتابیس با موفقیت انجام شد.' }
 ];
 
-function createSessionForUser(res: express.Response, req: express.Request, user: StoredUser) {
+async function createSessionForUser(res: express.Response, req: express.Request, user: StoredUser) {
   const baseSid = crypto.randomBytes(32).toString('hex');
-  const sig = hmacHex(AUTH_SECRET, baseSid);
+  const sig = await hmacHex(AUTH_SECRET, baseSid);
   const signedToken = `${baseSid}.${sig}`;
-  const sidHash = sha256Hex(baseSid);
+  const sidHash = await sha256Hex(baseSid);
   const ttlSec = 60 * 60 * 24 * 14;
   const nowSec = Math.floor(Date.now() / 1000);
   const meta = getAdminRoleMeta(user.email, user.role);
@@ -1715,17 +1693,17 @@ function extractRawSessionToken(req: express.Request): string {
   return '';
 }
 
-function resolveReqUser(req: express.Request) {
+async function resolveReqUser(req: express.Request) {
   const rawToken = extractRawSessionToken(req);
   if (!rawToken || !rawToken.includes('.')) return null;
   const dotIdx = rawToken.indexOf('.');
   const baseSid = rawToken.slice(0, dotIdx);
   const sig = rawToken.slice(dotIdx + 1);
   if (!baseSid || !sig) return null;
-  const expectedSig = hmacHex(AUTH_SECRET, baseSid);
-  if (!safeEqualStr(sig, expectedSig)) return null;
+  const expectedSig = await hmacHex(AUTH_SECRET, baseSid);
+  if (!teq(sig, expectedSig)) return null;
 
-  const sidHash = sha256Hex(baseSid);
+  const sidHash = await sha256Hex(baseSid);
   if (revokedSessions.has(sidHash)) return null;
 
   const sess = activeSessions.get(sidHash);
@@ -1756,8 +1734,8 @@ function resolveReqUser(req: express.Request) {
 }
 
 // Download endpoint for the final Cloudflare Worker bundle (Admin-only)
-app.get('/api/download/worker.js', (req, res) => {
-  const u = resolveReqUser(req);
+app.get('/api/download/worker.js', async (req, res) => {
+  const u = await resolveReqUser(req);
   if (!u || !u.isAdmin) {
     return res.status(403).json({ error: 'دسترسی فقط برای مدیر سیستم مجاز است.' });
   }
@@ -1775,8 +1753,8 @@ app.get('/api/download/worker.js', (req, res) => {
   return res.status(404).send('Worker file not built yet.');
 });
 
-app.get('/api/me', (req, res) => {
-  res.json({ user: resolveReqUser(req) });
+app.get('/api/me', async (req, res) => {
+  res.json({ user: await resolveReqUser(req) });
 });
 
 app.post('/api/auth/check-email', (req, res) => {
@@ -1795,7 +1773,7 @@ app.post('/api/auth/check-email', (req, res) => {
     return res.json({
       ok: true,
       exists: true,
-      hasPassword: Boolean(existing?.passwordHash || (isAdmin && getConfiguredAdminPassword())),
+      hasPassword: Boolean(existing?.passwordHash || (isAdmin && getSharedAdminPassword(process.env))),
       hasGoogle: false
     });
   }
@@ -1806,7 +1784,7 @@ app.post('/api/auth/check-email', (req, res) => {
   });
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const ip = getClientIp(req);
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'ایمیل و رمز عبور را وارد کنید.' });
@@ -1830,12 +1808,16 @@ app.post('/api/auth/login', (req, res) => {
     if (cleanEmail(passStr) === normalizedEmail) {
       return res.status(401).json({ error: 'استفاده از آدرس ایمیل به‌عنوان رمز عبور مدیر مجاز نیست.' });
     }
-    const envAdminPass = getConfiguredAdminPassword();
+    const envAdminPass = getSharedAdminPassword(process.env);
     let adminAuthenticated = false;
-    if (existing?.passwordHash && verifyPasswordSync(passStr, existing.passwordHash)) {
+    if (existing?.passwordHash && await verifyStoredPassword(passStr, existing.passwordHash)) {
       adminAuthenticated = true;
-    } else if ((!existing || !existing.passwordHash) && envAdminPass && safeEqualStr(passStr, envAdminPass)) {
+      if (shouldUpgradeStoredHash(existing.passwordHash)) {
+        existing.passwordHash = await hashPassword(passStr, process.env);
+      }
+    } else if ((!existing || !existing.passwordHash) && envAdminPass && teq(passStr, envAdminPass)) {
       adminAuthenticated = true;
+      const newHash = await hashPassword(passStr, process.env);
       if (!existing) {
         const isPrimary = normalizedEmail === getPrimaryAdminEmail(process.env);
         existing = {
@@ -1848,28 +1830,31 @@ app.post('/api/auth/login', (req, res) => {
           holdingsCount: 0,
           alertsCount: 0,
           lastLogin: 'هم‌اکنون',
-          passwordHash: hashPasswordSync(passStr)
+          passwordHash: newHash
         };
         systemUsers.unshift(existing);
       } else {
-        existing.passwordHash = hashPasswordSync(passStr);
+        existing.passwordHash = newHash;
       }
     }
     if (!adminAuthenticated) {
       return res.status(401).json({ error: 'ایمیل یا رمز عبور نادرست است.' });
     }
   } else {
-    if (!existing || !existing.passwordHash || !verifyPasswordSync(passStr, existing.passwordHash)) {
+    if (!existing || !existing.passwordHash || !(await verifyStoredPassword(passStr, existing.passwordHash))) {
       return res.status(401).json({ error: 'ایمیل یا رمز عبور نادرست است.' });
     }
     if (existing.status === 'suspended') {
       return res.status(403).json({ error: 'حساب کاربری شما توسط مدیریت مسدود شده است.' });
     }
+    if (shouldUpgradeStoredHash(existing.passwordHash)) {
+      existing.passwordHash = await hashPassword(passStr, process.env);
+    }
   }
 
   const targetUser = existing!;
   targetUser.lastLogin = 'هم‌اکنون';
-  const sessionUser = createSessionForUser(res, req, targetUser);
+  const sessionUser = await createSessionForUser(res, req, targetUser);
   saveAuthSessionToDisk();
 
   systemAuditLogs.unshift({
@@ -1883,12 +1868,12 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 // Admin Panel APIs
-app.use('/api/admin', (req, res, next) => {
+app.use('/api/admin', async (req, res, next) => {
   const ip = getClientIp(req);
   if (!checkRateLimit(`admin:${ip}`, 60, 60)) {
     return res.status(429).json({ error: 'تعداد درخواست‌های پنل مدیریت بیش از حد مجاز است.' });
   }
-  const u = resolveReqUser(req);
+  const u = await resolveReqUser(req);
   if (!u || !u.isAdmin) {
     return res.status(403).json({ error: 'دسترسی فقط برای مدیر سیستم مجاز است.' });
   }
@@ -2077,8 +2062,8 @@ app.get('/api/admin/users', (req, res) => {
   res.json({ ok: true, users: systemUsers.map(sanitizeUserForAdmin) });
 });
 
-app.post('/api/admin/users/:id/toggle', (req, res) => {
-  const reqAdmin = resolveReqUser(req);
+app.post('/api/admin/users/:id/toggle', async (req, res) => {
+  const reqAdmin = await resolveReqUser(req);
   const u = systemUsers.find(x => x.id === req.params.id);
   if (!u) return res.status(404).json({ error: 'کاربر یافت نشد.' });
   const meta = getAdminRoleMeta(u.email, u.role);
@@ -2102,8 +2087,8 @@ app.post('/api/admin/users/:id/toggle', (req, res) => {
   res.json({ ok: true, user: sanitizeUserForAdmin(u) });
 });
 
-app.post('/api/admin/users/:id/role', (req, res) => {
-  const reqAdmin = resolveReqUser(req);
+app.post('/api/admin/users/:id/role', async (req, res) => {
+  const reqAdmin = await resolveReqUser(req);
   if (!reqAdmin || !reqAdmin.isPrimaryAdmin) {
     return res.status(403).json({ error: 'تغییر سطح دسترسی ادمین فقط توسط مدیر اصلی سیستم مجاز است.' });
   }
@@ -2150,8 +2135,8 @@ app.post('/api/admin/logs/clear', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/admin/users/add', (req, res) => {
-  const reqAdmin = resolveReqUser(req);
+app.post('/api/admin/users/add', async (req, res) => {
+  const reqAdmin = await resolveReqUser(req);
   const { name, email, password, role } = req.body || {};
   if (!name || !email) return res.status(400).json({ error: 'نام و ایمیل الزامی است.' });
   const normalizedEmail = cleanEmail(email);
@@ -2182,7 +2167,7 @@ app.post('/api/admin/users/add', (req, res) => {
     holdingsCount: 0,
     alertsCount: 0,
     lastLogin: 'تازه ثبت‌نام‌شده',
-    passwordHash: hashPasswordSync(pass)
+    passwordHash: await hashPassword(pass, process.env)
   };
   systemUsers.unshift(newUser);
   saveAuthSessionToDisk();
@@ -2195,8 +2180,8 @@ app.post('/api/admin/users/add', (req, res) => {
   res.json({ ok: true, user: sanitizeUserForAdmin(newUser) });
 });
 
-app.post('/api/admin/password', (req, res) => {
-  const reqAdmin = resolveReqUser(req);
+app.post('/api/admin/password', async (req, res) => {
+  const reqAdmin = await resolveReqUser(req);
   if (!reqAdmin || !reqAdmin.isAdmin) {
     return res.status(403).json({ error: 'دسترسی فقط برای مدیر سیستم مجاز است.' });
   }
@@ -2210,9 +2195,9 @@ app.post('/api/admin/password', (req, res) => {
   }
   const adminUser = systemUsers.find(u => u.email.toLowerCase() === targetEmail);
   if (adminUser) {
-    adminUser.passwordHash = hashPasswordSync(newPassword);
+    adminUser.passwordHash = await hashPassword(newPassword, process.env);
     revokeUserSessions(adminUser.email);
-    createSessionForUser(res, req, adminUser);
+    await createSessionForUser(res, req, adminUser);
     saveAuthSessionToDisk();
   } else if (targetEmail) {
     revokeUserSessions(targetEmail);
@@ -2288,7 +2273,7 @@ app.post('/api/admin/broadcast', (req, res) => {
   res.json({ ok: true, message: broadcastMessage });
 });
 
-app.post('/api/auth/register/start', (req, res) => {
+app.post('/api/auth/register/start', async (req, res) => {
   if (systemSettings.maintenance) {
     return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
   }
@@ -2318,11 +2303,11 @@ app.post('/api/auth/register/start', (req, res) => {
 
   const code = String(crypto.randomInt(100000, 1000000));
   pendingOtps[`register:${normalizedEmail}`] = {
-    codeHash: sha256Hex(code),
+    codeHash: await sha256Hex(code),
     expires: Date.now() + 10 * 60 * 1000,
     attempts: 0,
     name: cleanName,
-    passwordHash: hashPasswordSync(passStr)
+    passwordHash: await hashPassword(passStr, process.env)
   };
   
   systemAuditLogs.unshift({
@@ -2335,7 +2320,7 @@ app.post('/api/auth/register/start', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/auth/register/verify', (req, res) => {
+app.post('/api/auth/register/verify', async (req, res) => {
   if (systemSettings.maintenance) {
     return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
   }
@@ -2361,7 +2346,7 @@ app.post('/api/auth/register/verify', (req, res) => {
     delete pendingOtps[`register:${normalizedEmail}`];
     return res.status(400).json({ error: 'تعداد تلاش‌های مجاز برای این کد به پایان رسید. کد جدید دریافت کنید.' });
   }
-  if (cleanCode.length !== 6 || !safeEqualStr(sha256Hex(cleanCode), otpRec.codeHash)) {
+  if (cleanCode.length !== 6 || !teq(await sha256Hex(cleanCode), otpRec.codeHash)) {
     return res.status(400).json({ error: 'کد تأیید نادرست است.' });
   }
 
@@ -2380,12 +2365,12 @@ app.post('/api/auth/register/verify', (req, res) => {
       holdingsCount: 0,
       alertsCount: 0,
       lastLogin: 'هم‌اکنون',
-      passwordHash: otpRec.passwordHash || hashPasswordSync(crypto.randomBytes(16).toString('hex'))
+      passwordHash: otpRec.passwordHash || await hashPassword(crypto.randomBytes(16).toString('hex'), process.env)
     };
     systemUsers.push(existing);
   }
 
-  const sessionUser = createSessionForUser(res, req, existing);
+  const sessionUser = await createSessionForUser(res, req, existing);
   saveAuthSessionToDisk();
 
   systemAuditLogs.unshift({
@@ -2398,7 +2383,7 @@ app.post('/api/auth/register/verify', (req, res) => {
   res.json({ ok: true, user: sessionUser });
 });
 
-app.post('/api/auth/reset/start', (req, res) => {
+app.post('/api/auth/reset/start', async (req, res) => {
   if (systemSettings.maintenance) {
     return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
   }
@@ -2416,7 +2401,7 @@ app.post('/api/auth/reset/start', (req, res) => {
   }
   const code = String(crypto.randomInt(100000, 1000000));
   pendingOtps[`reset:${normalizedEmail}`] = {
-    codeHash: sha256Hex(code),
+    codeHash: await sha256Hex(code),
     expires: Date.now() + 10 * 60 * 1000,
     attempts: 0
   };
@@ -2431,7 +2416,7 @@ app.post('/api/auth/reset/start', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/auth/reset/verify', (req, res) => {
+app.post('/api/auth/reset/verify', async (req, res) => {
   if (systemSettings.maintenance) {
     return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
   }
@@ -2454,20 +2439,20 @@ app.post('/api/auth/reset/verify', (req, res) => {
     delete pendingOtps[`reset:${normalizedEmail}`];
     return res.status(400).json({ error: 'تعداد تلاش‌های مجاز برای این کد به پایان رسید.' });
   }
-  if (cleanCode.length !== 6 || !safeEqualStr(sha256Hex(cleanCode), otpRec.codeHash)) {
+  if (cleanCode.length !== 6 || !teq(await sha256Hex(cleanCode), otpRec.codeHash)) {
     return res.status(400).json({ error: 'کد تأیید نادرست است.' });
   }
 
   delete pendingOtps[`reset:${normalizedEmail}`];
   const rawResetToken = 'rst_' + crypto.randomBytes(24).toString('hex');
   pendingResets[normalizedEmail] = {
-    tokenHash: sha256Hex(rawResetToken),
+    tokenHash: await sha256Hex(rawResetToken),
     expires: Date.now() + 10 * 60 * 1000
   };
   res.json({ ok: true, resetToken: rawResetToken });
 });
 
-app.post('/api/auth/reset/finish', (req, res) => {
+app.post('/api/auth/reset/finish', async (req, res) => {
   if (systemSettings.maintenance) {
     return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
   }
@@ -2481,7 +2466,7 @@ app.post('/api/auth/reset/finish', (req, res) => {
     return res.status(429).json({ error: 'تعداد درخواست‌ها بیش از حد مجاز است.' });
   }
   const resetRec = pendingResets[normalizedEmail];
-  if (!resetRec || resetRec.expires < Date.now() || !safeEqualStr(sha256Hex(String(resetToken)), resetRec.tokenHash)) {
+  if (!resetRec || resetRec.expires < Date.now() || !teq(await sha256Hex(String(resetToken)), resetRec.tokenHash)) {
     return res.status(400).json({ error: 'توکن بازیابی رمز عبور نامعتبر یا منقضی شده است.' });
   }
 
@@ -2499,9 +2484,9 @@ app.post('/api/auth/reset/finish', (req, res) => {
     return res.status(404).json({ error: 'کاربر یافت نشد.' });
   }
 
-  u.passwordHash = hashPasswordSync(passStr);
+  u.passwordHash = await hashPassword(passStr, process.env);
   revokeUserSessions(normalizedEmail);
-  const sessionUser = createSessionForUser(res, req, u);
+  const sessionUser = await createSessionForUser(res, req, u);
   saveAuthSessionToDisk();
 
   systemAuditLogs.unshift({
@@ -2514,12 +2499,12 @@ app.post('/api/auth/reset/finish', (req, res) => {
   res.json({ ok: true, user: sessionUser });
 });
 
-app.post('/api/auth/logout', (req, res) => {
+app.post('/api/auth/logout', async (req, res) => {
   const rawToken = extractRawSessionToken(req);
   if (rawToken && rawToken.includes('.')) {
     const baseSid = rawToken.slice(0, rawToken.indexOf('.'));
     if (baseSid) {
-      const sidHash = sha256Hex(baseSid);
+      const sidHash = await sha256Hex(baseSid);
       activeSessions.delete(sidHash);
       revokedSessions.add(sidHash);
     }
@@ -2528,8 +2513,8 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-app.delete('/api/me', (req, res) => {
-  const u = resolveReqUser(req);
+app.delete('/api/me', async (req, res) => {
+  const u = await resolveReqUser(req);
   if (!u) {
     return res.status(401).json({ error: 'ابتدا وارد حساب کاربری خود شوید.' });
   }
@@ -2962,8 +2947,8 @@ function validateHoldingsLedger(holdings: any[]): string | null {
   return null;
 }
 
-app.get('/api/me/data', (req, res) => {
-  const u = resolveReqUser(req);
+app.get('/api/me/data', async (req, res) => {
+  const u = await resolveReqUser(req);
   if (!u) {
     return res.status(401).json({ error: 'ابتدا وارد حساب کاربری خود شوید.' });
   }
@@ -3009,8 +2994,8 @@ app.get('/api/me/data', (req, res) => {
   });
 });
 
-app.put('/api/me/data', (req, res) => {
-  const u = resolveReqUser(req);
+app.put('/api/me/data', async (req, res) => {
+  const u = await resolveReqUser(req);
   if (!u) {
     return res.status(401).json({ error: 'ابتدا وارد حساب کاربری خود شوید.' });
   }
@@ -3067,8 +3052,8 @@ app.put('/api/me/data', (req, res) => {
   res.json(updated);
 });
 
-app.post('/api/me/alerts/:id/retry', (req, res) => {
-  const u = resolveReqUser(req);
+app.post('/api/me/alerts/:id/retry', async (req, res) => {
+  const u = await resolveReqUser(req);
   if (!u) {
     return res.status(401).json({ error: 'ابتدا وارد حساب کاربری خود شوید.' });
   }
@@ -3137,17 +3122,33 @@ self.addEventListener('fetch', () => {
 `);
 });
 
-// Serve root PWA HTML directly with anti-cache & CSP headers
+// Serve root PWA HTML directly with anti-cache & strict hash-based CSP headers
+let cachedHtmlMeta: { mtimeMs: number; html: string; hashes: string[] } | null = null;
+function getServedHtmlAndHashes(htmlPath: string): { html: string; hashes: string[] } | null {
+  if (!fs.existsSync(htmlPath)) return null;
+  const stat = fs.statSync(htmlPath);
+  if (cachedHtmlMeta && cachedHtmlMeta.mtimeMs === stat.mtimeMs) {
+    return { html: cachedHtmlMeta.html, hashes: cachedHtmlMeta.hashes };
+  }
+  const html = fs.readFileSync(htmlPath, 'utf8');
+  const hashes = extractInlineScriptBodies(html).map(
+    (body) => `sha256-${crypto.createHash('sha256').update(body, 'utf8').digest('base64')}`
+  );
+  cachedHtmlMeta = { mtimeMs: stat.mtimeMs, html, hashes };
+  return { html, hashes };
+}
+
 app.get(['/', '/index.html'], (req, res) => {
   const htmlPath = path.join(__dirname, 'src', 'index.html');
-  if (fs.existsSync(htmlPath)) {
+  const loaded = getServedHtmlAndHashes(htmlPath);
+  if (loaded) {
     res.setHeader('content-type', 'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate, max-age=0');
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     res.setHeader('Surrogate-Control', 'no-store');
-    res.setHeader('Content-Security-Policy', buildHtmlCsp(isPreviewRequest(req)));
-    return res.sendFile(htmlPath);
+    res.setHeader('Content-Security-Policy', buildHtmlCsp(isPreviewRequest(req), loaded.hashes));
+    return res.send(loaded.html);
   }
   return res.status(404).send('HTML not found.');
 });

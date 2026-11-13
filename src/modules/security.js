@@ -11,15 +11,33 @@ export const SEC_HEADERS = {
   'strict-transport-security': 'max-age=31536000; includeSubDomains'
 };
 
-export const PROD_CSP = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https: wss://stream.binance.com:443 wss://data-stream.binance.vision; frame-ancestors 'self'; base-uri 'self'; form-action 'self'";
+export const PROD_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; worker-src 'self' blob:; connect-src 'self' wss://stream.binance.com:443 wss://data-stream.binance.vision; frame-ancestors 'self'; base-uri 'self'; form-action 'self'";
 
-export function buildHtmlCsp(allowPreviewFrame = false) {
+export function extractInlineScriptBodies(html) {
+  const bodies = [];
+  const scriptRe = /<script\b([^>]*)>([\s\S]*?)<\/script>/gi;
+  let match;
+  while ((match = scriptRe.exec(String(html || ''))) !== null) {
+    const attrs = match[1] || '';
+    if (/\bsrc\s*=/i.test(attrs)) continue;
+    bodies.push(match[2] || '');
+  }
+  return bodies;
+}
+
+export function buildHtmlCsp(allowPreviewFrame = false, scriptHashes = []) {
   const frameAncestors = typeof allowPreviewFrame === 'string'
     ? allowPreviewFrame
     : (allowPreviewFrame
         ? "'self' https://aistudio.google.com https://*.aistudio.google.com https://*.googleusercontent.com https://*.google.com"
         : "'self'");
-  return `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; worker-src 'self' blob:; connect-src 'self' https: wss://stream.binance.com:443 wss://data-stream.binance.vision; frame-ancestors ${frameAncestors}; base-uri 'self'; form-action 'self'`;
+  const hashes = Array.isArray(scriptHashes)
+    ? scriptHashes.filter((h) => typeof h === 'string' && /^sha(?:256|384|512)-[A-Za-z0-9+/=]+$/.test(h))
+    : [];
+  const scriptSrc = hashes.length
+    ? `'self' ${hashes.map((h) => `'${h}'`).join(' ')}`
+    : "'self' 'unsafe-inline'";
+  return `default-src 'self'; script-src ${scriptSrc}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; worker-src 'self' blob:; connect-src 'self' wss://stream.binance.com:443 wss://data-stream.binance.vision; frame-ancestors ${frameAncestors}; base-uri 'self'; form-action 'self'`;
 }
 
 export const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
@@ -30,6 +48,55 @@ export const teq = (a, b) => {
   for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i);
   return d === 0;
 };
+
+export async function sha256(s) {
+  return b64u(await crypto.subtle.digest('SHA-256', enc.encode(String(s ?? ''))));
+}
+
+export async function sha256Hex(s) {
+  const buf = await crypto.subtle.digest('SHA-256', enc.encode(String(s ?? '')));
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export async function hmacB64u(secret, msg) {
+  const k = await crypto.subtle.importKey('raw', enc.encode(String(secret)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  return b64u(await crypto.subtle.sign('HMAC', k, enc.encode(String(msg ?? ''))));
+}
+
+export async function hmacHex(secret, msg) {
+  const k = await crypto.subtle.importKey('raw', enc.encode(String(secret)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const buf = await crypto.subtle.sign('HMAC', k, enc.encode(String(msg ?? '')));
+  return Array.from(new Uint8Array(buf), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+export function createMemoryRateLimiter(maxBuckets = 2000) {
+  const buckets = new Map();
+  const prune = (now) => {
+    if (buckets.size <= maxBuckets) return;
+    for (const [k, v] of buckets) {
+      if (now >= v.resetAt) buckets.delete(k);
+    }
+  };
+  return {
+    check(key, limit, windowS, now = Math.floor(Date.now() / 1000)) {
+      prune(now);
+      const cur = buckets.get(key);
+      if (!cur || now >= cur.resetAt) {
+        const entry = { count: 1, resetAt: now + windowS };
+        buckets.set(key, entry);
+        return { allowed: true, count: 1, resetAt: entry.resetAt };
+      }
+      cur.count += 1;
+      return { allowed: cur.count <= limit, count: cur.count, resetAt: cur.resetAt };
+    },
+    sync(key, count, resetAt) {
+      buckets.set(key, { count: Number(count) || 1, resetAt: Number(resetAt) || 0 });
+    },
+    clear() {
+      buckets.clear();
+    }
+  };
+}
 
 export const cleanEmail = (e) => String(e || '').trim().toLowerCase();
 export const isEmail = (e) => typeof e === 'string' && e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
@@ -68,8 +135,19 @@ export function isEmailAdmin(env, email) {
   return getAdminEmails(env).includes(em);
 }
 
-// پیش‌فرض ۱۰,۰۰۰ iteration برای رعایت سقف ۱۰ms CPU پلن رایگان کلادفلر؛ قابل تنظیم با env.PBKDF2_ITER تا سقف ۱۰۰,۰۰۰
-export const PBKDF2_DEFAULT = 10000;
+export function getConfiguredAdminPassword(env) {
+  const adminEmails = getAdminEmails(env);
+  if (!adminEmails.length) return null;
+  if (env && typeof env.ADMIN_PASSWORD === 'string') {
+    const p = env.ADMIN_PASSWORD.trim();
+    if (p.length >= 8 && !isEmailAdmin(env, cleanEmail(p))) return p;
+  }
+  return null;
+}
+
+// افزایش پله‌پلهٔ iteration پس از بنچمارک واقعی (~2.6ms در 10k و ~5.3ms در 25k؛ مجموع تأیید+ارتقا در ورود ~8ms و ایمن زیر سقف ۱۰ms)
+// گام بعدی پس از پایش متریک پروداکشن قابل افزایش با env.PBKDF2_ITER به 50000 و سپس 100000 است
+export const PBKDF2_DEFAULT = 25000;
 export const iterOf = (env) => Math.min(100000, Math.max(1000, Number(env && env.PBKDF2_ITER) || PBKDF2_DEFAULT));
 
 export async function pbkdf2(pw, salt, iter) {

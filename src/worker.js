@@ -22,7 +22,7 @@
  * ============================================================================
  */
 import { NERKHARA_MAP, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale } from './modules/market-core.js';
-import { enc, SEC_HEADERS, PROD_CSP, b64u, b64uDec, teq, cleanEmail, isEmail, okPass, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
+import { enc, SEC_HEADERS, PROD_CSP, buildHtmlCsp, b64u, b64uDec, teq, sha256, hmacB64u, createMemoryRateLimiter, cleanEmail, isEmail, okPass, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, getConfiguredAdminPassword, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
 export { cleanData, validateTransactions, isSafePublicUrl, hashPassword, verifyPassword, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin };
 
 export const ASSETS = {
@@ -258,7 +258,6 @@ const RANGES = { '1H': 3600, '1D': 86400, '3D': 259200, '1W': 604800, '1M': 2592
 
 const nowS = () => Math.floor(Date.now() / 1000);
 const rand = (n = 32) => b64u(crypto.getRandomValues(new Uint8Array(n)));
-const sha256 = async (s) => b64u(await crypto.subtle.digest('SHA-256', enc.encode(s)));
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 const json = (o, status = 200, h = {}) => new Response(JSON.stringify(o), {
   status,
@@ -271,7 +270,7 @@ const json = (o, status = 200, h = {}) => new Response(JSON.stringify(o), {
 });
 class HttpError extends Error { constructor(status, msg, extra = null) { super(msg); this.status = status; this.extra = extra; } }
 
-const inMemoryRateLimits = new Map();
+const memRateLimiter = createMemoryRateLimiter(2000);
 let rateLimitSchemaMode = 'standard'; // 'standard' | 'legacy_altered'
 
 async function executeRateLimitDbUpsert(env, key, resetAt, now) {
@@ -305,26 +304,16 @@ async function executeRateLimitDbUpsert(env, key, resetAt, now) {
 
 export async function rateLimit(env, key, limit, windowS, persistDb = false) {
   const now = nowS();
-  if (inMemoryRateLimits.size > 2000) {
-    for (const [k, v] of inMemoryRateLimits) {
-      if (now >= v.resetAt) inMemoryRateLimits.delete(k);
-    }
-  }
-  const cur = inMemoryRateLimits.get(key);
-  if (!cur || now >= cur.resetAt) {
-    inMemoryRateLimits.set(key, { count: 1, resetAt: now + windowS });
-  } else {
-    cur.count++;
-    if (cur.count > limit) {
-      throw new HttpError(429, 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کن.');
-    }
+  const mem = memRateLimiter.check(key, limit, windowS, now);
+  if (!mem.allowed) {
+    throw new HttpError(429, 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کن.');
   }
   if (persistDb && env && env.DB) {
     try {
       const resetAt = now + windowS;
       const row = await executeRateLimitDbUpsert(env, key, resetAt, now);
       if (row && Number(row.count) > limit) {
-        inMemoryRateLimits.set(key, { count: Number(row.count), resetAt: Number(row.reset_at) || resetAt });
+        memRateLimiter.sync(key, Number(row.count), Number(row.reset_at) || resetAt);
         throw new HttpError(429, 'تعداد درخواست‌ها زیاد است؛ کمی بعد دوباره تلاش کن.');
       }
     } catch (e) {
@@ -388,15 +377,6 @@ function getAuthSecret(env) {
     return env.AUTH_SECRET.trim();
   }
   throw new HttpError(503, 'تنظیمات امنیتی سرور (AUTH_SECRET) کامل نیست.');
-}
-function getConfiguredAdminPassword(env) {
-  const adminEmails = getAdminEmails(env);
-  if (!adminEmails.length) return null;
-  if (env && typeof env.ADMIN_PASSWORD === 'string') {
-    const p = env.ADMIN_PASSWORD.trim();
-    if (p.length >= 8 && !isEmailAdmin(env, cleanEmail(p))) return p;
-  }
-  return null;
 }
 async function canInheritLegacyAdminRoot(env, uid) {
   const primary = getPrimaryAdminEmail(env);
@@ -547,8 +527,7 @@ function evictUserSessionCache(uid, email) {
   }
 }
 async function hmacSign(env, msg) {
-  const k = await crypto.subtle.importKey('raw', enc.encode(getAuthSecret(env)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  return b64u(await crypto.subtle.sign('HMAC', k, enc.encode(msg)));
+  return hmacB64u(getAuthSecret(env), msg);
 }
 async function createSignedToken(env, uid, meta = {}) {
   const sid = rand(24);
@@ -3063,7 +3042,7 @@ export function __resetWorkerStateForTests() {
   lastD1HistoryWriteTime = 0;
   lastD1RecordedMap.clear();
   domesticIntradayTicks.clear();
-  inMemoryRateLimits.clear();
+  memRateLimiter.clear();
   rateLimitSchemaMode = 'standard';
   historyMemCache.clear();
   historyInFlight.clear();
@@ -4255,6 +4234,9 @@ export default {
 
     // سرو صفحه اصلی PWA
     if (typeof APP_HTML === 'string') {
+      const cspHeader = typeof APP_SCRIPT_HASHES !== 'undefined'
+        ? buildHtmlCsp(false, APP_SCRIPT_HASHES)
+        : PROD_CSP;
       return new Response(APP_HTML, {
         headers: {
           'content-type': 'text/html; charset=utf-8',
@@ -4262,7 +4244,7 @@ export default {
           'pragma': 'no-cache',
           'expires': '0',
           ...SEC_HEADERS,
-          'content-security-policy': PROD_CSP
+          'content-security-policy': cspHeader
         }
       });
     }
