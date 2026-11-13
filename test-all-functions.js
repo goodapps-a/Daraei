@@ -13,7 +13,8 @@ import {
   normCode
 } from './src/modules/security.js';
 import { D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY } from './src/modules/market-core.js';
-import {
+import worker, {
+  loadData,
   saveData,
   rateLimit,
   writePricesKvSnapshot,
@@ -529,5 +530,238 @@ test('SQLite EXPLAIN QUERY PLAN verifies all critical queries use PK or secondar
   const planAlertsUser = explain('SELECT id FROM alerts WHERE user_id=?');
   assert.match(planAlertsUser, /SEARCH alerts USING INDEX idx_alerts_user/);
   assert.doesNotMatch(planAlertsUser, /\bSCAN\b/);
+});
+
+test('migrations/001_fix.sql aligns alert_units, alert_delivery, and alert_state schema with Worker queries', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT, password_hash TEXT, google_sub TEXT, created_at INTEGER NOT NULL);
+    CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE user_data (user_id TEXT PRIMARY KEY, holdings TEXT NOT NULL DEFAULT '[]', watch TEXT NOT NULL DEFAULT '[]', featured TEXT NOT NULL DEFAULT '[]', settings TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL);
+    CREATE TABLE alerts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, direction TEXT NOT NULL, price REAL NOT NULL, triggered_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+    CREATE TABLE price_history_v2 (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY (asset_id, t)) WITHOUT ROWID;
+    CREATE TABLE rate_limits (k TEXT PRIMARY KEY, n INTEGER NOT NULL, win INTEGER NOT NULL);
+  `);
+  const migSql = fs.readFileSync(new URL('./migrations/001_fix.sql', import.meta.url), 'utf8');
+  db.exec(migSql);
+
+  const colsOf = (table) => db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  assert.deepEqual(colsOf('alert_units'), ['alert_id', 'currency']);
+  assert.deepEqual(colsOf('alert_delivery'), ['alert_id', 'lease_until', 'retry_at']);
+  assert.deepEqual(colsOf('alert_state'), ['alert_id', 'version']);
+
+  // Verify alert retry SQL works against migrated schema
+  db.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,triggered_at,attempts,created_at) VALUES('u1:a1','u1','usd','above',90000,1000,3,1000)`).run();
+  db.prepare(`INSERT INTO alert_units(alert_id) VALUES('u1:a1')`).run();
+  assert.equal(db.prepare(`SELECT currency FROM alert_units WHERE alert_id='u1:a1'`).get().currency, 'IRT');
+  db.prepare(`INSERT INTO alert_delivery(alert_id,lease_until,retry_at) VALUES('u1:a1',10,20)`).run();
+  db.prepare(`INSERT INTO alert_state(alert_id,version) VALUES('u1:a1','v1') ON CONFLICT(alert_id) DO UPDATE SET version=excluded.version`).run();
+});
+
+test('admin user inheriting admin_root user_data can save without hitting a 409 conflict loop', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+
+  const adminEmail = 'boss@example.com';
+  const adminUid = 'AdMiN_RaNdOm_99';
+  const env = { DB, ADMIN_EMAIL: adminEmail, AUTH_SECRET: 'test-auth-secret-key-minimum-32-chars!!' };
+
+  db.prepare('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?)').run(adminUid, adminEmail, 'Boss', 1000);
+  db.prepare(`INSERT INTO user_data(user_id,holdings,watch,featured,settings,updated_at) VALUES('admin_root','[]','["usd"]','["usd"]','{}',5000)`).run();
+  db.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,created_at) VALUES('admin_root:al1','admin_root','usd','above',95000,1000)`).run();
+
+  const initial = await loadData(env, adminUid);
+  assert.equal(initial.exists, true);
+  assert.equal(initial.updatedAt, 5000);
+  assert.deepEqual(initial.data.watch, ['usd']);
+  assert.equal(initial.data.alerts.length, 1);
+  assert.equal(initial.data.alerts[0].id, 'al1');
+
+  const saved = await saveData(env, adminUid, {
+    baseRevision: initial.updatedAt,
+    holdings: [],
+    watch: ['usd', 'btc'],
+    featured: ['usd'],
+    alerts: initial.data.alerts,
+    settings: { theme: 'dark', unit: 'toman', privacy: false, filter: 'all' }
+  });
+  assert.equal(saved.exists, true);
+  assert.ok(saved.updatedAt > 5000);
+  assert.deepEqual(saved.data.watch, ['usd', 'btc']);
+});
+
+test('recordD1DomesticHistory rolls back timestamp and avoids cache poisoning when DB.batch fails', async () => {
+  __resetWorkerStateForTests();
+  const now = Math.floor(Date.now() / 1000);
+  let failBatch = true;
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB: baseDB } = createSqliteD1Wrapper(db);
+
+  const flakyDB = {
+    prepare: (sql) => baseDB.prepare(sql),
+    async batch(stmts) {
+      if (failBatch && stmts.some((s) => /INSERT/i.test(s.sql))) {
+        throw new Error('simulated_d1_transient_failure');
+      }
+      return baseDB.batch(stmts);
+    }
+  };
+
+  const items = {
+    usd: { price: 82000, change: 0.5, unit: 'IRT', kind: 'domestic', t: now, receivedAt: now }
+  };
+
+  // First attempt fails during batch write -> must return 0 and NOT suppress immediate retry or write to DB
+  const res1 = await recordD1DomesticHistory({ DB: flakyDB }, items, now, false);
+  assert.equal(res1, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM price_history_v2').get().c, 0);
+
+  // Immediate retry (+5s, within 260s window) succeeds because lastD1HistoryWriteTime and lastD1RecordedMap were rolled back
+  failBatch = false;
+  const res2 = await recordD1DomesticHistory({ DB: flakyDB }, items, now + 5, false);
+  assert.equal(res2, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM price_history_v2').get().c, 1);
+});
+
+test('history endpoint immediately rejects unknown asset IDs without triggering external API calls', async () => {
+  __resetWorkerStateForTests();
+  const now = Math.floor(Date.now() / 1000);
+  const kvStore = new Map();
+  const mockKv = {
+    async get(k, opts) {
+      const raw = kvStore.get(k);
+      return raw && opts?.type === 'json' ? JSON.parse(raw) : raw || null;
+    },
+    async put(k, v) {
+      kvStore.set(k, v);
+    }
+  };
+  const okWrite = await writePricesKvSnapshot(
+    { PRICES_KV: mockKv, DB: null },
+    {
+      updatedAt: now,
+      checkedAt: now,
+      items: { usd: { price: 84000, change: 0.5, unit: 'IRT', kind: 'domestic', t: now, receivedAt: now } },
+      feeds: {}
+    },
+    true
+  );
+  assert.equal(okWrite, true);
+
+  let fetchCalled = 0;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    fetchCalled++;
+    throw new Error('should_not_fetch_unknown_asset');
+  };
+  try {
+    const res = await history({ PRICES_KV: mockKv }, new URL('https://darayi.example/api/history?id=totallyunknown999&range=1D'));
+    const body = await res.json();
+    assert.equal(body.unavailable, true);
+    assert.equal(body.reason, 'unknown_asset');
+    assert.equal(fetchCalled, 0);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('admin user toggle blocks suspending admin accounts, revokes mixed-case D1 sessions, and DELETE /api/me handles missing optional tables', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT, password_hash TEXT, google_sub TEXT, created_at INTEGER NOT NULL);
+    CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE user_data (user_id TEXT PRIMARY KEY, holdings TEXT NOT NULL DEFAULT '[]', watch TEXT NOT NULL DEFAULT '[]', featured TEXT NOT NULL DEFAULT '[]', settings TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL);
+    CREATE TABLE alerts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, direction TEXT NOT NULL, price REAL NOT NULL, triggered_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+    CREATE TABLE otp_codes (email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, payload TEXT, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, PRIMARY KEY (email, purpose));
+    CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE rate_limits (k TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, reset_at INTEGER NOT NULL DEFAULT 0);
+  `);
+  const { DB } = createSqliteD1Wrapper(db);
+
+  const secret = 'test-auth-secret-key-minimum-32-chars!!';
+  const adminEmail = 'boss@example.com';
+  const env = { DB, ADMIN_EMAIL: adminEmail, AUTH_SECRET: secret };
+  const passHash = await hashPassword('SecretPass123!', env);
+
+  const adminId = 'Adm_Mixed_1';
+  const userId = 'Usr_MixedCase_99';
+  const userEmail = 'member@example.com';
+  db.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').run(adminId, adminEmail, 'Admin', passHash, 1000);
+  db.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').run(userId, userEmail, 'Member', passHash, 1000);
+
+  const post = (url, body, bearer) =>
+    worker.fetch(
+      new Request(url, {
+        method: 'POST',
+        headers: {
+          origin: 'https://darayi.example',
+          'content-type': 'application/json',
+          'x-requested-with': 'XMLHttpRequest',
+          ...(bearer ? { authorization: `Bearer ${bearer}` } : {})
+        },
+        body: JSON.stringify(body || {})
+      }),
+      env
+    );
+
+  // Sign in both admin and member
+  const adminLogin = await (await post('https://darayi.example/api/auth/login', { email: adminEmail, password: 'SecretPass123!' })).json();
+  const userLogin = await (await post('https://darayi.example/api/auth/login', { email: userEmail, password: 'SecretPass123!' })).json();
+  assert.ok(adminLogin.token);
+  assert.ok(userLogin.token);
+
+  // Admin cannot be suspended even via mixed-case ID
+  const selfToggle = await post(`https://darayi.example/api/admin/users/${adminId}/toggle`, {}, adminLogin.token);
+  assert.equal(selfToggle.status, 400);
+
+  // Suspending normal member revokes their D1 session (exact mixed-case user_id match)
+  const toggleRes = await post(`https://darayi.example/api/admin/users/${userId}/toggle`, {}, adminLogin.token);
+  assert.equal(toggleRes.status, 200);
+  const toggleBody = await toggleRes.json();
+  assert.equal(toggleBody.status, 'suspended');
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM sessions WHERE user_id=?').get(userId).c, 0);
+
+  // Unsuspend member, sign back in, test maintenance mode, then delete account cleanly without alert_units/alert_state/alert_delivery tables
+  await post(`https://darayi.example/api/admin/users/${userId}/toggle`, {}, adminLogin.token);
+  const userLogin2 = await (await post('https://darayi.example/api/auth/login', { email: userEmail, password: 'SecretPass123!' })).json();
+
+  const maintRes = await post('https://darayi.example/api/admin/settings', { maintenance: true }, adminLogin.token);
+  assert.equal(maintRes.status, 200);
+
+  const blockedSave = await worker.fetch(
+    new Request('https://darayi.example/api/me/data', {
+      method: 'PUT',
+      headers: {
+        origin: 'https://darayi.example',
+        'content-type': 'application/json',
+        'x-requested-with': 'XMLHttpRequest',
+        authorization: `Bearer ${userLogin2.token}`
+      },
+      body: JSON.stringify({ holdings: [], watch: ['usd'], featured: ['usd'], alerts: [], settings: {} })
+    }),
+    env
+  );
+  assert.equal(blockedSave.status, 503);
+
+  // Disable maintenance mode, then verify DELETE /api/me works even when optional alert tables are absent
+  await post('https://darayi.example/api/admin/settings', { maintenance: false }, adminLogin.token);
+  const delRes = await worker.fetch(
+    new Request('https://darayi.example/api/me', {
+      method: 'DELETE',
+      headers: {
+        origin: 'https://darayi.example',
+        'content-type': 'application/json',
+        'x-requested-with': 'XMLHttpRequest',
+        authorization: `Bearer ${userLogin2.token}`
+      }
+    }),
+    env
+  );
+  assert.equal(delRes.status, 200);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM users WHERE id=?').get(userId).c, 0);
 });
 

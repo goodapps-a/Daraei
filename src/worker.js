@@ -513,21 +513,43 @@ async function currentUser(req, env) {
 
   if (env.DB) {
     try {
-      const u = await env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(h, now).first();
+      const hFull = rawToken !== baseSid ? await sha256(rawToken) : h;
+      const sRow = await env.DB.prepare('SELECT s.user_id,u.id,u.email,u.name FROM sessions s LEFT JOIN users u ON u.id=s.user_id WHERE s.id_hash IN (?,?) AND s.expires_at>? LIMIT 1').bind(h, hFull, now).first();
+      let u = (sRow && sRow.id && sRow.email) ? { id: sRow.id, email: sRow.email, name: sRow.name } : null;
+      if (!u && sRow && sRow.user_id === 'admin_root') {
+        const admEmail = getAdminEmail(env);
+        if (admEmail) {
+          u = await env.DB.prepare('SELECT id,email,name FROM users WHERE email=? LIMIT 1').bind(admEmail).first();
+          if (!u) u = { id: 'admin_root', email: admEmail, name: 'مدیر کل دارایی' };
+        }
+      }
+      if (!u && verified && verified.user) {
+        const vUid = String(verified.user.id || '');
+        const vEmail = String(verified.user.email || '').toLowerCase();
+        if (vUid || vEmail) {
+          u = await env.DB.prepare('SELECT id,email,name FROM users WHERE id=? OR email=? LIMIT 1').bind(vUid, vEmail).first();
+        }
+        if (!u && vEmail) {
+          u = {
+            id: vUid || ('u_' + vEmail),
+            email: vEmail,
+            name: verified.user.name || vEmail.split('@')[0]
+          };
+        }
+      }
       if (u) {
         if (await isUserSuspended(env, u.id, u.email)) return null;
         u.isAdmin = isEmailAdmin(env, u.email);
         sessionUserCache.set(h, { user: u, exp: Math.min(now + SESSION_CACHE_TTL_S, now + SESSION_S) });
         return u;
       }
-      return null;
-    } catch {
-      return null;
-    }
+    } catch {}
   }
 
   if (verified && verified.user) {
     if (await isUserSuspended(env, verified.user.id, verified.user.email)) return null;
+    verified.user.isAdmin = isEmailAdmin(env, verified.user.email);
+    sessionUserCache.set(h, { user: verified.user, exp: Math.min(now + SESSION_CACHE_TTL_S, now + SESSION_S) });
     return verified.user;
   }
   return null;
@@ -539,7 +561,7 @@ async function sessionCookie(env, url, uid, userMeta = {}) {
   sessionUserCache.set(h, { user: { id: uid, email: payloadObj.email, name: payloadObj.name, isAdmin: payloadObj.isAdmin }, exp: Math.min(nowS() + SESSION_CACHE_TTL_S, exp) });
   if (env.DB) {
     try {
-      await env.DB.prepare('INSERT INTO sessions(id_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(h, uid, exp, nowS()).run();
+      await env.DB.prepare('INSERT OR REPLACE INTO sessions(id_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(h, uid, exp, nowS()).run();
     } catch {}
   }
   return { cookie: `sid=${encodeURIComponent(token)}; ${cookieOpts(url, SESSION_S)}`, token };
@@ -675,9 +697,9 @@ async function registerVerify(req, env, url) {
   const id = rand(12);
   await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(id, email, p.name, p.hash, nowS()).run();
   const isAdmin = isEmailAdmin(env, email);
-  const userObj = { email, name: p.name || email.split('@')[0], isAdmin, role: isAdmin ? 'admin' : 'user' };
+  const userObj = { id, email, name: p.name || email.split('@')[0], isAdmin, role: isAdmin ? 'admin' : 'user' };
   const sess = await sessionCookie(env, url, id, userObj);
-  return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
+  return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
 }
 async function login(req, env, url) {
   getAuthSecret(env);
@@ -698,17 +720,21 @@ async function login(req, env, url) {
   // راه‌اندازی اولیه یا ورود مدیر کل فقط در صورتی که ADMIN_EMAIL و ADMIN_PASSWORD مستقل و امن در تنظیمات کلادفلر تعریف شده باشد
   if (isAdminEmail && (!u || !u.password_hash) && configuredAdminPass && teq(rawPass.trim(), configuredAdminPass)) {
     let adminId = u?.id || 'admin_root';
+    let adminName = u?.name || 'مدیر کل دارایی';
     if (env.DB) {
       try {
         const passHash = await hashPassword(configuredAdminPass, env);
-        await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, adminEmail, 'مدیر کل دارایی', passHash, nowS()).run();
+        await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, adminEmail, adminName, passHash, nowS()).run();
+        const actual = await env.DB.prepare('SELECT id,name FROM users WHERE email=?').bind(adminEmail).first();
+        if (actual?.id) adminId = actual.id;
+        if (actual?.name) adminName = actual.name;
       } catch (err) {
         console.error('admin setup err:', err?.message);
       }
     }
-    const userObj = { email: adminEmail, name: 'مدیر کل دارایی', isAdmin: true, role: 'admin' };
+    const userObj = { id: adminId, email: adminEmail, name: adminName, isAdmin: true, role: 'admin' };
     const sess = await sessionCookie(env, url, adminId, userObj);
-    return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
+    return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
   }
 
   const dbPassValid = Boolean(u && u.password_hash && await verifyPassword(rawPass, u.password_hash, env));
@@ -726,9 +752,9 @@ async function login(req, env, url) {
     }
   }
   const uid = u?.id || (isAdminEmail ? 'admin_root' : ('u_' + email));
-  const userObj = { email: u?.email || email, name: u?.name || (isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0]), isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' };
+  const userObj = { id: uid, email: u?.email || email, name: u?.name || (isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0]), isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' };
   const sess = await sessionCookie(env, url, uid, userObj);
-  return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
+  return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
 }
 async function resetStart(req, env) {
   getAuthSecret(env);
@@ -781,9 +807,9 @@ async function resetFinish(req, env, url) {
     }
   }
   const isAdmin = isEmailAdmin(env, email);
-  const userObj = { email, name: u.name || email.split('@')[0], isAdmin, role: isAdmin ? 'admin' : 'user' };
+  const userObj = { id: u.id, email, name: u.name || email.split('@')[0], isAdmin, role: isAdmin ? 'admin' : 'user' };
   const sess = await sessionCookie(env, url, u.id, userObj);
-  return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
+  return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
 }
 async function googleStart(env, url) {
   getAuthSecret(env);
@@ -810,15 +836,30 @@ async function googleCallback(env, url, req) {
   const st = await env.DB.prepare('DELETE FROM oauth_states WHERE state_hash=? AND expires_at>? RETURNING verifier').bind(await sha256(state), nowS()).first();
   if (!st) return fail('state');
   const redirect = `${env.APP_URL || url.origin}/api/auth/google/callback`;
-  const tr = await fetch('https://oauth2.googleapis.com/token', { method: 'POST', headers: { 'content-type': 'application/x-www-form-urlencoded' }, body: new URLSearchParams({ code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri: redirect, grant_type: 'authorization_code', code_verifier: st.verifier }) });
+  let tr;
+  try {
+    tr = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ code, client_id: env.GOOGLE_CLIENT_ID, client_secret: env.GOOGLE_CLIENT_SECRET, redirect_uri: redirect, grant_type: 'authorization_code', code_verifier: st.verifier }),
+      signal: AbortSignal.timeout(8000)
+    });
+  } catch {
+    return fail('token');
+  }
   if (!tr.ok) return fail('token');
-  const claims = decodeJwt((await tr.json()).id_token || '..');
+  let claims;
+  try {
+    claims = decodeJwt((await tr.json()).id_token || '..');
+  } catch {
+    return fail('token');
+  }
   const okIss = ['https://accounts.google.com', 'accounts.google.com'].includes(claims.iss);
   if (!okIss || claims.aud !== env.GOOGLE_CLIENT_ID || (!Number.isFinite(claims.exp) || claims.exp < nowS()) || claims.email_verified !== true || typeof claims.sub !== 'string' || !isEmail(claims.email)) return fail('claims');
   const uid = await upsertUser(env, { email: claims.email, name: claims.name, sub: claims.sub });
   if (await isUserSuspended(env, uid, claims.email)) return fail('denied');
   const sess = await sessionCookie(env, url, uid, { email: claims.email, name: claims.name });
-  const response = new Response(null, { status: 302, headers: { location: '/', 'set-cookie': sess.cookie, 'cache-control': 'no-store' } });
+  const response = new Response(null, { status: 302, headers: { location: `/#login_token=${encodeURIComponent(sess.token)}`, 'set-cookie': sess.cookie, 'cache-control': 'no-store' } });
   response.headers.append('set-cookie', `oauth_state=; ${cookieOpts(url, 0)}`);
   return response;
 }
@@ -837,11 +878,52 @@ export async function loadData(env, uid, forceDb = false) {
     const cached = userDataCache.get(uid);
     if (cached && now < cached.exp) return cached.val;
   }
-  const d = await env.DB.prepare('SELECT holdings,watch,featured,settings,updated_at FROM user_data WHERE user_id=?').bind(uid).first();
-  const al = await env.DB.prepare(`SELECT a.id,asset_id,direction,price,triggered_at,a.attempts,COALESCE(c.currency,'IRT') AS currency FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id WHERE user_id=? ORDER BY created_at,a.id`).bind(uid).all();
-  const alerts = (al.results || []).map((a) => ({ id: a.id.slice(uid.length + 1), assetId: a.asset_id, direction: a.direction, price: a.price, currency: a.currency, attempts: a.attempts, triggeredAt: a.triggered_at ? a.triggered_at * 1000 : null }));
+  let usedAdminRoot = false;
+  let d = null;
+  try {
+    d = await env.DB.prepare('SELECT holdings,watch,featured,settings,updated_at FROM user_data WHERE user_id=?').bind(uid).first();
+    if (!d && uid !== 'admin_root') {
+      const admEmail = getAdminEmail(env);
+      if (admEmail) {
+        const uRow = await env.DB.prepare('SELECT email FROM users WHERE id=?').bind(uid).first();
+        if (uRow && isEmailAdmin(env, uRow.email)) {
+          d = await env.DB.prepare('SELECT holdings,watch,featured,settings,updated_at FROM user_data WHERE user_id=?').bind('admin_root').first();
+          if (d) usedAdminRoot = true;
+        }
+      }
+    }
+  } catch {}
+  const loadAlertRowsFor = async (targetUid) => {
+    try {
+      const al = await env.DB.prepare(`SELECT a.id,asset_id,direction,price,triggered_at,a.attempts,COALESCE(c.currency,'IRT') AS currency FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id WHERE user_id=? ORDER BY created_at,a.id`).bind(targetUid).all();
+      return al.results || [];
+    } catch {
+      try {
+        const al2 = await env.DB.prepare(`SELECT id,asset_id,direction,price,triggered_at FROM alerts WHERE user_id=? ORDER BY created_at,id`).bind(targetUid).all();
+        return (al2.results || []).map(r => ({ ...r, attempts: 0, currency: 'IRT' }));
+      } catch {
+        return [];
+      }
+    }
+  };
+  let alertRows = await loadAlertRowsFor(uid);
+  let alertPrefix = uid + ':';
+  if (!alertRows.length && usedAdminRoot) {
+    alertRows = await loadAlertRowsFor('admin_root');
+    alertPrefix = 'admin_root:';
+  }
+  const alerts = alertRows.map((a) => ({
+    id: String(a.id || '').startsWith(alertPrefix) ? a.id.slice(alertPrefix.length) : String(a.id || ''),
+    assetId: a.asset_id,
+    direction: a.direction,
+    price: a.price,
+    currency: a.currency || 'IRT',
+    attempts: a.attempts || 0,
+    triggeredAt: a.triggered_at ? a.triggered_at * 1000 : null
+  }));
+  const safeParse = (str, def) => { try { return JSON.parse(str || '') || def; } catch { return def; } };
   const res = !d ? { exists: false, updatedAt: 0, data: { holdings: [], watch: [], featured: [], alerts, settings: {} } }
-                 : { exists: true, updatedAt: d.updated_at, data: { holdings: JSON.parse(d.holdings || '[]'), watch: JSON.parse(d.watch || '[]'), featured: JSON.parse(d.featured || '[]'), alerts, settings: JSON.parse(d.settings || '{}') } };
+                 : { exists: true, updatedAt: d.updated_at, data: { holdings: safeParse(d.holdings, []), watch: safeParse(d.watch, []), featured: safeParse(d.featured, []), alerts, settings: safeParse(d.settings, {}) } };
   userDataCache.set(uid, { val: res, exp: now + 900 });
   return res;
 }
@@ -861,23 +943,36 @@ export async function saveData(env, uid, body) {
   const cachedEntry = userDataCache.get(uid);
   const hasWarmCache = Boolean(cachedEntry && nowS() < cachedEntry.exp);
   let prev = hasWarmCache ? cachedEntry.val : null;
-  let currentRev = 0;
+  let ownRev = 0;
+  let expectedRev = 0;
 
   if (hasBaseRev || hasWarmCache) {
     const curRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind(uid).first();
-    currentRev = curRow ? (Number(curRow.updated_at) || 0) : 0;
+    ownRev = curRow ? (Number(curRow.updated_at) || 0) : 0;
+    expectedRev = ownRev;
+    if (!curRow && uid !== 'admin_root' && getAdminEmail(env)) {
+      try {
+        const uRow = await env.DB.prepare('SELECT email FROM users WHERE id=?').bind(uid).first();
+        if (uRow && isEmailAdmin(env, uRow.email)) {
+          const admRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind('admin_root').first();
+          expectedRev = admRow ? (Number(admRow.updated_at) || 0) : 0;
+        }
+      } catch {}
+    }
   } else {
     prev = await loadData(env, uid, true);
-    currentRev = Number(prev.updatedAt) || 0;
+    const curRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind(uid).first();
+    ownRev = curRow ? (Number(curRow.updated_at) || 0) : 0;
+    expectedRev = Number(prev.updatedAt) || ownRev;
   }
 
-  if (hasBaseRev && (!Number.isFinite(baseRev) || baseRev !== currentRev)) {
+  if (hasBaseRev && (!Number.isFinite(baseRev) || baseRev !== expectedRev)) {
     const latest = await loadData(env, uid, true);
     throw new HttpError(409, 'نسخه داده‌های شما قدیمی است؛ اطلاعات جدید دریافت شد.', { data: latest.data, updatedAt: latest.updatedAt });
   }
 
-  const t = Math.max(Date.now() * 1000 + randInt(1000), currentRev + 1);
-  if (!prev || (hasWarmCache && Number(prev.updatedAt || 0) !== currentRev)) {
+  const t = Math.max(Date.now() * 1000 + randInt(1000), expectedRev + 1);
+  if (!prev || (hasWarmCache && Number(prev.updatedAt || 0) !== expectedRev)) {
     prev = await loadData(env, uid, true);
   }
 
@@ -891,6 +986,7 @@ export async function saveData(env, uid, body) {
   const sJson = JSON.stringify(c.settings);
 
   const alertStmts = [];
+  const alertUnitStmts = [];
   if (alertsChanged) {
     const ids = c.alerts.map(a => uid + ':' + a.id);
     alertStmts.push(env.DB.prepare(`DELETE FROM alerts WHERE user_id=?${ids.length ? ' AND id NOT IN (' + ids.map(() => '?').join(',') + ')' : ''}`).bind(uid, ...ids));
@@ -899,22 +995,26 @@ export async function saveData(env, uid, body) {
       const trigSec = a.triggeredAt ? (a.triggeredAt > 2000000000 ? Math.floor(a.triggeredAt / 1000) : Math.floor(a.triggeredAt)) : null;
       const same = 'alerts.asset_id=excluded.asset_id AND alerts.direction=excluded.direction AND alerts.price=excluded.price';
       alertStmts.push(env.DB.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,triggered_at,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET triggered_at=CASE WHEN ${same} THEN COALESCE(alerts.triggered_at,excluded.triggered_at) ELSE excluded.triggered_at END,attempts=CASE WHEN ${same} THEN alerts.attempts ELSE 0 END,asset_id=excluded.asset_id,direction=excluded.direction,price=excluded.price WHERE alerts.user_id=excluded.user_id`).bind(aid, uid, a.assetId, a.direction, a.price, trigSec, nowS()));
-      alertStmts.push(env.DB.prepare(`INSERT INTO alert_units(alert_id,currency) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET currency=excluded.currency`).bind(aid, a.currency));
+      alertUnitStmts.push(env.DB.prepare(`INSERT INTO alert_units(alert_id,currency) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET currency=excluded.currency`).bind(aid, a.currency));
     }
   }
 
   if (hasBaseRev) {
-    const wr = currentRev === 0
+    const wr = ownRev === 0
       ? await env.DB.prepare('INSERT OR IGNORE INTO user_data(user_id,holdings,watch,featured,settings,updated_at) VALUES(?,?,?,?,?,?)')
           .bind(uid, hJson, wJson, fJson, sJson, t).run()
       : await env.DB.prepare('UPDATE user_data SET holdings=?,watch=?,featured=?,settings=?,updated_at=? WHERE user_id=? AND updated_at=?')
-          .bind(hJson, wJson, fJson, sJson, t, uid, currentRev).run();
+          .bind(hJson, wJson, fJson, sJson, t, uid, ownRev).run();
     if (!wr || !wr.meta || wr.meta.changes !== 1) {
       const latest = await loadData(env, uid, true);
       throw new HttpError(409, 'نسخه داده‌های شما قدیمی است؛ اطلاعات جدید دریافت شد.', { data: latest.data, updatedAt: latest.updatedAt });
     }
     if (alertStmts.length) {
-      await env.DB.batch(alertStmts);
+      try {
+        await env.DB.batch([...alertStmts, ...alertUnitStmts]);
+      } catch {
+        try { await env.DB.batch(alertStmts); } catch {}
+      }
     }
   } else {
     const stmts = [
@@ -922,7 +1022,11 @@ export async function saveData(env, uid, body) {
         .bind(uid, hJson, wJson, fJson, sJson, t),
       ...alertStmts
     ];
-    await env.DB.batch(stmts);
+    try {
+      await env.DB.batch([...stmts, ...alertUnitStmts]);
+    } catch {
+      await env.DB.batch(stmts);
+    }
   }
 
   if (alertsChanged) {
@@ -947,21 +1051,41 @@ export async function saveData(env, uid, body) {
 }
 async function deleteAccount(env, user) {
   userDataCache.delete(user.id);
+  const uidLower = String(user.id || '').toLowerCase();
+  const emailLower = cleanEmail(user.email || '');
   for (const [k, v] of sessionUserCache) {
-    if (v?.user?.id === user.id || v?.val?.id === user.id) {
+    const cu = v?.user || v?.val;
+    if (String(cu?.id || '').toLowerCase() === uidLower || (emailLower && cleanEmail(cu?.email || '') === emailLower)) {
       sessionUserCache.delete(k);
       markSessionRevoked(k);
     }
   }
+  inMemoryAdminStats = null;
+  inMemoryAdminStatsTime = 0;
+  hasActiveAlertsCache = null;
+  hasActiveAlertsCacheTime = 0;
   if (!env.DB) return;
+  for (const auxSql of [
+    'DELETE FROM alert_units WHERE alert_id IN (SELECT id FROM alerts WHERE user_id=?)',
+    'DELETE FROM alert_state WHERE alert_id IN (SELECT id FROM alerts WHERE user_id=?)',
+    'DELETE FROM alert_delivery WHERE alert_id IN (SELECT id FROM alerts WHERE user_id=?)'
+  ]) {
+    try { await env.DB.prepare(auxSql).bind(user.id).run(); } catch {}
+  }
+  try {
+    const susp = await getSuspendedUsers(env);
+    if (susp.delete(uidLower) || (emailLower && susp.delete(emailLower))) {
+      if (emailLower) susp.delete(emailLower);
+      inMemorySuspendedUsers = susp;
+      inMemorySuspendedUsersTime = nowS();
+      await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('suspended_users',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify([...susp]), nowS()).run();
+    }
+  } catch {}
   await env.DB.batch([
     env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(user.id),
     env.DB.prepare('DELETE FROM user_data WHERE user_id=?').bind(user.id),
-    env.DB.prepare('DELETE FROM alert_units WHERE alert_id IN (SELECT id FROM alerts WHERE user_id=?)').bind(user.id),
-    env.DB.prepare('DELETE FROM alert_state WHERE alert_id IN (SELECT id FROM alerts WHERE user_id=?)').bind(user.id),
-    env.DB.prepare('DELETE FROM alert_delivery WHERE alert_id IN (SELECT id FROM alerts WHERE user_id=?)').bind(user.id),
     env.DB.prepare('DELETE FROM alerts WHERE user_id=?').bind(user.id),
-    env.DB.prepare('DELETE FROM otp_codes WHERE email=?').bind(user.email),
+    env.DB.prepare('DELETE FROM otp_codes WHERE email=?').bind(emailLower || user.email),
     env.DB.prepare('DELETE FROM users WHERE id=?').bind(user.id),
   ]);
 }
@@ -1369,6 +1493,7 @@ export async function recordD1DomesticHistory(env, items, now = nowS(), forceCro
   if (!forceCron && lastD1HistoryWriteTime > 0 && (now - lastD1HistoryWriteTime < 260)) {
     return 0;
   }
+  const prevWriteTime = lastD1HistoryWriteTime;
   lastD1HistoryWriteTime = now;
 
   try {
@@ -1408,6 +1533,7 @@ export async function recordD1DomesticHistory(env, items, now = nowS(), forceCro
     }
 
     const stmts = [];
+    const pendingRecorded = [];
     for (const id of D1_HISTORY_ASSET_IDS) {
       const it = items[id];
       if (!it || !(Number(it.price) > 0)) continue;
@@ -1426,19 +1552,23 @@ export async function recordD1DomesticHistory(env, items, now = nowS(), forceCro
         stmts.push(
           env.DB.prepare('INSERT OR IGNORE INTO price_history_v2 (asset_id, t, price) VALUES (?, ?, ?)').bind(id, now, price)
         );
-        lastD1RecordedMap.set(id, { price, t: now });
+        pendingRecorded.push({ id, price, t: now });
       }
-    }
-
-    if (inMemoryPrices) {
-      inMemoryPrices.lastHistory = serializeLastHistoryMap(inMemoryPrices.lastHistory);
     }
 
     if (stmts.length > 0) {
       await env.DB.batch(stmts);
     }
+
+    for (const rec of pendingRecorded) {
+      lastD1RecordedMap.set(rec.id, { price: rec.price, t: rec.t });
+    }
+    if (inMemoryPrices && (pendingRecorded.length > 0 || missingIds.length > 0)) {
+      inMemoryPrices.lastHistory = serializeLastHistoryMap(inMemoryPrices.lastHistory);
+    }
     return stmts.length;
   } catch (e) {
+    lastD1HistoryWriteTime = prevWriteTime;
     console.error('recordD1DomesticHistory error:', e?.message);
     return 0;
   }
@@ -2007,7 +2137,7 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
   if (range === '1H' || range === '1D') {
     const windowStart = now - span;
     const d1Pts = await queryD1DomesticHistory(env, id, windowStart);
-    const memPts = (id === 'usdt' && d1Pts.length > 0) ? [] : (domesticIntradayTicks.get(id) || []).filter(p => p[0] >= windowStart && p[0] <= now + 60);
+    const memPts = (id === 'usdt' && d1Pts.length >= 4) ? [] : (domesticIntradayTicks.get(id) || []).filter(p => p[0] >= windowStart && p[0] <= now + 60);
     const combined = [...d1Pts, ...memPts];
     if (curPrice > 0) {
       const srcTs = Number(liveItem?.sourceTimestamp) > 0 ? Math.floor(Number(liveItem.sourceTimestamp)) : 0;
@@ -2341,6 +2471,12 @@ export async function history(env, url, ctx = null) {
     }
     const it = prices.items?.[id];
     const isDomesticAsset = id !== 'usdt' && (Boolean(NERKH[id]) || Boolean(DOMESTIC_EXTRA[id]) || Boolean(IRAN_MARKET_MAP[id]) || Boolean(DOMESTIC_META[id]) || it?.kind === 'domestic');
+    if (Object.keys(prices.items || {}).length > 0 && !it && id !== 'usdt' && !isDomesticAsset && !ASSETS[id]) {
+      return {
+        body: { id, range, currency: 'USDT', points: [], unavailable: true, reason: 'unknown_asset' },
+        headers: { 'access-control-allow-origin': '*', 'cache-control': 'public, max-age=60' }
+      };
+    }
 
     const buildCachedResult = (payload) => {
       historyMemCache.set(cacheKey, { at: t, data: payload });
@@ -2364,7 +2500,7 @@ export async function history(env, url, ctx = null) {
         let srcUsed = 'wallex';
         if (pts.length >= 2) {
           const lastW = histKvWriteAt.get(usdtCacheKey) || 0;
-          if (t - lastW >= 300) {
+          if (t - lastW >= 180) {
             histKvWriteAt.set(usdtCacheKey, t);
             const saveJob = saveUsdtHistoryCache(env, usdtCacheKey, { t, points: pts }, t).catch(() => {});
             if (ctx?.waitUntil) ctx.waitUntil(saveJob);
@@ -2372,7 +2508,7 @@ export async function history(env, url, ctx = null) {
         } else {
           try {
             const saved = await loadUsdtHistoryCache(env, usdtCacheKey);
-            const maxAge = (range === '1H' || range === '1D') ? 1800 : 21600;
+            const maxAge = 21600;
             if (saved && Array.isArray(saved.points) && saved.points.length >= 2 && (t - (saved.t || 0) <= maxAge)) {
               pts = validateHistoryPoints(saved.points, range, t, true, refP, true);
               srcUsed = 'wallex_cache';
@@ -2385,6 +2521,18 @@ export async function history(env, url, ctx = null) {
           srcUsed = (range === '1H' || range === '1D') ? 'd1_intraday' : 'archive';
         }
         if (pts.length >= 2) {
+          if (refP > 0) {
+            const lastPt = pts[pts.length - 1];
+            const roundedRef = Math.round(refP);
+            if (lastPt && Math.abs(roundedRef - lastPt[1]) / (lastPt[1] || roundedRef) <= 0.15) {
+              if (t > lastPt[0]) {
+                pts = [...pts, [t, roundedRef]];
+              } else {
+                pts = pts.slice();
+                pts[pts.length - 1] = [lastPt[0], roundedRef];
+              }
+            }
+          }
           return buildCachedResult({ id, range, currency: 'IRT', source: srcUsed, points: pts });
         }
         return { body: { id, range, currency: 'IRT', points: [], unavailable: true, reason: 'insufficient_real_points' }, headers: {} };
@@ -2602,6 +2750,13 @@ export function __resetWorkerStateForTests() {
   hasActiveAlertsCacheTime = 0;
   userDataCache.clear();
   sessionUserCache.clear();
+  revokedSessionsCache.clear();
+  inMemoryAdminStats = null;
+  inMemoryAdminStatsTime = 0;
+  inMemoryAdminSettings = null;
+  inMemoryAdminSettingsTime = 0;
+  inMemorySuspendedUsers = null;
+  inMemorySuspendedUsersTime = 0;
 }
 
 const DEFAULT_SYSTEM_FEEDS = [
@@ -2963,13 +3118,28 @@ async function route(req, env, url, ctx) {
     verifyCsrf(req, env, url);
   }
 
+  const ensureNotMaintenance = async (allowUser = null) => {
+    if (allowUser && (allowUser.isAdmin || isEmailAdmin(env, allowUser.email))) return;
+    const admSt = await getAdminSettingsObj(env);
+    if (admSt && admSt.maintenance) {
+      throw new HttpError(503, 'سامانه موقتاً در حال بروزرسانی و نگهداری است.');
+    }
+  };
+
   if (p === '/api/auth/check-email' && m === 'POST') return checkEmail(req, env);
-  if (p === '/api/auth/register/start' && m === 'POST') return registerStart(req, env);
-  if (p === '/api/auth/register/verify' && m === 'POST') return registerVerify(req, env, url);
+  if (p === '/api/auth/register/start' && m === 'POST') { await ensureNotMaintenance(); return registerStart(req, env); }
+  if (p === '/api/auth/register/verify' && m === 'POST') {
+    await ensureNotMaintenance();
+    const regSt = await getAdminSettingsObj(env);
+    if (regSt && regSt.allowNewRegistrations === false) {
+      throw new HttpError(403, 'ثبت‌نام کاربران جدید موقتاً توسط مدیر غیرفعال شده است.');
+    }
+    return registerVerify(req, env, url);
+  }
   if (p === '/api/auth/login' && m === 'POST') return login(req, env, url);
-  if (p === '/api/auth/reset/start' && m === 'POST') return resetStart(req, env);
-  if (p === '/api/auth/reset/verify' && m === 'POST') return resetVerify(req, env);
-  if (p === '/api/auth/reset/finish' && m === 'POST') return resetFinish(req, env, url);
+  if (p === '/api/auth/reset/start' && m === 'POST') { await ensureNotMaintenance(); return resetStart(req, env); }
+  if (p === '/api/auth/reset/verify' && m === 'POST') { await ensureNotMaintenance(); return resetVerify(req, env); }
+  if (p === '/api/auth/reset/finish' && m === 'POST') { await ensureNotMaintenance(); return resetFinish(req, env, url); }
   if (p === '/api/auth/google/start' && m === 'GET') return googleStart(env, url);
   if (p === '/api/auth/google/callback' && m === 'GET') return googleCallback(env, url, req);
   if (p === '/api/auth/logout' && m === 'POST') {
@@ -3302,6 +3472,8 @@ async function route(req, env, url, ctx) {
       const id = rand(12);
       const passHash = await hashPassword(pass, env);
       await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(id, email, name || email.split('@')[0], passHash, nowS()).run();
+      inMemoryAdminStats = null;
+      inMemoryAdminStatsTime = 0;
       const isAdm = isEmailAdmin(env, email);
       return json({ ok: true, user: { id, email, name: name || email.split('@')[0], role: isAdm ? 'admin' : 'user', status: 'active' } });
     }
@@ -3332,25 +3504,51 @@ async function route(req, env, url, ctx) {
     }
 
     if (p.startsWith('/api/admin/users/') && p.endsWith('/toggle') && m === 'POST') {
-      const targetId = decodeURIComponent(p.split('/')[4] || '').trim().toLowerCase();
-      if (!targetId) throw new HttpError(400, 'شناسه کاربر نامعتبر است.');
+      const rawTarget = decodeURIComponent(p.split('/')[4] || '').trim();
+      const lowerParam = rawTarget.toLowerCase();
+      if (!lowerParam) throw new HttpError(400, 'شناسه کاربر نامعتبر است.');
+      let targetUser = null;
+      if (env.DB) {
+        try {
+          targetUser = await env.DB.prepare('SELECT id,email FROM users WHERE LOWER(id)=? OR LOWER(email)=? LIMIT 1').bind(lowerParam, lowerParam).first();
+        } catch {}
+      }
+      const exactId = targetUser?.id || rawTarget;
+      const canonicalIdLower = String(exactId).toLowerCase();
+      const targetEmailLower = cleanEmail(targetUser?.email || '');
       const adminEmail = getAdminEmail(env);
-      if (targetId === 'admin_root' || targetId === 'admin_a_h_sh' || (adminEmail && targetId === adminEmail) || targetId === String(user.id || '').toLowerCase()) {
+      if (
+        canonicalIdLower === 'admin_root' ||
+        canonicalIdLower === 'admin_a_h_sh' ||
+        (adminEmail && (lowerParam === adminEmail || targetEmailLower === adminEmail)) ||
+        (targetEmailLower && isEmailAdmin(env, targetEmailLower)) ||
+        canonicalIdLower === String(user.id || '').toLowerCase()
+      ) {
         throw new HttpError(400, 'امکان مسدودسازی حساب مدیر کل وجود ندارد.');
       }
       const susp = await getSuspendedUsers(env);
+      const wasSuspended = susp.has(canonicalIdLower) || susp.has(lowerParam) || (targetEmailLower && susp.has(targetEmailLower));
       let newStatus = 'active';
-      if (susp.has(targetId)) {
-        susp.delete(targetId);
+      if (wasSuspended) {
+        susp.delete(canonicalIdLower);
+        susp.delete(lowerParam);
+        if (targetEmailLower) susp.delete(targetEmailLower);
         newStatus = 'active';
       } else {
-        susp.add(targetId);
+        susp.delete(lowerParam);
+        if (targetEmailLower) susp.delete(targetEmailLower);
+        susp.add(canonicalIdLower);
         newStatus = 'suspended';
         if (env.DB) {
-          try { await env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(targetId).run(); } catch {}
+          try {
+            await env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(exactId).run();
+          } catch {}
         }
         for (const [k, v] of sessionUserCache) {
-          if (String(v?.user?.id || '').toLowerCase() === targetId || String(v?.user?.email || '').toLowerCase() === targetId) {
+          const cu = v?.user || v?.val;
+          const cuId = String(cu?.id || '').toLowerCase();
+          const cuEmail = cleanEmail(cu?.email || '');
+          if (cuId === canonicalIdLower || cuId === lowerParam || (targetEmailLower && cuEmail === targetEmailLower)) {
             sessionUserCache.delete(k);
             markSessionRevoked(k);
           }
@@ -3358,6 +3556,8 @@ async function route(req, env, url, ctx) {
       }
       inMemorySuspendedUsers = susp;
       inMemorySuspendedUsersTime = nowS();
+      inMemoryAdminStats = null;
+      inMemoryAdminStatsTime = 0;
       if (env.DB) {
         try {
           await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('suspended_users',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify([...susp]), nowS()).run();
@@ -3424,8 +3624,9 @@ async function route(req, env, url, ctx) {
   }
 
   if (!user) throw new HttpError(401, 'برای ادامه وارد شو.');
-  if (p === '/api/me' && m === 'DELETE') { await deleteAccount(env, user); return json({ ok: true }, 200, { 'set-cookie': `sid=; ${cookieOpts(url, 0)}` }); }
+  if (p === '/api/me' && m === 'DELETE') { await ensureNotMaintenance(user); await deleteAccount(env, user); return json({ ok: true }, 200, { 'set-cookie': `sid=; ${cookieOpts(url, 0)}` }); }
   if (p.startsWith('/api/me/alerts/') && p.endsWith('/retry') && m === 'POST') {
+    await ensureNotMaintenance(user);
     await rateLimit(env, 'retry:' + user.id, 10, 900);
     const localId = p.slice('/api/me/alerts/'.length, -'/retry'.length);
     if (!/^[A-Za-z0-9_-]{1,40}$/.test(localId)) throw new HttpError(400, 'شناسه نامعتبر است.');
@@ -3443,7 +3644,7 @@ async function route(req, env, url, ctx) {
     return json({ ok: true });
   }
   if (p === '/api/me/data' && m === 'GET') return json(await loadData(env, user.id));
-  if (p === '/api/me/data' && m === 'PUT') { await rateLimit(env, 'put:' + user.id, 120, 60); return json(await saveData(env, user.id, await readJson(req))); }
+  if (p === '/api/me/data' && m === 'PUT') { await ensureNotMaintenance(user); await rateLimit(env, 'put:' + user.id, 120, 60); return json(await saveData(env, user.id, await readJson(req))); }
   throw new HttpError(404, 'Not found');
 }
 
@@ -3469,7 +3670,7 @@ const MANIFEST = {
     { src: '/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
   ]
 };
-const SW_JS = `const V='darayi-shell-v8';
+const SW_JS = `const V='darayi-shell-v9';
 self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(V).then(c=>c.addAll(['/','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png','/coin-face.png','/coin-splash.js'])).catch(()=>{}))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==V).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
 self.addEventListener('message',e=>{if(e.data&&(e.data.type==='SKIP_WAITING'||e.data==='skipWaiting')){self.skipWaiting()}});

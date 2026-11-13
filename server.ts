@@ -90,21 +90,22 @@ function verifyCsrf(req: express.Request): boolean {
   if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return true;
   const secFetchSite = String(req.headers['sec-fetch-site'] || '').toLowerCase();
   if (secFetchSite === 'cross-site') return false;
-  const host = String(req.headers.host || '').toLowerCase();
+  const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim().toLowerCase();
+  const allowedHosts = new Set([rawHost, String(req.headers.host || '').trim().toLowerCase()].filter(Boolean));
   const origin = String(req.headers.origin || '').trim();
   const referer = String(req.headers.referer || '').trim();
   if (origin) {
     if (origin === 'null') return false;
     try {
       const u = new URL(origin);
-      if (host && u.host.toLowerCase() !== host) return false;
+      if (allowedHosts.size && !allowedHosts.has(u.host.toLowerCase())) return false;
     } catch {
       return false;
     }
   } else if (referer) {
     try {
       const u = new URL(referer);
-      if (host && u.host.toLowerCase() !== host) return false;
+      if (allowedHosts.size && !allowedHosts.has(u.host.toLowerCase())) return false;
     } catch {
       return false;
     }
@@ -1383,6 +1384,10 @@ app.get('/api/history', async (req, res) => {
 
   const item = cachedPrices.items?.[id];
   const isDomesticAsset = id !== 'usdt' && (Boolean(NERKH[id]) || Boolean(DOMESTIC_EXTRA[id]) || Boolean(IRAN_MARKET_MAP[id]) || Boolean((DOMESTIC_META as any)[id]) || item?.kind === 'domestic');
+  if (Object.keys(cachedPrices.items || {}).length > 0 && !item && id !== 'usdt' && !isDomesticAsset && !ASSETS[id]) {
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    return res.json({ id, range, currency: 'USDT', points: [], unavailable: true, reason: 'unknown_asset' });
+  }
 
   // 1. Crypto & Tether history
   if (item?.crypto || !isDomesticAsset) {
@@ -1554,10 +1559,10 @@ let systemUsers: StoredUser[] = [
         passwordHash: initialAdminPass ? hashPasswordSync(initialAdminPass) : ''
       }]
     : []),
-  { id: 'u_2', name: 'امیرحسین رضایی', email: 'amir.financial@yahoo.com', role: 'user', status: 'active', registeredAt: '1403/06/10', holdingsCount: 12, alertsCount: 3, lastLogin: '۲ ساعت قبل', passwordHash: hashPasswordSync('Amir#Secure2024') },
-  { id: 'u_3', name: 'سارا تهرانی', email: 'sara.trader@gmail.com', role: 'user', status: 'active', registeredAt: '1403/08/22', holdingsCount: 5, alertsCount: 2, lastLogin: 'دیروز', passwordHash: hashPasswordSync('SaraTeh_Trade99') },
-  { id: 'u_4', name: 'رضا کریمی', email: 'reza.crypto@outlook.com', role: 'user', status: 'active', registeredAt: '1403/09/04', holdingsCount: 28, alertsCount: 7, lastLogin: '۳ روز قبل', passwordHash: hashPasswordSync('RezaCrypto!442') },
-  { id: 'u_5', name: 'مهدی زرگر', email: 'mehdi.gold@gmail.com', role: 'user', status: 'active', registeredAt: '1403/10/12', holdingsCount: 8, alertsCount: 1, lastLogin: '۱ هفته قبل', passwordHash: hashPasswordSync('MehdiGold*8821') }
+  { id: 'u_2', name: 'امیرحسین رضایی', email: 'amir.financial@yahoo.com', role: 'user', status: 'active', registeredAt: '1403/06/10', holdingsCount: 12, alertsCount: 3, lastLogin: '۲ ساعت قبل', passwordHash: '' },
+  { id: 'u_3', name: 'سارا تهرانی', email: 'sara.trader@gmail.com', role: 'user', status: 'active', registeredAt: '1403/08/22', holdingsCount: 5, alertsCount: 2, lastLogin: 'دیروز', passwordHash: '' },
+  { id: 'u_4', name: 'رضا کریمی', email: 'reza.crypto@outlook.com', role: 'user', status: 'active', registeredAt: '1403/09/04', holdingsCount: 28, alertsCount: 7, lastLogin: '۳ روز قبل', passwordHash: '' },
+  { id: 'u_5', name: 'مهدی زرگر', email: 'mehdi.gold@gmail.com', role: 'user', status: 'active', registeredAt: '1403/10/12', holdingsCount: 8, alertsCount: 1, lastLogin: '۱ هفته قبل', passwordHash: '' }
 ];
 
 function loadAuthSessionFromDisk() {
@@ -2157,7 +2162,7 @@ app.post('/api/admin/settings', (req, res) => {
   const body = req.body || {};
   systemSettings = {
     maintenance: Boolean(body.maintenance ?? systemSettings.maintenance),
-    baseCurrency: body.baseCurrency === 'usd' ? 'usd' : 'toman',
+    baseCurrency: body.baseCurrency === 'rial' ? 'rial' : 'toman',
     pollIntervalSec: Math.min(300, Math.max(5, Number(body.pollIntervalSec) || 15)),
     defaultFeePct: Math.min(10, Math.max(0, Number(body.defaultFeePct) || 0)),
     allowNewRegistrations: Boolean(body.allowNewRegistrations ?? systemSettings.allowNewRegistrations)
@@ -2204,6 +2209,9 @@ app.post('/api/admin/broadcast', (req, res) => {
 });
 
 app.post('/api/auth/register/start', (req, res) => {
+  if (systemSettings.maintenance) {
+    return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
+  }
   if (!systemSettings.allowNewRegistrations) {
     return res.status(403).json({ error: 'ثبت‌نام کاربران جدید موقتاً توسط مدیریت غیرفعال شده است.' });
   }
@@ -2248,6 +2256,12 @@ app.post('/api/auth/register/start', (req, res) => {
 });
 
 app.post('/api/auth/register/verify', (req, res) => {
+  if (systemSettings.maintenance) {
+    return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
+  }
+  if (!systemSettings.allowNewRegistrations) {
+    return res.status(403).json({ error: 'ثبت‌نام کاربران جدید موقتاً توسط مدیریت غیرفعال شده است.' });
+  }
   const ip = getClientIp(req);
   const { email, code } = req.body || {};
   if (!email || !code) return res.status(400).json({ error: 'اطلاعات ناقص است.' });
@@ -2305,6 +2319,9 @@ app.post('/api/auth/register/verify', (req, res) => {
 });
 
 app.post('/api/auth/reset/start', (req, res) => {
+  if (systemSettings.maintenance) {
+    return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
+  }
   const ip = getClientIp(req);
   const { email } = req.body || {};
   if (!email) return res.status(400).json({ error: 'ایمیل را وارد کنید.' });
@@ -2335,6 +2352,9 @@ app.post('/api/auth/reset/start', (req, res) => {
 });
 
 app.post('/api/auth/reset/verify', (req, res) => {
+  if (systemSettings.maintenance) {
+    return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
+  }
   const ip = getClientIp(req);
   const { email, code } = req.body || {};
   if (!email || !code) return res.status(400).json({ error: 'اطلاعات ناقص است.' });
@@ -2368,6 +2388,9 @@ app.post('/api/auth/reset/verify', (req, res) => {
 });
 
 app.post('/api/auth/reset/finish', (req, res) => {
+  if (systemSettings.maintenance) {
+    return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
+  }
   const ip = getClientIp(req);
   const { email, resetToken, password } = req.body || {};
   if (!email || !resetToken || !password) {
@@ -2429,6 +2452,9 @@ app.delete('/api/me', (req, res) => {
   const u = resolveReqUser(req);
   if (!u) {
     return res.status(401).json({ error: 'ابتدا وارد حساب کاربری خود شوید.' });
+  }
+  if (systemSettings.maintenance && !u.isAdmin && !isEmailAdmin(u.email)) {
+    return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
   }
   const email = u.email.toLowerCase();
   delete userStore[email];
@@ -2889,6 +2915,9 @@ app.put('/api/me/data', (req, res) => {
   if (!u) {
     return res.status(401).json({ error: 'ابتدا وارد حساب کاربری خود شوید.' });
   }
+  if (systemSettings.maintenance && !u.isAdmin && !isEmailAdmin(u.email)) {
+    return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
+  }
   const body = req.body || {};
   const email = u.email.toLowerCase();
   const prevRec = userStore[email];
@@ -2941,6 +2970,9 @@ app.post('/api/me/alerts/:id/retry', (req, res) => {
   const u = resolveReqUser(req);
   if (!u) {
     return res.status(401).json({ error: 'ابتدا وارد حساب کاربری خود شوید.' });
+  }
+  if (systemSettings.maintenance && !u.isAdmin && !isEmailAdmin(u.email)) {
+    return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
   }
   const email = u.email.toLowerCase();
   const alertId = String(req.params.id || '');

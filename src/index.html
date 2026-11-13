@@ -8,7 +8,7 @@
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function() {
-    navigator.serviceWorker.register('/sw.js?v=8').then(function(reg) {
+    navigator.serviceWorker.register('/sw.js?v=9').then(function(reg) {
       reg.update().catch(function() {});
       if (reg.waiting) {
         reg.waiting.postMessage({ type: 'SKIP_WAITING' });
@@ -37,7 +37,7 @@ try {
 :root{color-scheme:light;--bg:#f8fafc;--paper:#ffffff;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--lime:#10b981;--primary:#10b981;--green:#059669;--greenbg:#ecfdf5;--red:#e11d48;--redbg:#fff1f2;--purple:#7357ff;--orange:#ff9851;--blue:#56c5e8;--shadow:0 12px 35px rgba(15,23,42,0.06);--radius:20px}
 :root[data-theme=dark],html[data-theme=dark]{color-scheme:dark!important;background:#0b0d11!important;background-color:#0b0d11!important;--bg:#0b0d11;--paper:#141820;--ink:#f4f6fa;--muted:#8f9bb0;--line:rgba(255,255,255,0.09);--lime:#10b981;--primary:#10b981;--green:#34d399;--greenbg:rgba(16,185,129,0.13);--red:#fb7185;--redbg:rgba(244,63,94,0.14);--shadow:0 8px 24px rgba(0,0,0,0.34)}
 :root[data-theme=dark] body,html[data-theme=dark] body{background:#0b0d11!important;background-color:#0b0d11!important}
-*{box-sizing:border-box}html{scroll-behavior:smooth;overflow-x:clip;max-width:100vw;width:100%;min-height:100%;background:var(--bg)}body{margin:0;overflow-x:clip;max-width:100vw;width:100%;min-height:100dvh;background:var(--bg);color:var(--ink);font:14px/1.7 Vazirmatn,Tahoma,sans-serif}button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #7357ff66;outline-offset:3px}button:disabled{opacity:.45;cursor:not-allowed}.app{min-height:100dvh;overflow-x:clip;max-width:100vw}.main{max-width:1200px;margin:auto;padding:20px 16px calc(150px + env(safe-area-inset-bottom))}
+*{box-sizing:border-box}html{scroll-behavior:smooth;overflow-x:clip;overscroll-behavior-y:none;max-width:100vw;width:100%;min-height:100%;background:var(--bg)}body{margin:0;overflow-x:clip;overscroll-behavior-y:none;max-width:100vw;width:100%;min-height:100dvh;background:var(--bg);color:var(--ink);font:14px/1.7 Vazirmatn,Tahoma,sans-serif}button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #7357ff66;outline-offset:3px}button:disabled{opacity:.45;cursor:not-allowed}.app{min-height:100dvh;overflow-x:clip;max-width:100vw}.main{max-width:1200px;margin:auto;padding:20px 16px calc(150px + env(safe-area-inset-bottom))}
 #ptrIndicator{display:none!important}
 @keyframes ptrSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 .view{display:none;animation:enter .2s ease}.view.active{display:block!important}@keyframes enter{from{opacity:.55;transform:translateY(5px)}to{opacity:1;transform:none}}.topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:22px}.brand{display:flex;align-items:center;gap:10px;font-weight:900;font-size:16px}.brand-mark{display:grid;place-items:center;width:36px;height:36px;border-radius:11px;background:var(--paper);color:#0f172a;font-size:20px;border:1.5px solid var(--line);box-shadow:0 2px 8px rgba(15,23,42,0.06)}.greeting{font-size:11px;color:var(--muted);margin-top:1px}.top-actions{display:flex;gap:8px;align-items:center}.icon-btn{width:44px;height:44px;border:1.2px solid rgba(255,255,255,0.85)!important;background:linear-gradient(135deg,rgba(255,255,255,0.85) 0%,rgba(245,248,252,0.7) 100%)!important;backdrop-filter:blur(16px)!important;-webkit-backdrop-filter:blur(16px)!important;color:var(--ink)!important;border-radius:15px;font-size:21px;display:grid;place-items:center;box-shadow:0 4px 12px rgba(15,23,42,0.05),inset 0 1px 1.5px rgba(255,255,255,0.95)!important;transition:all .18s ease!important}.icon-btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}h1,h2,h3,p{margin-top:0}h1{font-size:clamp(26px,5vw,38px);line-height:1.25;letter-spacing:-1px;margin-bottom:7px;font-weight:900}h2{font-size:19px;line-height:1.35;margin-bottom:4px;letter-spacing:-.4px}h3{font-size:14px;margin-bottom:4px}.muted{color:var(--muted)}.eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:.8px;font-weight:800;color:var(--muted)}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:14px 0 20px}.intro p{margin:0;color:var(--muted);font-size:12px}.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:100px;font-size:10px;font-weight:800;white-space:nowrap}.pill.live{background:var(--greenbg);color:var(--green)}.pill.sample{background:#fff1d8;color:#8e5b10}.dot{width:7px;height:7px;border-radius:50%;background:currentColor}.section{margin-top:27px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}.section-head p{margin:3px 0 0;font-size:11px;color:var(--muted)}.text-btn{border:0;background:transparent;color:var(--purple);font-weight:800;font-size:11px;padding:8px 0}.btn{border:0;border-radius:14px;padding:11px 15px;font-weight:800;font-size:12px;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:transform .16s,filter .16s;min-height:42px}.btn:active{transform:scale(.97)}.btn-dark{background:var(--ink);color:var(--paper)}.btn-lime,.btn-navy{background:#0f2744!important;background-color:#0f2744!important;color:#ffffff!important;border:1px solid rgba(255,255,255,0.18)!important;box-shadow:0 4px 14px rgba(15,39,68,0.32),inset 0 1px 1px rgba(255,255,255,0.25)!important}.btn-lime:hover,.btn-navy:hover{background:#091a2f!important;background-color:#091a2f!important;color:#ffffff!important;box-shadow:0 6px 18px rgba(15,39,68,0.45)!important;transform:translateY(-1px)!important}.btn-soft{background:linear-gradient(135deg,rgba(255,255,255,0.92) 0%,rgba(241,245,249,0.82) 100%)!important;backdrop-filter:blur(20px) saturate(190%)!important;-webkit-backdrop-filter:blur(20px) saturate(190%)!important;border:1.2px solid rgba(203,213,225,0.8)!important;color:var(--ink)!important;box-shadow:0 4px 14px rgba(15,23,42,0.06),inset 0 1px 1.5px rgba(255,255,255,0.95),inset 0 -1px 1px rgba(15,23,42,0.04)!important;transition:all .18s ease!important}.btn-soft:hover{background:linear-gradient(135deg,rgba(255,255,255,0.98) 0%,rgba(248,250,252,0.92) 100%)!important;border-color:rgba(148,163,184,0.6)!important;box-shadow:0 6px 20px rgba(15,23,42,0.1),inset 0 1.5px 2px rgba(255,255,255,1)!important;transform:translateY(-1px)!important}.btn-purple{background:var(--purple);color:white}.btn-danger{background:var(--redbg);color:var(--red)}.portfolio-hero{position:relative;overflow:hidden;background:#172b22;color:#f8fff5;border-radius:30px;padding:22px 20px 19px;box-shadow:0 18px 38px #16291f25}.portfolio-hero:before{content:"";position:absolute;inset:-100px auto auto -70px;width:260px;height:260px;border-radius:50%;background:radial-gradient(circle,#d7ff613b,transparent 68%);pointer-events:none}.portfolio-hero:after{content:"";position:absolute;right:48%;bottom:-110px;width:230px;height:230px;border:1px solid #ffffff12;border-radius:50%;box-shadow:0 0 0 24px #ffffff06,0 0 0 50px #ffffff05;pointer-events:none}.hero-top{position:relative;z-index:1;display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.hero-top .eyebrow{color:#b9cbbd}.hero-value{font-size:clamp(27px,6vw,42px);font-weight:900;letter-spacing:-1px;line-height:1.5;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.hero-gain{padding:7px 10px;border-radius:12px;background:var(--lime);color:#17231e;font-weight:900;font-size:12px;white-space:nowrap}.hero-chart{height:94px;position:relative;z-index:1;margin:8px -4px 0}.hero-chart svg{width:100%;height:100%;overflow:visible}.hero-bottom{display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative;z-index:1;border-top:1px solid #ffffff20;padding-top:13px}.hero-metric span{display:block;font-size:10px;color:#b9cbbd}.hero-metric b{font-size:13px}.hero-cta{display:flex;align-items:center;gap:6px;color:#d7ff61;font-size:11px;font-weight:800;white-space:nowrap}.quick-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:11px}.quick-card{padding:12px;border-radius:18px;background:var(--paper);border:1px solid var(--line);min-width:0}.quick-card .qicon{display:grid;place-items:center;width:31px;height:31px;border-radius:11px;font-size:17px;margin-bottom:9px}.qicon.purple{background:#e8f5c5;color:#42651b}.qicon.orange{background:#fff0e4;color:#d66a1e}.qicon.blue{background:#e2f8ff;color:#167c9d}.quick-card small{display:block;font-size:10px;color:var(--muted)}.quick-card b{display:block;font-size:clamp(12px,2.5vw,16px);font-weight:900;overflow-wrap:anywhere;margin-top:3px}.market-strip{display:flex;gap:9px;overflow-x:auto;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;padding:2px 1px 8px;scrollbar-width:none}.market-strip::-webkit-scrollbar{display:none}.ticker{touch-action:pan-x pan-y;min-width:154px;flex:1;padding:13px;border-radius:19px;background:var(--paper);border:1px solid var(--line);position:relative;overflow:hidden}.ticker:before{content:"";position:absolute;inset:0 0 auto;height:4px;background:var(--ticker,var(--purple))}.ticker-top{display:flex;align-items:center;gap:8px}.asset-icon{width:37px;height:37px;border-radius:13px;display:grid;place-items:center;background:var(--iconbg,#eee9ff);color:var(--iconcolor,#7357ff);font-size:18px;font-weight:900;flex:none}.ticker-name{font-size:11px;font-weight:800;line-height:1.3}.ticker-symbol{font-size:9px;color:var(--muted);direction:ltr}.ticker-price{font-size:17px;font-weight:900;letter-spacing:-.4px;margin-top:12px;direction:ltr;text-align:right;white-space:nowrap}.ticker-foot{display:flex;justify-content:space-between;align-items:center;gap:5px;margin-top:5px}.change{font-size:10px;font-weight:900;direction:ltr;white-space:nowrap}.change.up{color:var(--green)}.change.down{color:var(--red)}.spark{width:61px;height:23px}.spark svg{width:100%;height:100%}.market-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.market-card{padding:13px;border:1px solid var(--line);border-radius:21px;background:var(--paper);min-width:0;position:relative;overflow:hidden;cursor:pointer;transition:transform .18s,border-color .18s}.market-card:active{transform:scale(.985)}.market-card .card-top{display:flex;align-items:center;gap:8px}.market-card .asset-name{font-size:11px;font-weight:900;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.market-card .asset-symbol{font-size:9px;color:var(--muted);direction:ltr}.market-card .price{font-size:clamp(15px,3.4vw,21px);font-weight:900;letter-spacing:-.6px;margin-top:15px;direction:ltr;text-align:right;overflow-wrap:anywhere}.market-card .card-bottom{display:flex;justify-content:space-between;align-items:center;gap:4px;margin-top:5px}.market-card .change{padding:4px 6px;border-radius:8px;background:var(--greenbg)}.market-card .change.down{background:var(--redbg)}.market-card .spark{width:55px}.market-card .source{font-size:8px;color:var(--muted);margin-top:7px}.asset-grid-icon{width:40px;height:40px}.controls{display:grid;gap:9px;margin-bottom:14px}.search{width:100%;height:47px;border:1px solid var(--line);border-radius:15px;padding:0 14px;background:var(--paper);color:var(--ink)}.filter-row{display:flex;gap:7px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}.filter{border:1px solid var(--line);border-radius:99px;background:var(--paper);color:var(--muted);font-size:10px;font-weight:800;padding:8px 14px;white-space:nowrap}.filter.active{background:var(--ink);color:var(--paper);border-color:var(--ink)}.list{display:grid;gap:8px}.asset-row{display:flex;align-items:center;gap:10px;padding:12px;background:var(--paper);border:1px solid var(--line);border-radius:17px;min-width:0}.asset-row .row-main{min-width:0;flex:1}.row-name{font-weight:900;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.row-symbol{font-size:9px;color:var(--muted);direction:ltr;text-align:right}.row-price{font-size:12px;font-weight:900;direction:ltr;white-space:nowrap}.row-side{display:flex;align-items:flex-end;flex-direction:column;gap:2px}.row-source{font-size:8px;color:var(--muted)}.star{border:0;background:transparent;color:#9ba69d;font-size:21px;padding:2px}.star.active{color:#e4a92f}.empty{padding:28px 16px;text-align:center;background:var(--paper);border:1px dashed var(--line);border-radius:18px;color:var(--muted)}.empty b{display:block;color:var(--ink);margin-bottom:5px}.portfolio-summary{background:linear-gradient(135deg,#172b22,#24563d);color:white;border-radius:25px;padding:20px;position:relative;overflow:hidden}.portfolio-summary:after{content:"";position:absolute;width:180px;height:180px;border:1px solid #ffffff2b;border-radius:50%;left:-35px;bottom:-115px;box-shadow:0 0 0 25px #ffffff0b,0 0 0 50px #ffffff08}.portfolio-summary .eyebrow{color:#c5dbc9}.portfolio-summary .total{font-size:27px;font-weight:900;overflow-wrap:anywhere}.summary-row{display:flex;gap:10px;margin-top:12px}.summary-chip{padding:8px 10px;border-radius:12px;background:#ffffff20;font-size:10px}.holdings{display:grid;gap:9px}.holding{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:13px;border-radius:17px;border:1px solid var(--line);background:var(--paper)}.holding-left{display:flex;gap:9px;align-items:center;min-width:0}.holding-title{font-size:15px;font-weight:900;line-height:1.4}.holding-sub{display:none;font-size:9px;color:var(--muted)}.holding-right{text-align:left}.holding-right b{font-size:clamp(15px,3.6vw,19px);display:block;font-weight:900;white-space:nowrap}.holding-right small{font-size:clamp(11px,2.7vw,14px);font-weight:800;color:var(--muted)}.holding-actions{display:flex;gap:5px;margin-top:7px}.small-btn{border:1px solid var(--line);border-radius:9px;padding:5px 8px;font-size:9px;font-weight:800;background:var(--paper);color:var(--ink)}.chart-card{background:var(--paper);border:1px solid var(--line);border-radius:22px;padding:15px}.chart-header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.chart-header b{font-size:18px}.chart-box{height:170px;margin:12px 0 5px}.chart-box svg{width:100%;height:100%;overflow:visible}.range-row{display:flex;gap:5px}.range{flex:1;border:0;background:var(--bg);color:var(--muted);padding:7px 4px;border-radius:9px;font-size:10px;font-weight:800}.range.active{background:var(--lime);color:#17231e}.allocation{display:grid;gap:13px}.allocation-item{display:grid;grid-template-columns:95px 1fr 45px;align-items:center;gap:9px;font-size:10px}.bar{height:9px;border-radius:99px;background:var(--bg);overflow:hidden}.bar span{display:block;height:100%;border-radius:99px;background:var(--bar,var(--purple))}.allocation-item b{font-size:10px;text-align:left}.settings-card{padding:16px;background:var(--paper);border:1px solid var(--line);border-radius:20px;margin-bottom:10px}.setting{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}.setting:last-child{border-bottom:0}.setting strong{display:block;font-size:12px}.setting small{display:block;color:var(--muted);font-size:10px}.setting select{max-width:140px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);padding:8px}.switch{width:45px;height:26px;border:0;border-radius:99px;background:#bdc6be;padding:3px;flex:none}.switch:after{content:"";display:block;width:20px;height:20px;background:white;border-radius:50%;transition:transform .18s}.switch.on{background:var(--green)}.switch.on:after{transform:translateX(-19px)}.bottom-nav{position:fixed;z-index:30;bottom:0;left:0;right:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;padding:8px 9px calc(8px + env(safe-area-inset-bottom));background:var(--paper);border-top:1px solid var(--line);box-shadow:0 -8px 30px #14241a0a}.bottom-nav button{border:0;background:transparent;color:var(--muted);border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;min-width:0;padding:5px 1px;font-size:9px;font-weight:800}.bottom-nav .nav-icon{display:grid;place-items:center;width:31px;height:27px;border-radius:10px;font-size:18px;line-height:1}.bottom-nav button.active{color:var(--ink)}.bottom-nav button.active .nav-icon{background:transparent;color:var(--ink)}.modal-backdrop{display:none;position:fixed;inset:0;z-index:50;background:#101912a8;backdrop-filter:blur(5px);padding:16px;align-items:flex-end;justify-content:center}.modal-backdrop.open{display:flex}.modal{width:min(100%,510px);max-height:min(88dvh,780px);overflow:auto;background:var(--paper);border-radius:27px 27px 20px 20px;padding:21px;box-shadow:0 25px 80px #0004;animation:sheet .2s ease}@keyframes sheet{from{opacity:.6;transform:translateY(14px)}to{opacity:1;transform:none}}.modal-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:17px}.modal-head h2{margin:0}.close{border:0;background:var(--bg);color:var(--ink);width:37px;height:37px;border-radius:12px;font-size:21px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}.asset-picker{border:1px solid var(--line);border-radius:15px;background:var(--bg);padding:10px}.asset-picker-search{width:100%;height:42px;border:1px solid var(--line);border-radius:11px;background:var(--paper);color:var(--ink);padding:0 12px;margin-bottom:8px}.asset-picker-list{display:grid;gap:4px;max-height:240px;overflow:auto}.asset-option{display:flex;align-items:center;gap:10px;width:100%;border:1px solid transparent;background:var(--paper);color:var(--ink);padding:9px 10px;border-radius:12px;text-align:right}.asset-option[aria-checked=true]{border-color:var(--green);background:var(--greenbg)}.asset-option .asset-icon{width:35px;height:35px}.asset-option .option-copy{flex:1;min-width:0}.asset-option strong{display:block;font-size:12px}.asset-option small{display:block;color:var(--muted);font-size:10px}.asset-option .radio-dot{width:20px;height:20px;border:2px solid var(--muted);border-radius:50%;display:grid;place-items:center}.asset-option[aria-checked=true] .radio-dot{border-color:var(--green)}.asset-option[aria-checked=true] .radio-dot:after{content:"";width:10px;height:10px;border-radius:50%;background:var(--green)}.featured-manage-list{display:grid;gap:7px}.featured-manage-row{display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.featured-manage-row .row-main{flex:1;min-width:0}.featured-manage-row .move-controls{display:flex;gap:4px}.featured-manage-row .move-controls button{width:35px;height:35px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink)}.drag-handle{touch-action:none;cursor:grab;user-select:none;border:1px solid var(--line);background:var(--paper);color:var(--muted);border-radius:10px;min-width:35px;height:35px;font-size:17px}.featured-manage-row.dragging{opacity:.45}.field{display:grid;gap:6px;min-width:0}.field.full{grid-column:1/-1}.field label{font-size:11px;font-weight:800}.field input,.field select{width:100%;min-width:0;height:44px;padding:0 11px;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--ink)}.field input{direction:ltr;text-align:left}.field input::placeholder{direction:rtl;text-align:right}.form-actions{display:flex;gap:8px;margin-top:17px}.form-actions>*{flex:1}.detail-hero{padding:18px;border-radius:20px;background:var(--bg);margin-bottom:12px}.detail-price{font-size:29px;font-weight:900;direction:ltr;text-align:right}.detail-chart{height:150px}.detail-chart svg{width:100%;height:100%}.toast{position:fixed;z-index:80;bottom:calc(83px + env(safe-area-inset-bottom));left:50%;transform:translate(-50%,14px);opacity:0;pointer-events:none;background:var(--ink);color:var(--paper);padding:10px 16px;border-radius:13px;font-size:11px;font-weight:800;box-shadow:0 8px 30px #0002;transition:opacity .2s,transform .2s;white-space:nowrap;max-width:calc(100vw - 24px);overflow:hidden;text-overflow:ellipsis}.toast.show{opacity:1;transform:translate(-50%,0)}.notice{padding:11px 13px;border-radius:13px;background:#fff1d8;color:#85540b;font-size:10px;margin:12px 0}.hide-value .hero-value,.hide-value .portfolio-summary .total{filter:blur(9px);user-select:none}.table-note{font-size:9px;color:var(--muted);margin-top:9px}.page-actions{display:flex;gap:8px;flex-wrap:wrap}.page-actions .btn{flex:1}.asset-detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.detail-metric{background:var(--paper);border:1px solid var(--line);border-radius:15px;padding:12px}.detail-metric small{display:block;color:var(--muted);font-size:10px}.detail-metric b{display:block;font-size:13px;margin-top:3px;overflow-wrap:anywhere}
@@ -112,7 +112,7 @@ body.is-reordering{-webkit-user-select:none;user-select:none;overscroll-behavior
 
 /* v9.3 */
 .icon-mini{width:34px;height:34px;border:1px solid var(--line);background:var(--paper);color:var(--ink);border-radius:11px;font-size:16px;display:grid;place-items:center;padding:0}
-.login-btn{height:44px;min-width:68px;max-width:96px;padding:0 14px;border:1.5px solid var(--line);background:#ffffff!important;color:#0f172a!important;border-radius:14px;font-weight:800;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,0.04);transition:all .16s ease}.login-btn:not(.user-avatar-btn):hover{background:#f8fafc!important;transform:translateY(-1px)}.login-btn.user-avatar-btn{width:36px!important;height:36px!important;min-width:36px!important;max-width:36px!important;min-height:36px!important;max-height:36px!important;padding:0!important;margin:0!important;border-radius:50%!important;background:#ffffff!important;border:1.5px solid var(--line)!important;box-shadow:0 2px 6px rgba(0,0,0,0.06)!important;display:flex!important;align-items:center!important;justify-content:center!important;line-height:0!important;cursor:pointer!important;color:#0f172a!important;overflow:hidden!important;box-sizing:border-box!important;transition:all .15s ease!important}.login-btn.user-avatar-btn:hover{transform:translateY(-1px) scale(1.04)!important;border-color:#0f172a!important}.login-btn.user-avatar-btn svg{width:18px!important;height:18px!important;fill:#0f172a!important;stroke:none!important;stroke-width:0!important;display:block!important;margin:auto!important;flex:none!important}
+.login-btn{height:44px;min-width:68px;max-width:96px;padding:0 14px;border:1.5px solid var(--line);background:#ffffff!important;color:#0f172a!important;border-radius:14px;font-weight:800;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:inline-flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,0.04);transition:all .16s ease}.login-btn:not(.user-avatar-btn):hover{background:#f8fafc!important;transform:translateY(-1px)}.login-btn.user-avatar-btn{width:42px!important;height:42px!important;min-width:42px!important;max-width:42px!important;min-height:42px!important;max-height:42px!important;padding:0!important;margin:0!important;border-radius:50%!important;background:#ffffff!important;border:1.5px solid var(--line)!important;box-shadow:0 2px 6px rgba(0,0,0,0.06)!important;display:flex!important;align-items:center!important;justify-content:center!important;line-height:0!important;cursor:pointer!important;color:#0f172a!important;overflow:hidden!important;box-sizing:border-box!important;transition:all .15s ease!important}.login-btn.user-avatar-btn:hover{transform:translateY(-1px) scale(1.04)!important;border-color:#0f172a!important}.login-btn.user-avatar-btn svg{width:20px!important;height:20px!important;fill:#0f172a!important;stroke:none!important;stroke-width:0!important;display:block!important;margin:auto!important;flex:none!important}
 .check-box{width:22px;height:22px;flex:none;border:2px solid var(--muted);border-radius:7px;display:grid;place-items:center}
 .asset-option[aria-checked=true] .check-box{background:var(--green);border-color:var(--green)}
 .asset-option[aria-checked=true] .check-box:after{content:'✓';color:#fff;font-size:14px;line-height:1;font-weight:900}
@@ -3946,6 +3946,9 @@ function getBadgeColors(text){
 const REAL_X_CRYPTOS_CLIENT = new Set(['xrp','xlm','xmr','xdc','xtz','xch','xaut','xai','xem','xvg','xno','xec','xpl','xvs']);
 
 window.handleCryptoImgError=function(img,fallbackText,c1,c2){
+  const fbText = String(fallbackText ?? img.dataset.fb ?? '?');
+  const bg1 = /^#[0-9a-f]{3,8}$/i.test(String(c1 || img.dataset.c1 || '')) ? String(c1 || img.dataset.c1) : '#3b82f6';
+  const bg2 = /^#[0-9a-f]{3,8}$/i.test(String(c2 || img.dataset.c2 || '')) ? String(c2 || img.dataset.c2) : '#1d4ed8';
   const rawSym = String(img.dataset.sym || '').toLowerCase().trim();
   const stripped = rawSym.replace(/^(1000+|1m)/, '');
   const sym = (stripped && stripped !== rawSym) ? stripped : (rawSym.startsWith('ok') && rawSym.length > 3 ? rawSym.slice(2) : rawSym);
@@ -3954,7 +3957,7 @@ window.handleCryptoImgError=function(img,fallbackText,c1,c2){
 
   if (step === 0 && rawSym) {
     const apiUrl = window.cryptoIcons && (window.cryptoIcons[rawSym] || window.cryptoIcons[sym]);
-    if (apiUrl && img.src !== apiUrl) {
+    if (apiUrl && /^https:\/\//i.test(apiUrl) && img.src !== apiUrl) {
       img.dataset.step = '0.5';
       img.src = apiUrl;
       return;
@@ -3970,11 +3973,11 @@ window.handleCryptoImgError=function(img,fallbackText,c1,c2){
     const parent=img.parentElement;
     if(!parent)return;
     parent.className='asset-icon asset-icon-badge';
-    parent.style.background=`linear-gradient(135deg, ${c1||'#3b82f6'}, ${c2||'#1d4ed8'})`;
+    parent.style.background=`linear-gradient(135deg, ${bg1}, ${bg2})`;
     parent.style.color='#ffffff';
-    parent.style.fontSize=(fallbackText&&fallbackText.length>2)?'9.5px':'11px';
+    parent.style.fontSize=(fbText&&fbText.length>2)?'9.5px':'11px';
     parent.style.fontWeight='900';
-    parent.textContent=fallbackText||'?';
+    parent.textContent=fbText||'?';
     return;
   }
   if (step < 1 && sym) {
@@ -4019,15 +4022,16 @@ window.handleCryptoImgError=function(img,fallbackText,c1,c2){
   const parent=img.parentElement;
   if(!parent)return;
   parent.className='asset-icon asset-icon-badge';
-  parent.style.background=`linear-gradient(135deg, ${c1||'#3b82f6'}, ${c2||'#1d4ed8'})`;
+  parent.style.background=`linear-gradient(135deg, ${bg1}, ${bg2})`;
   parent.style.color='#ffffff';
-  parent.style.fontSize=(fallbackText&&fallbackText.length>2)?'9.5px':'11px';
+  parent.style.fontSize=(fbText&&fbText.length>2)?'9.5px':'11px';
   parent.style.fontWeight='900';
-  parent.textContent=fallbackText||'?';
+  parent.textContent=fbText||'?';
 };
 
 window.handleFlagImgError=function(img,fallbackText){
   img.onerror=null;
+  const fbText = String(fallbackText ?? img.dataset.fb ?? '¤');
   const parent=img.parentElement;
   if(!parent)return;
   parent.className='asset-icon asset-icon-badge';
@@ -4035,7 +4039,7 @@ window.handleFlagImgError=function(img,fallbackText){
   parent.style.color='var(--ink, #1e293b)';
   parent.style.fontSize='12px';
   parent.style.fontWeight='900';
-  parent.textContent=fallbackText||'¤';
+  parent.textContent=fbText||'¤';
 };
 
 const SUN_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></svg>`;
@@ -4095,7 +4099,7 @@ const seed=[
 {id:'bnb',name:'بایننس کوین',symbol:'BNB',cat:'crypto',icon:'◆',price:38500000,change:-1.1,color:'#f3ba2f',cg:'binancecoin'},
 {id:'xrp',name:'ریپل',symbol:'XRP',cat:'crypto',icon:'✕',price:33000,change:-.8,color:'#5a6b80',cg:'ripple'},
 {id:'sp500',name:'شاخص S&P 500',symbol:'SPX',cat:'global',icon:'SPX',price:5800,change:.28,color:'#398a65'}
-];let assets=seed.filter(x=>x.id!=='sp500').map(x=>({...x,price:null,change:null,source:null,stale:true,currency:x.cat==='crypto'&&x.id!=='usdt'?'USDT':x.id==='silver'?'USD':'IRT'}));try{for(const x of JSON.parse(localStorage.getItem('darayi-assets')||'[]'))if(x&&/^[a-z0-9]{1,20}$/.test(x.id)&&!assets.some(a=>a.id===x.id))assets.push({...x,name:escapeHtml(x.name||x.id),en:escapeHtml(x.en||x.id),icon:escapeHtml(x.icon||x.id[0]),symbol:escapeHtml(x.symbol||x.id),color:/^#[a-f0-9]{6}$/i.test(x.color)?x.color:'#7357ff',price:null,change:null,stale:true,currency:'USDT'})}catch{};const PORTFOLIO_UNIT_IDS=['toman','rial','usd','eur','gbp','aed','try','cny','cad','aud','chf','sar','qar','kwd','omr','iqd','afn','rub','inr','usdt','btc','eth','sol','gold18','gold24','gram','coin','bahar','halfcoin','quartercoin','gramcoin','silver999'];let state={holdings:[],watch:[],alerts:[],featured:['usd','usdt','gold18','btc','eur','gbp','try','cad','coin'],theme:'light',unit:'toman',portfolioUnit:'toman',privacy:false,filter:'all',query:'',lastSync:null};
+];let assets=seed.filter(x=>x.id!=='sp500').map(x=>({...x,price:null,change:null,source:null,stale:true,currency:x.cat==='crypto'&&x.id!=='usdt'?'USDT':x.id==='silver'?'USD':'IRT'}));try{for(const x of JSON.parse(localStorage.getItem('darayi-assets')||'[]'))if(x&&/^[a-z0-9]{1,20}$/.test(x.id)&&!assets.some(a=>a.id===x.id))assets.push({...x,name:String(x.name||x.id).slice(0,80),en:String(x.en||x.id).slice(0,80),icon:String(x.icon||x.id[0]).slice(0,12),symbol:String(x.symbol||x.id).slice(0,24),color:/^#[a-f0-9]{3,8}$/i.test(x.color)?x.color:'#7357ff',price:null,change:null,stale:true,currency:'USDT'})}catch{};const PORTFOLIO_UNIT_IDS=['toman','rial','usd','eur','gbp','aed','try','cny','cad','aud','chf','sar','qar','kwd','omr','iqd','afn','rub','inr','usdt','btc','eth','sol','gold18','gold24','gram','coin','bahar','halfcoin','quartercoin','gramcoin','silver999'];let state={holdings:[],watch:[],alerts:[],featured:['usd','usdt','gold18','btc','eur','gbp','try','cad','coin'],theme:'light',unit:'toman',portfolioUnit:'toman',privacy:false,filter:'all',query:'',lastSync:null};
 try{const saved=JSON.parse(localStorage.getItem('darayi-v5'));if(saved&&typeof saved==='object')state={...state,...saved};}catch{};let fd=null,suppress=false;
 function sanitizeState(){const ok=id=>typeof id==='string'&&/^[a-z0-9]{1,20}$/.test(id);
 if(!Array.isArray(state.holdings))state.holdings=[];state.holdings=state.holdings.filter(h=>h&&ok(h.assetId)&&Number(h.qty)>0&&Number(h.buyPrice)>0).map(h=>({...h,id:typeof h.id==='string'&&/^[A-Za-z0-9_-]{1,40}$/.test(h.id)?h.id:uid(),qty:Number(h.qty),buyPrice:Number(h.buyPrice),fee:Math.max(0,Number(h.fee)||0)}));
@@ -4653,7 +4657,7 @@ function openPortfolioUnitModal() {
           const aData = convAssetData(id);
           const rateTxt = (id === 'toman' || id === 'rial') ? '' : (quoteToman(a) > 0 ? formatEnPrice(quoteToman(a), 0) + ' تومان' : '—');
           return `
-            <button type="button" class="asset-option" role="radio" aria-checked="${id === current}" data-pick-punit="${id}" data-search="${normFa(meta.label + ' ' + meta.sub + ' ' + meta.unit + ' ' + (a?.name || '') + ' ' + (a?.symbol || '') + ' ' + id)}">
+            <button type="button" class="asset-option" role="radio" aria-checked="${id === current}" data-pick-punit="${escapeHtml(id)}" data-search="${escapeHtml(normFa(meta.label + ' ' + meta.sub + ' ' + meta.unit + ' ' + (a?.name || '') + ' ' + (a?.symbol || '') + ' ' + id))}">
               ${aData.iconHtml}
               <span class="option-copy" style="text-align:right;direction:rtl">
                 <strong style="text-align:right;direction:rtl">${escapeHtml(meta.label)}</strong>
@@ -5024,7 +5028,7 @@ function assetQtyUnit(a) {
   return a.symbol || '';
 }
 
-function renderPositions(){const box=$('#positions');if(!box)return;box.innerHTML=safeLedger().positions.map(p=>{const a=asset(p.assetId),value=p.qty*quoteToman(a),pl=value-p.cost,t=assetTitles(a),u=assetQtyUnit(a);return `<article class="holding"><div><b>${t.isCrypto?`${escapeHtml(t.title)} <span style="font-size:11px;font-weight:500;color:var(--muted)">(${escapeHtml(t.sub)})</span>`:escapeHtml(t.title)}</b><div class="table-note">موجودی: ${qtyFmt.format(p.qty)} ${u} · میانگین خرید: ${money(p.cost/p.qty)}</div><div class="table-note">${Object.entries(p.wallets).filter(([w,q])=>q>1e-10).map(([w,q])=>escapeHtml(w)+': '+qtyFmt.format(q)).join(' · ')}</div></div><div class="holding-right"><b>${value>0?money(value):'—'}</b><small>سود/زیان باز: ${value>0?money(pl):'نامشخص'}</small></div></article>`}).join('')}
+function renderPositions(){const box=$('#positions');if(!box)return;box.innerHTML=safeLedger().positions.map(p=>{const a=asset(p.assetId),value=p.qty*quoteToman(a),pl=value-p.cost,t=assetTitles(a),u=assetQtyUnit(a);return `<article class="holding"><div><b>${t.isCrypto?`${escapeHtml(t.title)} <span style="font-size:11px;font-weight:500;color:var(--muted)">(${escapeHtml(t.sub)})</span>`:escapeHtml(t.title)}</b><div class="table-note">موجودی: ${qtyFmt.format(p.qty)} ${escapeHtml(u)} · میانگین خرید: ${money(p.cost/p.qty)}</div><div class="table-note">${Object.entries(p.wallets).filter(([w,q])=>q>1e-10).map(([w,q])=>escapeHtml(w)+': '+qtyFmt.format(q)).join(' · ')}</div></div><div class="holding-right"><b>${value>0?money(value):'—'}</b><small>سود/زیان باز: ${value>0?money(pl):'نامشخص'}</small></div></article>`}).join('')}
 function updateSummary(){
   const positions=safeLedger().positions, v=totalValue(), p=pnl(), missing=positions.some(p=>!(asset(p.assetId).price>0)||asset(p.assetId).currency!=='IRT'&&!(asset('usdt').price>0));
   const pUnit = state.portfolioUnit || 'toman';
@@ -5121,9 +5125,45 @@ function updateTrust(){
     const stEl = bar.querySelector('.server-status-state');
     const sepEl = bar.querySelector('.server-status-sep');
     const tmEl = bar.querySelector('.server-status-time');
-    if (stEl) stEl.textContent = stateLabel;
-    if (tmEl) tmEl.textContent = relTimeText;
-    if (sepEl) sepEl.style.display = relTimeText ? '' : 'none';
+    const wasRefreshingText = stEl && stEl.textContent === 'در حال بروزرسانی قیمت‌ها';
+    if (wasRefreshingText) {
+      if (stEl) {
+        stEl.style.transition = 'opacity 0.24s ease, transform 0.24s cubic-bezier(.22,1,.36,1)';
+        stEl.style.opacity = '0';
+        stEl.style.transform = 'translateY(4px)';
+      }
+      if (tmEl) {
+        tmEl.style.transition = 'opacity 0.24s ease, transform 0.24s cubic-bezier(.22,1,.36,1)';
+        tmEl.style.opacity = '0';
+        tmEl.style.transform = 'translateY(4px)';
+      }
+      if (sepEl) {
+        sepEl.style.transition = 'opacity 0.24s ease';
+        sepEl.style.opacity = '0';
+      }
+      setTimeout(() => {
+        if (bar.classList.contains('is-refreshing')) return;
+        if (stEl) {
+          stEl.textContent = stateLabel;
+          stEl.style.opacity = '1';
+          stEl.style.transform = 'translateY(0)';
+        }
+        if (tmEl) {
+          tmEl.textContent = relTimeText;
+          tmEl.style.opacity = '1';
+          tmEl.style.transform = 'translateY(0)';
+        }
+        if (sepEl) {
+          sepEl.style.display = relTimeText ? '' : 'none';
+          sepEl.style.opacity = '1';
+        }
+        fitStatusPillText();
+      }, 110);
+    } else {
+      if (stEl) stEl.textContent = stateLabel;
+      if (tmEl) tmEl.textContent = relTimeText;
+      if (sepEl) sepEl.style.display = relTimeText ? '' : 'none';
+    }
   });
   $$('.js-market-sync-meta').forEach(el => {
     el.classList.toggle('is-online', onlineNow);
@@ -5641,20 +5681,22 @@ function assetIcon(a) {
   }
 
   // 3. Circular country flags for fiat currencies
-  const flagUrl = getCountryFlag(id) || getCountryFlag(sym);
+  const flagUrl = safeImgUrl(getCountryFlag(id) || getCountryFlag(sym));
   if (flagUrl || a.cat === 'currency' || a.cat === 'domestic') {
     if (flagUrl) {
       const fb = escapeHtml(a.icon || a.symbol || a.id);
-      return `<span class="asset-icon asset-icon-flag"><img src="${escapeHtml(flagUrl)}" alt="${escapeHtml(a.name)}" class="country-flag-img" referrerpolicy="no-referrer" loading="eager" decoding="async" onerror="handleFlagImgError(this, '${fb}')"></span>`;
+      return `<span class="asset-icon asset-icon-flag"><img src="${escapeHtml(flagUrl)}" alt="${escapeHtml(a.name)}" class="country-flag-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-fb="${fb}" onerror="handleFlagImgError(this)"></span>`;
     }
   }
 
   // 3. Cryptocurrencies official logos with robust fallback
   if (a.cat === 'crypto') {
-    const iconUrl = getCryptoIcon(sym) || getCryptoIcon(id);
+    const iconUrl = safeImgUrl(getCryptoIcon(sym) || getCryptoIcon(id));
     const badgeText = (a.symbol || sym || a.name || '?').slice(0, 3).toUpperCase();
     const [c1, c2] = getBadgeColors(badgeText);
-    return `<span class="asset-icon asset-icon-crypto"><img src="${escapeHtml(iconUrl)}" alt="${escapeHtml(a.symbol || a.name)}" class="crypto-logo-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-sym="${escapeHtml(sym || id)}" onerror="handleCryptoImgError(this, '${escapeHtml(badgeText)}', '${c1}', '${c2}')"></span>`;
+    if (iconUrl) {
+      return `<span class="asset-icon asset-icon-crypto"><img src="${escapeHtml(iconUrl)}" alt="${escapeHtml(a.symbol || a.name)}" class="crypto-logo-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-sym="${escapeHtml(sym || id)}" data-fb="${escapeHtml(badgeText)}" data-c1="${safeColor(c1,'#3b82f6')}" data-c2="${safeColor(c2,'#1d4ed8')}" onerror="handleCryptoImgError(this)"></span>`;
+    }
   }
 
   // 4. Default badge for any other item
@@ -5662,12 +5704,12 @@ function assetIcon(a) {
 }
 function ticker(a){
   const t = assetTitles(a);
-  return `<article class="ticker" style="--ticker:${a.color}" data-detail="${a.id}"><div class="ticker-top">${assetIcon(a)}<div style="text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="ticker-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="ticker-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="ticker-price">${quote(a)}</div><div class="ticker-foot"><span class="change ${a.change>=0?'up':'down'}">${a.change>=0?'↗':'↘'} ${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div></article>`;
+  return `<article class="ticker" style="--ticker:${safeColor(a.color)}" data-detail="${escapeHtml(a.id)}"><div class="ticker-top">${assetIcon(a)}<div style="text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="ticker-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="ticker-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="ticker-price">${quote(a)}</div><div class="ticker-foot"><span class="change ${a.change>=0?'up':'down'}">${a.change>=0?'↗':'↘'} ${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div></article>`;
 }
 function marketCard(a){
   const t = assetTitles(a);
   const srcHtml = isAdminUser() ? `<div class="source">${srcLabel(a)}</div>` : '';
-  return `<article class="market-card" data-detail="${a.id}" style="--ticker:${a.color}"><div class="card-top">${assetIcon(a)}<div style="min-width:0;flex:1;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="asset-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="asset-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10.5px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="price">${quote(a)}</div><div class="card-bottom"><span class="change ${a.change>=0?'up':'down'}">${a.change>=0?'↗':'↘'} ${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div>${srcHtml}</article>`;
+  return `<article class="market-card" data-detail="${escapeHtml(a.id)}" style="--ticker:${safeColor(a.color)}"><div class="card-top">${assetIcon(a)}<div style="min-width:0;flex:1;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="asset-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="asset-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10.5px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="price">${quote(a)}</div><div class="card-bottom"><span class="change ${a.change>=0?'up':'down'}">${a.change>=0?'↗':'↘'} ${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div>${srcHtml}</article>`;
 }
 const srcLabel=a=>quality(a);
 
@@ -5675,13 +5717,13 @@ function featCard(a){
   const up=a.change>=0;
   const t = assetTitles(a);
   const srcHtml = isAdminUser() ? `<div class="source">${srcLabel(a)}</div>` : '';
-  return `<article class="market-card" data-detail="${a.id}" style="--ticker:${a.color}"><div class="card-top">${assetIcon(a)}<div style="min-width:0;flex:1;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="asset-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="asset-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10.5px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="price">${quote(a)}</div><div class="card-bottom"><span class="change ${up?'up':'down'}">${up?'+':'−'}${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div>${srcHtml}</article>`;
+  return `<article class="market-card" data-detail="${escapeHtml(a.id)}" style="--ticker:${safeColor(a.color)}"><div class="card-top">${assetIcon(a)}<div style="min-width:0;flex:1;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="asset-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="asset-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10.5px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="price">${quote(a)}</div><div class="card-bottom"><span class="change ${up?'up':'down'}">${up?'+':'−'}${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div>${srcHtml}</article>`;
 }
 function renderFeatured(){if(fd)return;$('#featuredGrid').innerHTML=state.featured.map(id=>assets.find(a=>a.id===id)).filter(Boolean).slice(0,24).map(a=>featCard(a)).join('')}
 function featuredPicker(){
   const MAX=24;
   let sel=state.featured.slice();
-  openModal('ارزهای منتخب',`<p class="muted" style="font-size:11.5px;margin:0 0 10px">هر ارزی را خواستی تیک بزن (تا ${fmt.format(MAX)} ارز). انتخاب‌شده: <b id="featCount"></b></p><div class="asset-picker"><input id="featSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی" style="margin-bottom:8px;height:40px"><div class="asset-picker-list" id="featList">${sortAssetsStandard(assets).map(a=>{const t=assetTitles(a);return `<button type="button" class="asset-option" role="checkbox" aria-checked="${sel.includes(a.id)}" data-feat="${a.id}" data-search="${normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+getCryptoFullName(a)+' '+a.id)}">${assetIcon(a)}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="check-box"></span></button>`}).join('')}</div></div><div class="form-actions" style="margin-top:14px"><button class="btn btn-dark" type="button" id="featSave">ذخیره</button><button class="btn btn-soft" type="button" id="featCancel">انصراف</button></div>`);
+  openModal('ارزهای منتخب',`<p class="muted" style="font-size:11.5px;margin:0 0 10px">هر ارزی را خواستی تیک بزن (تا ${fmt.format(MAX)} ارز). انتخاب‌شده: <b id="featCount"></b></p><div class="asset-picker"><input id="featSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی" style="margin-bottom:8px;height:40px"><div class="asset-picker-list" id="featList">${sortAssetsStandard(assets).map(a=>{const t=assetTitles(a);return `<button type="button" class="asset-option" role="checkbox" aria-checked="${sel.includes(a.id)}" data-feat="${escapeHtml(a.id)}" data-search="${escapeHtml(normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+getCryptoFullName(a)+' '+a.id))}">${assetIcon(a)}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="check-box"></span></button>`}).join('')}</div></div><div class="form-actions" style="margin-top:14px"><button class="btn btn-dark" type="button" id="featSave">ذخیره</button><button class="btn btn-soft" type="button" id="featCancel">انصراف</button></div>`);
   const count=()=>{$('#featCount').textContent=fmt.format(sel.length)+' از '+fmt.format(MAX)};
   count();
   $('#featList').onclick=e=>{
@@ -5716,8 +5758,12 @@ function featuredPicker(){
     toast('ارزهای منتخب ذخیره شد');
   };
 }
+const AUTH_TOKEN_KEY='darayi-auth-token';
+function getStoredAuthToken(){try{return localStorage.getItem(AUTH_TOKEN_KEY)||''}catch{return ''}}
+function setStoredAuthToken(tok){try{if(tok)localStorage.setItem(AUTH_TOKEN_KEY,String(tok));else localStorage.removeItem(AUTH_TOKEN_KEY)}catch{}}
 const api=async(path,opt={})=>{
-  const r=await fetch(path,{credentials:'same-origin',...opt,headers:{'x-requested-with':'XMLHttpRequest',...(opt.body?{'content-type':'application/json'}:{}),...(opt.headers||{})}});
+  const tok=getStoredAuthToken();
+  const r=await fetch(path,{credentials:'same-origin',...opt,headers:{'x-requested-with':'XMLHttpRequest',...(tok?{'authorization':'Bearer '+tok}:{}),...(opt.body?{'content-type':'application/json'}:{}),...(opt.headers||{})}});
   if(!(r.headers.get('content-type')||'').includes('json'))throw new Error('no_api');
   const j=await r.json();
   if(!r.ok){const e=new Error(j.error||'خطا');e.status=r.status;throw e}
@@ -5744,10 +5790,10 @@ function showConflict(j){syncConflict=false;syncDirty=false;if(j?.data)applyRemo
 async function pollRemote(){if(!state.user?.remote||syncDirty||syncJob)return;try{const j=await api('/api/me/data');if(j.updatedAt&&j.updatedAt!==remoteRevision){applyRemote(j.data,j.updatedAt)}else if(j.data?.alerts)mergeTriggered(j.data.alerts)}catch{}}
 function mergeTriggered(list){if(!Array.isArray(list))return;let ch=false;for(const a of state.alerts){const r=list.find(x=>x.id===a.id);if(r&&((r.triggeredAt||null)!==a.triggeredAt||(r.attempts||0)!==(a.attempts||0))){a.triggeredAt=r.triggeredAt||a.triggeredAt||null;a.attempts=r.attempts||0;ch=true}}if(ch){applying=true;persist();applying=false;renderAlertsPreview()}}
 function applyRemote(d,rev){applying=true;if(rev!==undefined){remoteRevision=Number(rev)||remoteRevision;state.remoteRevision=remoteRevision}state.holdings=Array.isArray(d.holdings)?d.holdings:[];state.watch=Array.isArray(d.watch)?d.watch:[];if(Array.isArray(d.featured)&&d.featured.length)state.featured=d.featured;state.alerts=Array.isArray(d.alerts)?d.alerts:[];const s=d.settings||{};if(s.theme){state.theme=s.theme;state.unit=s.unit;state.privacy=!!s.privacy;state.filter=s.filter||'all'}sanitizeState();syncDirty=false;syncConflict=false;state.remoteRevision=remoteRevision;state.syncedSig=dataSig(state);try{localStorage.setItem('darayi-v5',JSON.stringify(state))}catch{}applying=false;renderAll()}
-async function afterLogin(){try{const j=await api('/api/me/data');const srvRev=j.updatedAt||0;if(!j.exists){remoteRevision=0;state.remoteRevision=0;if(state.holdings.length||state.watch.length||state.alerts.length){syncDirty=true;await pushRemote()}return}applyRemote(j.data,srvRev)}catch{}}
-async function checkSession(welcome){const q=new URLSearchParams(location.search),ae=q.get('auth_error');if(ae||q.get('login_token'))history.replaceState(null,'',location.pathname);
+async function afterLogin(){try{const j=await api('/api/me/data');const srvRev=j.updatedAt||0;if(!j.exists){remoteRevision=0;state.remoteRevision=0;if(state.holdings.length||state.watch.length||state.alerts.length){syncDirty=true;await pushRemote()}renderAll();return}applyRemote(j.data,srvRev)}catch{renderAll()}}
+async function checkSession(welcome){const q=new URLSearchParams(location.search),hq=new URLSearchParams(String(location.hash||'').replace(/^#/,'')),ae=q.get('auth_error'),lt=hq.get('login_token')||q.get('login_token');if(lt)setStoredAuthToken(lt);if(ae||lt)history.replaceState(null,'',location.pathname);
 if(ae)toast(({denied:'ورود با گوگل لغو شد.',state:'ورود منقضی شد؛ دوباره تلاش کن.',token:'ورود با گوگل ناموفق بود.',claims:'حساب گوگل تأیید نشد.',invalid:'درخواست ورود نامعتبر بود.'})[ae]||'ورود ناموفق بود.');
-try{const j=await api('/api/me');if(j.user){const isAdm = !!j.user.isAdmin; state.user={name:j.user.name||j.user.email.split('@')[0],email:j.user.email,role:j.user.role||(isAdm?'admin':'user'),isAdmin:isAdm,remote:true};persist();renderAll();await afterLogin();if(welcome)toast('خوش آمدی '+state.user.name)}else if(state.user&&state.user.remote){state.user=null;persist();renderAll();}}catch{if(state.user&&state.user.remote)renderAll();}}
+try{const j=await api('/api/me');if(j.user){const isAdm = !!j.user.isAdmin; state.user={name:j.user.name||j.user.email.split('@')[0],email:j.user.email,role:j.user.role||(isAdm?'admin':'user'),isAdmin:isAdm,remote:true};persist();renderAll();await afterLogin();if(welcome)toast('خوش آمدی '+state.user.name)}else if(state.user&&state.user.remote){setStoredAuthToken('');state.user=null;persist();renderAll();}}catch{if(state.user&&state.user.remote)renderAll();}}
 const faDigits=v=>String(v).replace(/[۰-۹]/g,d=>'۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g,d=>'٠١٢٣٤٥٦٧٨٩'.indexOf(d));
 const emailRe=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const eyeSvg = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/></svg>`;
@@ -5767,7 +5813,7 @@ function authWire(go){
   $$('#modalBody input').forEach(i=>i.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();go()}}));
 }
 const authErr=(m,t)=>{m.className='auth-msg err';m.textContent=t};
-async function authCall(path,body,btn,msg){btn.disabled=true;msg.className='auth-msg';msg.textContent='لطفاً صبر کن…';try{const j=await api(path,{method:'POST',body:JSON.stringify(body)});if(j&&j.user){const u=j.user;const isAdm=!!u.isAdmin;if(u.email){state.user={name:u.name||u.email.split('@')[0],email:u.email,role:u.role||(isAdm?'admin':'user'),isAdmin:isAdm,remote:true};persist();}}msg.textContent='';return j}catch(e){authErr(msg,e.message==='no_api'?'سرور در دسترس نیست؛ ورود فقط در نسخهٔ منتشرشده کار می‌کند.':e.message);return null}finally{btn.disabled=false}}
+async function authCall(path,body,btn,msg){btn.disabled=true;msg.className='auth-msg';msg.textContent='لطفاً صبر کن…';try{const j=await api(path,{method:'POST',body:JSON.stringify(body)});if(j&&j.token)setStoredAuthToken(j.token);if(j&&j.user){const u=j.user;const isAdm=!!u.isAdmin;if(u.email){state.user={name:u.name||u.email.split('@')[0],email:u.email,role:u.role||(isAdm?'admin':'user'),isAdmin:isAdm,remote:true};persist();}}msg.textContent='';return j}catch(e){authErr(msg,e.message==='no_api'?'سرور در دسترس نیست؛ ورود فقط در نسخهٔ منتشرشده کار می‌کند.':e.message);return null}finally{btn.disabled=false}}
 const authDone=async(t)=>{
   closeModal();
   await checkSession(true);
@@ -6052,6 +6098,7 @@ function authForgot(email = '') {
 }
 
 function authOtp(purpose, email, reg) {
+  let tm = 0;
   openModal('تأیید حساب', `
     <div class="auth-box">
       <div style="text-align:center;margin-bottom:8px">
@@ -6075,9 +6122,9 @@ function authOtp(purpose, email, reg) {
         <button type="button" class="link-btn" id="oBack" style="font-size:11.5px">بازگشت</button>
       </div>
     </div>
-  `);
+  `, () => { clearTimeout(tm); });
   const m = $('#oMsg'), rs = $('#oResend');
-  let left = 45, tm;
+  let left = 45;
   const tick = () => {
     rs.disabled = left > 0;
     rs.textContent = left > 0 ? `ارسال مجدد (${left} ثانیه)` : 'ارسال مجدد کد';
@@ -6104,6 +6151,7 @@ function authOtp(purpose, email, reg) {
   authWire(go);
   $('#oGo').onclick = go;
   rs.onclick = async () => {
+    clearTimeout(tm);
     left = 45;
     tick();
     const ok = await authCall(purpose === 'register' ? '/api/auth/register/start' : '/api/auth/reset/start', purpose === 'register' ? reg : { email }, rs, m);
@@ -6223,6 +6271,7 @@ function loginForm() {
 
   $('#logoutBtn').onclick = async () => {
     try { await api('/api/auth/logout', { method: 'POST' }); } catch {}
+    setStoredAuthToken('');
     state.user = null;
     state.holdings = [];
     state.watch = [];
@@ -6245,6 +6294,7 @@ function loginForm() {
   $('#delAccount').onclick = () => askConfirm('حساب کاربری و همهٔ داده‌های ذخیره‌شده بر روی سرور برای همیشه پاک شوند؟', async () => {
     try {
       await api('/api/me', { method: 'DELETE' });
+      setStoredAuthToken('');
       state.user = null;
       state.holdings = [];
       state.watch = [];
@@ -6287,9 +6337,9 @@ function applyPrices(items){let n=0,added=0,sig=0;const now=Math.floor(Date.now(
       const cleanN=cleanDisplayName(sy, rawN);
       a={
         id,
-        name:escapeHtml(dom?(i.name||sy):(cleanN||sy)),
-        en:escapeHtml(cleanN||sy),
-        symbol:escapeHtml(sy),
+        name:String(dom?(i.name||sy):(cleanN||sy)).slice(0,80),
+        en:String(cleanN||sy).slice(0,80),
+        symbol:String(sy).slice(0,24),
         cat:dom?(i.cat==='gold'?'gold':'currency'):'crypto',
         icon:dom?(i.cat==='gold'?'✦':'¤'):sy[0],
         color:'#7357ff'
@@ -6376,8 +6426,15 @@ function loadPriceCache(){
     return applyPrices(items);
   }catch{return null}
 }
-let lastPriceFetchTime = Date.now(), lastSparkClearTime = Date.now(), hasFreshPricesLoaded = false, serverConnected = null, lastServerReceiveTime = 0, consecutivePriceFails = 0;
-async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();lastServerReceiveTime=Date.now();consecutivePriceFails=0;serverConnected=true;const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(manual||!hasFreshPricesLoaded||Date.now()-lastSparkClearTime>900000){sparkSvgCache.clear();sparkSeen.clear();if(manual&&typeof histories!=='undefined')histories.clear();lastSparkClearTime=Date.now();}hasFreshPricesLoaded=true;}
+let lastPriceFetchTime = 0, lastSparkClearTime = Date.now(), hasFreshPricesLoaded = false, serverConnected = null, lastServerReceiveTime = 0, consecutivePriceFails = 0;
+function isConnectionFreshForSmartRefresh() {
+  if (navigator.onLine === false || !hasFreshPricesLoaded || serverConnected === false) return false;
+  const now = Date.now();
+  const recentHttp = lastServerReceiveTime > 0 && (now - lastServerReceiveTime < 60000);
+  const wsStreaming = Boolean(ws && ws.readyState === WebSocket.OPEN && lastWs > 0 && (now - lastWs < 15000) && lastServerReceiveTime > 0 && (now - lastServerReceiveTime < 300000));
+  return recentHttp || wsStreaming;
+}
+async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();lastServerReceiveTime=Date.now();consecutivePriceFails=0;serverConnected=true;const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(!hasFreshPricesLoaded||Date.now()-lastSparkClearTime>900000){sparkSeen.clear();lastSparkClearTime=Date.now();}hasFreshPricesLoaded=true;}
 state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};evaluateAlerts();if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();if($('#portfolio')?.classList.contains('active'))renderPortfolio();}lastPriceSig=sig;snapshot();updateTrust();if(!splashPending&&!statusIntroTriggered)triggerServerStatusIntro();hydrateSparks();if(manual)toast(n?'قیمت‌ها از سرور دریافت شدند.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){consecutivePriceFails++;const wsAlive=Boolean(lastWs&&Date.now()-lastWs<25000);const recentHttp=Boolean(lastServerReceiveTime>0&&Date.now()-lastServerReceiveTime<45000);if(navigator.onLine===false){serverConnected=false;}else if(serverConnected===true){if(consecutivePriceFails>=3&&!wsAlive&&!recentHttp){serverConnected=false;}else if(consecutivePriceFails===1&&!manual){setTimeout(()=>{if(!document.hidden)loadPrices(false);},2500);}}else{if(wsAlive){serverConnected=true;if(!lastServerReceiveTime)lastServerReceiveTime=Date.now();}else if(consecutivePriceFails>=2||manual){serverConnected=false;}else{setTimeout(()=>{if(!document.hidden)loadPrices(false);},2000);}}if($('#syncStatus'))$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();if(!splashPending&&!statusIntroTriggered&&serverConnected!==null)triggerServerStatusIntro();hydrateSparks();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
 let syncCryptoActive = false;
 async function syncCrypto(){
@@ -6402,7 +6459,16 @@ async function syncCrypto(){
   }
   const spinWait = new Promise(resolve => setTimeout(resolve, 1060));
   try{
-    await Promise.all([loadPrices(true), spinWait]);
+    if (isConnectionFreshForSmartRefresh()) {
+      await spinWait;
+      lastServerReceiveTime = Date.now();
+      serverConnected = true;
+      state.lastSync = new Date().toISOString();
+      softRender();
+      updateTrust();
+    } else {
+      await Promise.all([loadPrices(true), spinWait]);
+    }
   }finally{
     syncCryptoActive = false;
     buttons.forEach(b=>b.disabled=false);
@@ -6532,9 +6598,10 @@ function paintLivePrices(){
 let chartReq=0;const RANGE_LABEL={'1H':'۱ ساعت اخیر','1D':'۲۴ ساعت اخیر','3D':'۳ روز اخیر','1W':'۱ هفته اخیر','1M':'۱ ماه اخیر','1Y':'۱ سال اخیر'};
 const CLIENT_RANGES={'1H':3600,'1D':86400,'3D':259200,'1W':604800,'1M':2592000,'1Y':31536000};
 function validateDomesticArchivePoints(deduped, range, now, span, refPrice) {
+  const refNow = Math.max(now, deduped.at(-1)?.[0] || now);
   const grace = (range === '1H' ? 4500 : range === '1D' ? 88200 : Math.max(span * 1.5, 5 * 86400));
-  const minTs = now - grace;
-  let pts = deduped.filter(p => p[0] >= minTs && p[0] <= now + 3600);
+  const minTs = refNow - grace;
+  let pts = deduped.filter(p => p[0] >= minTs && p[0] <= refNow + 3600);
   if (pts.length < 2 && range !== '1H' && range !== '1D') {
     pts = deduped.slice(-Math.min(deduped.length, range === '1Y' ? 365 : 48));
   }
@@ -6552,7 +6619,7 @@ function validateClientHistory(rawPoints, range, a) {
     let ts = Math.floor(Number(p[0]));
     if (ts > 100000000000) ts = Math.floor(ts / 1000);
     const val = Number(p[1]);
-    if (Number.isFinite(ts) && ts > 1500000000 && ts <= now + 86400 && Number.isFinite(val) && val > 0) {
+    if (Number.isFinite(ts) && ts > 1500000000 && Number.isFinite(val) && val > 0) {
       cleaned.push([ts, val]);
     }
   }
@@ -6587,9 +6654,10 @@ function validateClientHistory(rawPoints, range, a) {
     return validateDomesticArchivePoints(filtered, range, now, span, refPrice);
   }
 
+  const refNow = Math.max(now, filtered.at(-1)?.[0] || now);
   const grace = range === '1H' ? 4500 : range === '1D' ? 88200 : Math.max(span * 1.25, 7200);
-  const minTs = now - grace;
-  let pts = filtered.filter(p => p[0] >= minTs && p[0] <= now + 3600);
+  const minTs = refNow - grace;
+  let pts = filtered.filter(p => p[0] >= minTs && p[0] <= refNow + 3600);
   if (pts.length < 2) {
     pts = filtered.slice(-Math.min(filtered.length, range === '1Y' ? 365 : range === '1M' ? 35 : 48));
   }
@@ -6743,7 +6811,7 @@ function drainSparks(){
         const svg=chartSVG(p,isUp?'#10b981':'#f43f5e',true,true);
         sparkSvgCache.set(id,svg);
         document.querySelectorAll('[data-spark="'+id+'"]').forEach(el=>{el.innerHTML=instantiateSparkSvg(svg);});
-      }else{
+      }else if(!sparkSvgCache.has(id)){
         document.querySelectorAll('[data-spark="'+id+'"]').forEach(el=>{el.innerHTML='';});
       }
     }).finally(()=>{
@@ -7033,7 +7101,7 @@ function openConverterAssetModal(side) {
           const pr = (it.id === 'toman' || it.id === 'rial') ? '' : quote(it);
           const t = assetTitles(it);
           return `
-            <button type="button" class="asset-option" role="radio" aria-checked="${isSelected}" data-pick-conv="${it.id}" data-search="${normFa(it.name + ' ' + it.symbol + ' ' + (it.en || '') + ' ' + (it.cat === 'crypto' ? (getCryptoFullName(it) + ' ' + (typeof FA_COIN !== 'undefined' ? (FA_COIN[String(it.symbol).toUpperCase()] || '') : '')) : '') + ' ' + it.id)}">
+            <button type="button" class="asset-option" role="radio" aria-checked="${isSelected}" data-pick-conv="${escapeHtml(it.id)}" data-search="${escapeHtml(normFa(it.name + ' ' + it.symbol + ' ' + (it.en || '') + ' ' + (it.cat === 'crypto' ? (getCryptoFullName(it) + ' ' + (typeof FA_COIN !== 'undefined' ? (FA_COIN[String(it.symbol).toUpperCase()] || '') : '')) : '') + ' ' + it.id))}">
               ${aData.iconHtml}
               <span class="option-copy" style="text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">
                 <strong style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</strong>
@@ -7303,7 +7371,7 @@ function renderMarket(){
   });
 }
 function renderWatch(){}
-function renderAllocation(target){if(!state.holdings.length){target.innerHTML=`<div class="empty" style="grid-column:1/-1"><b>هنوز خریدی ثبت نکردی</b>بعد از ثبت خرید، ترکیب دارایی‌ها به شکل نمودار دایره‌ای نمایش داده می‌شود.<button class="btn btn-lime" data-open-buy="1" style="margin-top:12px">＋ ثبت خرید</button></div>`;return}const rows=safeLedger().positions.map(h=>({a:asset(h.assetId),val:currentValue(h)})).filter(x=>x.val>0);const byAsset=new Map();rows.forEach(x=>byAsset.set(x.a.id,{a:x.a,val:(byAsset.get(x.a.id)?.val||0)+x.val}));const items=[...byAsset.values()].sort((a,b)=>b.val-a.val);const total=items.reduce((sum,x)=>sum+x.val,0);const palette=['#d7ff61','#58c5a5','#7c6cff','#ffb45e','#4eb8e8','#ed7b9b','#d7a4ff','#e9c34a','#4f8fda','#f08d63'];let at=0;const stops=items.map((x,i)=>{const from=at;at+=x.val/total*100;return `${palette[i%palette.length]} ${from.toFixed(2)}% ${at.toFixed(2)}%`}).join(',');target.innerHTML=`<div class="allocation-donut-wrap"><div class="allocation-donut" role="img" aria-label="نمودار دایره‌ای ترکیب سبد" style="background:conic-gradient(${stops})"></div><div class="donut-center"><span>ارزش سبد</span><b>${fmt.format(items.length)} دارایی</b></div></div><div class="allocation-legend">${items.map((x,i)=>`<div class="allocation-legend-row"><span class="swatch" style="background:${palette[i%palette.length]}"></span><span>${x.a.name}</span><strong>${fmt.format(x.val/total*100)}٪</strong></div>`).join('')}</div>`}
+function renderAllocation(target){if(!state.holdings.length){target.innerHTML=`<div class="empty" style="grid-column:1/-1"><b>هنوز خریدی ثبت نکردی</b>بعد از ثبت خرید، ترکیب دارایی‌ها به شکل نمودار دایره‌ای نمایش داده می‌شود.<button class="btn btn-lime" data-open-buy="1" style="margin-top:12px">＋ ثبت خرید</button></div>`;return}const rows=safeLedger().positions.map(h=>({a:asset(h.assetId),val:currentValue(h)})).filter(x=>x.val>0);const byAsset=new Map();rows.forEach(x=>byAsset.set(x.a.id,{a:x.a,val:(byAsset.get(x.a.id)?.val||0)+x.val}));const items=[...byAsset.values()].sort((a,b)=>b.val-a.val);const total=items.reduce((sum,x)=>sum+x.val,0);const palette=['#d7ff61','#58c5a5','#7c6cff','#ffb45e','#4eb8e8','#ed7b9b','#d7a4ff','#e9c34a','#4f8fda','#f08d63'];let at=0;const stops=items.map((x,i)=>{const from=at;at+=x.val/total*100;return `${palette[i%palette.length]} ${from.toFixed(2)}% ${at.toFixed(2)}%`}).join(',');target.innerHTML=`<div class="allocation-donut-wrap"><div class="allocation-donut" role="img" aria-label="نمودار دایره‌ای ترکیب سبد" style="background:conic-gradient(${stops})"></div><div class="donut-center"><span>ارزش سبد</span><b>${fmt.format(items.length)} دارایی</b></div></div><div class="allocation-legend">${items.map((x,i)=>`<div class="allocation-legend-row"><span class="swatch" style="background:${palette[i%palette.length]}"></span><span>${escapeHtml(x.a.name)}</span><strong>${fmt.format(x.val/total*100)}٪</strong></div>`).join('')}</div>`}
 let lastMoversSig = '';
 function renderMarketMovers(){
   const list = assets.filter(a => a.price > 0 && Number.isFinite(a.change) && (!a.vol || a.vol >= 2e6));
@@ -7438,7 +7506,7 @@ function renderPortfolio(){
         <div class="holding-meta">
           <div class="holding-title" dir="rtl">${escapeHtml(a.name)}</div>
           <div class="holding-sub-row">
-            <span class="holding-qty-badge" dir="auto"><b>${qtyFmt.format(h.qty)}</b> <span class="holding-qty-sym">${assetQtyUnit(a)}</span></span>
+            <span class="holding-qty-badge" dir="auto"><b>${qtyFmt.format(h.qty)}</b> <span class="holding-qty-sym">${escapeHtml(assetQtyUnit(a))}</span></span>
           </div>
         </div>
       </div>
@@ -7588,7 +7656,7 @@ async function renderAdmin() {
     `;
 
     $('#adminQuickSync')?.addEventListener('click', async e => {
-      const btn = e.target;
+      const btn = e.currentTarget;
       btn.disabled = true;
       btn.textContent = 'در حال دریافت…';
       try {
@@ -8237,8 +8305,9 @@ async function renderAdmin() {
       });
 
       $('#adminForcePriceSync')?.addEventListener('click', async e => {
-        e.target.disabled = true;
-        e.target.textContent = 'در حال دریافت…';
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = 'در حال دریافت…';
         try {
           await api('/api/admin/refresh-prices', { method: 'POST' });
           await loadPrices(true);
@@ -8246,8 +8315,8 @@ async function renderAdmin() {
         } catch (err) {
           toast('خطا: ' + err.message);
         } finally {
-          e.target.disabled = false;
-          e.target.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-left:4px"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>دریافت فوری آخرین قیمت‌ها از صرافی‌ها';
+          btn.disabled = false;
+          btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-left:4px"><path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/><path d="M16 21h5v-5"/></svg>دریافت فوری آخرین قیمت‌ها از صرافی‌ها';
           renderFeedsTab();
         }
       });
@@ -8528,7 +8597,7 @@ function renderAll() {
   if (loginBtn) {
     if (state.user && state.user.remote) {
       loginBtn.classList.add('user-avatar-btn');
-      loginBtn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="#0f172a" stroke="none" style="display:block;margin:auto;flex:none"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>`;
+      loginBtn.innerHTML = `<svg width="20" height="20" viewBox="0 0 24 24" fill="#0f172a" stroke="none" style="display:block;margin:auto;flex:none"><path d="M12 12c2.7 0 4.8-2.1 4.8-4.8S14.7 2.4 12 2.4 7.2 4.5 7.2 7.2 9.3 12 12 12zm0 2.4c-3.2 0-9.6 1.6-9.6 4.8v2.4h19.2v-2.4c0-3.2-6.4-4.8-9.6-4.8z"/></svg>`;
       loginBtn.title = state.user.name || 'پروفایل کاربری';
       loginBtn.setAttribute('aria-label', 'پروفایل ' + (state.user.name || 'کاربر'));
     } else {
@@ -8575,7 +8644,8 @@ function goto(page){
   setupDragToScroll();
 }
 
-function openModal(title,html){$('#modalTitle').textContent=title;$('#modalBody').innerHTML=html;$('#modalBackdrop').classList.add('open');document.body.classList.add('modal-open');document.body.style.overflow='hidden';ensureBackGuard();if(!matchMedia('(pointer:coarse)').matches)setTimeout(()=>($('#assetSearch')||$('#modalBody input, #modalBody select'))?.focus(),60)}function askConfirm(msg,yes){openModal('تأیید',`<p style="margin:0 0 4px">${escapeHtml(msg)}</p><div class="form-actions"><button class="btn btn-danger" type="button" id="cYes">بله، حذف شود</button><button class="btn btn-soft" type="button" id="cNo">انصراف</button></div>`);$('#cNo').onclick=closeModal;$('#cYes').onclick=()=>{closeModal();yes()}}function closeModal(){$('#modalBackdrop').classList.remove('open');document.body.classList.remove('modal-open');document.body.style.overflow=''}
+let activeDetailId = null, modalCleanup = null;
+function openModal(title,html,onClose=null){if(typeof modalCleanup==='function'){try{modalCleanup()}catch{}}modalCleanup=typeof onClose==='function'?onClose:null;activeDetailId=null;$('#modalTitle').textContent=title;$('#modalBody').innerHTML=html;$('#modalBackdrop').classList.add('open');document.body.classList.add('modal-open');document.body.style.overflow='hidden';ensureBackGuard();if(!matchMedia('(pointer:coarse)').matches)setTimeout(()=>($('#assetSearch')||$('#modalBody input, #modalBody select'))?.focus(),60)}function askConfirm(msg,yes){openModal('تأیید',`<p style="margin:0 0 4px">${escapeHtml(msg)}</p><div class="form-actions"><button class="btn btn-danger" type="button" id="cYes">بله، حذف شود</button><button class="btn btn-soft" type="button" id="cNo">انصراف</button></div>`);$('#cNo').onclick=closeModal;$('#cYes').onclick=()=>{closeModal();yes()}}function closeModal(){if(typeof modalCleanup==='function'){try{modalCleanup()}catch{}modalCleanup=null}activeDetailId=null;$('#modalBackdrop').classList.remove('open');document.body.classList.remove('modal-open');document.body.style.overflow=''}
 
 function setupDragToScroll() {
   document.querySelectorAll('.market-strip, #winners, #losers, .admin-tabs').forEach(el => {
@@ -8675,7 +8745,7 @@ function setupDragToScroll() {
   });
 }
 function assetPicker(selected='gold18',hid='buyAsset'){
-  return `<div class="asset-picker"><input id="assetSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی"><div class="asset-picker-list" id="assetPickerList" role="radiogroup" aria-label="انتخاب دارایی">${sortAssetsStandard(assets).map(a=>{const t=assetTitles(a);return `<button type="button" class="asset-option" role="radio" aria-checked="${a.id===selected}" data-pick-asset="${a.id}" data-search="${normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+getCryptoFullName(a)+' '+a.id)}">${assetIcon(a)}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="radio-dot"></span></button>`}).join('')}</div><input id="${hid}" type="hidden" value="${selected}"></div>`;
+  return `<div class="asset-picker"><input id="assetSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی"><div class="asset-picker-list" id="assetPickerList" role="radiogroup" aria-label="انتخاب دارایی">${sortAssetsStandard(assets).map(a=>{const t=assetTitles(a);return `<button type="button" class="asset-option" role="radio" aria-checked="${a.id===selected}" data-pick-asset="${escapeHtml(a.id)}" data-search="${escapeHtml(normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+getCryptoFullName(a)+' '+a.id))}">${assetIcon(a)}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="radio-dot"></span></button>`}).join('')}</div><input id="${escapeHtml(hid)}" type="hidden" value="${escapeHtml(selected)}"></div>`;
 }
 function wireAssetPicker(){
   const search=$('#assetSearch'),list=$('#assetPickerList');
@@ -8970,6 +9040,8 @@ function alertForm(selectedId=null,editIdx=null){
   $('#alertSubmit').onclick=doAlert;
   $('#alertForm').addEventListener('keydown',e=>{if(e.key==='Enter'&&e.target.tagName==='INPUT'&&e.target.type!=='search'){e.preventDefault();doAlert()}});
 }
+function safeColor(c,def='#7357ff'){return /^#[0-9a-f]{3,8}$/i.test(String(c||'').trim())?String(c).trim():def}
+function safeImgUrl(u){const s=String(u||'').trim();return (/^https:\/\//i.test(s)||s.startsWith('/'))?s:''}
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function detail(id) {
   const a = asset(id);
@@ -9044,7 +9116,8 @@ function detail(id) {
       <button class="btn btn-soft" id="detailAlert" style="flex:1"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-left:4px"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>هشدار قیمت</button>
     </div>
   `);
-  
+  activeDetailId = id;
+
   $('#detailBuy').onclick = () => buyForm(null, id);
   $('#detailAlert').onclick = () => alertForm(id);
   $('#detailRanges').addEventListener('click', e => {
@@ -9074,7 +9147,7 @@ grid.addEventListener('touchmove',e=>{if(fd)e.preventDefault()},{passive:false})
 grid.addEventListener('contextmenu',e=>{if(pend||fd)e.preventDefault()});
 grid.addEventListener('click',e=>{if(suppress){e.preventDefault();e.stopPropagation()}},true);
 addEventListener('blur',()=>{if(fd)end(false);cancelPend()})}
-function toggleWatch(id){state.watch=state.watch.includes(id)?state.watch.filter(x=>x!==id):[...state.watch,id];persist();renderAll();toast(state.watch.includes(id)?'به واچ‌لیست اضافه شد':'از واچ‌لیست حذف شد');if($('#modalBackdrop').classList.contains('open')&&$('#modalTitle').textContent===asset(id).name)detail(id)}
+function toggleWatch(id){state.watch=state.watch.includes(id)?state.watch.filter(x=>x!==id):[...state.watch,id];persist();renderAll();toast(state.watch.includes(id)?'به واچ‌لیست اضافه شد':'از واچ‌لیست حذف شد');if($('#modalBackdrop').classList.contains('open')&&activeDetailId===id)detail(id)}
 function download(name,data){const blob=new Blob([JSON.stringify(data,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 // Drag and drop is implemented in the dedicated order modal; this avoids accidental card taps on mobile.
 $$('[data-page]').forEach(b=>b.addEventListener('click',()=>goto(b.dataset.page)));document.addEventListener('click',e=>{const google=e.target.closest('.google-btn');if(google){e.preventDefault();e.stopPropagation();handleGoogleSignIn($('#aEmail')?.value||'');return}const mm=e.target.closest('[data-more-market]');if(mm){marketLimit+=60;renderMarket();return}const pick=e.target.closest('[data-pick-asset]');if(pick){const hidden=pick.closest('.asset-picker')?.querySelector('input[type=hidden]');if(hidden)hidden.value=pick.dataset.pickAsset;const ap=$('#alertPrice'),pa=asset(pick.dataset.pickAsset);if(ap&&!ap.dataset.touched)ap.value=groupedValue(String((pa.price||0)*(pa.currency==='IRT'&&rialOn()?10:1)));if($('#alertUnit')&&pa)$('#alertUnit').textContent='به قیمت ('+quoteUnit(pa)+')';$$('[data-pick-asset]').forEach(b=>b.setAttribute('aria-checked',String(b===pick)));}});document.addEventListener('click',e=>{const retry=e.target.closest('[data-retry-alert]');if(retry){retry.disabled=true;api('/api/me/alerts/'+encodeURIComponent(retry.dataset.retryAlert)+'/retry',{method:'POST'}).then(()=>{const a=state.alerts.find(a=>a.id===retry.dataset.retryAlert);if(a){a.attempts=0;a.triggeredAt=null;}toast('هشدار دوباره در صف بررسی قرار گرفت.');}).catch(()=>{retry.disabled=false;toast('تلاش مجدد ثبت نشد.');});return}const go=e.target.closest('[data-goto]');if(go){goto(go.dataset.goto);return}const buy=e.target.closest('[data-open-buy]');if(buy){buyForm();return}const d=e.target.closest('[data-detail]');if(d&&!e.target.closest('[data-watch]')&&!e.target.closest('[data-featured-handle]')&&!e.target.closest('[data-unwatch]')){detail(d.dataset.detail);return}const w=e.target.closest('[data-watch]');if(w){e.stopPropagation();toggleWatch(w.dataset.watch);return}const del=e.target.closest('[data-delete-holding]');if(del){askConfirm('این خرید حذف شود؟',()=>{const id=del.dataset.deleteHolding;const next=state.holdings.filter(h=>h.id!==id);try{ledger(next)}catch(e){toast(e.message);return}state.holdings=next;persist();renderAll();toast('خرید حذف شد')});return}const edit=e.target.closest('[data-edit-holding]');if(edit){buyForm(edit.dataset.editHolding);return}const da=e.target.closest('[data-del-alert]');if(da){e.stopPropagation();state.alerts.splice(Number(da.dataset.delAlert),1);persist();renderAll();toast('هشدار حذف شد');return}const ea=e.target.closest('[data-edit-alert]');if(ea){alertForm(null,Number(ea.dataset.editAlert));return}const uw=e.target.closest('[data-unwatch]');if(uw){e.stopPropagation();if(uw.dataset.busy)return;uw.dataset.busy='1';uw.textContent='☆';uw.classList.add('off');uw.setAttribute('aria-pressed','false');const id=uw.dataset.unwatch;setTimeout(()=>{state.watch=state.watch.filter(x=>x!==id);persist();renderAll();toast('از واچ‌لیست حذف شد')},220)}});
@@ -9190,7 +9263,7 @@ setTimeout(() => { if (!splashPending && !statusIntroTriggered) triggerServerSta
 
 
 
-checkSession();const qParams=new URLSearchParams(window.location.search);if(qParams.get('auth_error')){history.replaceState(null,'',window.location.pathname);setTimeout(()=>toast('ورود مستقیم با جیمیل یا رمز عبور فعال است.'),500);}api('/api/auth/config').then(j=>{window.authConfig=j}).catch(()=>{});setInterval(()=>{if(document.hidden)return;checkWsHealth();loadPrices();},15000);setInterval(()=>{if(document.hidden)return;pollRemote();},45000);setInterval(()=>{if(!document.hidden){updateTrust();snapshot();}},30000);addEventListener('online',()=>{updateTrust();pushRemote();loadPrices();connectPrices();});addEventListener('offline',()=>{serverConnected=false;updateTrust();});document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(wsTimer);}else{checkWsHealth();if(Date.now()-lastPriceFetchTime>=10000)loadPrices();}});
+checkSession();api('/api/auth/config').then(j=>{window.authConfig=j}).catch(()=>{});setInterval(()=>{if(document.hidden)return;checkWsHealth();loadPrices();},15000);setInterval(()=>{if(document.hidden)return;pollRemote();},45000);setInterval(()=>{if(!document.hidden){updateTrust();snapshot();}},30000);addEventListener('online',()=>{updateTrust();pushRemote();loadPrices();connectPrices();});addEventListener('offline',()=>{serverConnected=false;updateTrust();});document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(wsTimer);}else{checkWsHealth();if(Date.now()-lastPriceFetchTime>=10000)loadPrices();}});
 (function setupBackButtonGuard(){
   const armOnce = () => {
     ensureBackGuard();
@@ -9313,8 +9386,16 @@ checkSession();const qParams=new URLSearchParams(window.location.search);if(qPar
       return;
     }
     try {
-      await Promise.all([loadPrices(true), new Promise(r => setTimeout(r, 650))]);
-      softRender();
+      if (isConnectionFreshForSmartRefresh()) {
+        await new Promise(r => setTimeout(r, 600));
+        lastServerReceiveTime = Date.now();
+        serverConnected = true;
+        state.lastSync = new Date().toISOString();
+        softRender();
+      } else {
+        await Promise.all([loadPrices(true), new Promise(r => setTimeout(r, 650))]);
+        softRender();
+      }
     } finally {
       pill.classList.remove('is-refreshing');
       if (navigator.onLine !== false && lastServerReceiveTime > 0) {
