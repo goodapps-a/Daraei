@@ -50,7 +50,9 @@ if (fs.existsSync(publicDir)) {
 }
 
 const rootIndexHtmlPath = path.join(rootDir, 'index.html');
+const distIndexHtmlPath = path.join(distDir, 'index.html');
 fs.writeFileSync(rootIndexHtmlPath, htmlContent, 'utf8');
+fs.writeFileSync(distIndexHtmlPath, htmlContent, 'utf8');
 
 const publicWorkerPath = path.join(rootDir, 'public', 'worker.js');
 fs.writeFileSync(distWorkerPath, bundled, 'utf8');

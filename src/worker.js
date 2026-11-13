@@ -8,7 +8,7 @@ export const ASSETS = {
   btc: 'بیت‌کوین', eth: 'اتریوم', usdt: 'تتر', sol: 'سولانا', bnb: 'بایننس کوین', xrp: 'ریپل',
   silver: 'نقره جهانی', sp500: 'شاخص S&P 500',
 };
-export const CRYPTO_ICONS = {
+const LEGACY_COINCAP_ICONS = {
   btc: 'https://assets.coincap.io/assets/icons/btc@2x.png',
   eth: 'https://assets.coincap.io/assets/icons/eth@2x.png',
   usdt: 'https://assets.coincap.io/assets/icons/usdt@2x.png',
@@ -57,7 +57,6 @@ export const CRYPTO_ICONS = {
   bonk: 'https://assets.coincap.io/assets/icons/bonk@2x.png',
   wif: 'https://assets.coincap.io/assets/icons/wif@2x.png',
   not: 'https://assets.coincap.io/assets/icons/not@2x.png',
-  goat: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump/logo.png',
   ena: 'https://assets.coincap.io/assets/icons/ena@2x.png',
   sei: 'https://assets.coincap.io/assets/icons/sei@2x.png',
   jup: 'https://assets.coincap.io/assets/icons/jup@2x.png',
@@ -94,6 +93,14 @@ export const CRYPTO_ICONS = {
   zil: 'https://assets.coincap.io/assets/icons/zil@2x.png',
   dydx: 'https://assets.coincap.io/assets/icons/dydx@2x.png',
   woo: 'https://assets.coincap.io/assets/icons/woo@2x.png',
+  kcs: 'https://assets.coincap.io/assets/icons/kcs@2x.png',
+  rsr: 'https://assets.coincap.io/assets/icons/rsr@2x.png',
+  gtc: 'https://assets.coincap.io/assets/icons/gtc@2x.png',
+  lsk: 'https://assets.coincap.io/assets/icons/lsk@2x.png',
+};
+
+const CURATED_CRYPTO_ICONS = {
+  goat: 'https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/solana/assets/CzLSujWBLFsSjncfkh59rUFqvafWcY5tzedWJSuypump/logo.png',
   fartcoin: 'https://bin.bnbstatic.com/static/assets/logos/FARTCOIN.png',
   grass: 'https://bin.bnbstatic.com/static/assets/logos/GRASS.png',
   hype: 'https://bin.bnbstatic.com/static/assets/logos/HYPE.png',
@@ -101,6 +108,7 @@ export const CRYPTO_ICONS = {
   moodeng: 'https://bin.bnbstatic.com/static/assets/logos/MOODENG.png',
   pnut: 'https://bin.bnbstatic.com/static/assets/logos/PNUT.png',
   neiro: 'https://bin.bnbstatic.com/static/assets/logos/NEIRO.png',
+  neirocto: 'https://bin.bnbstatic.com/static/assets/logos/NEIRO.png',
   virtual: 'https://bin.bnbstatic.com/static/assets/logos/VIRTUAL.png',
   ai16z: 'https://bin.bnbstatic.com/static/assets/logos/AI16Z.png',
   popcat: 'https://bin.bnbstatic.com/static/assets/logos/POPCAT.png',
@@ -131,12 +139,13 @@ export const CRYPTO_ICONS = {
   bdx: 'https://static.coinpaprika.com/coin/bdx-beldex/logo.png',
   pump: 'https://bin.bnbstatic.com/static/assets/logos/PUMP.png',
   aster: 'https://bin.bnbstatic.com/static/assets/logos/ASTER.png',
-  kcs: 'https://assets.coincap.io/assets/icons/kcs@2x.png',
   prom: 'https://bin.bnbstatic.com/static/assets/logos/PROM.png',
-  rsr: 'https://assets.coincap.io/assets/icons/rsr@2x.png',
-  gtc: 'https://assets.coincap.io/assets/icons/gtc@2x.png',
-  lsk: 'https://assets.coincap.io/assets/icons/lsk@2x.png',
+  sonic: 'https://cdn.arz.digital/cr-odin/img/assets/sonic/64x64.png',
+  redstone: 'https://bin.bnbstatic.com/static/assets/logos/RED.png',
+  ton: 'https://bin.bnbstatic.com/static/assets/logos/TON.png',
 };
+
+export const CRYPTO_ICONS = { ...LEGACY_COINCAP_ICONS, ...CURATED_CRYPTO_ICONS };
 
 let inMemoryPrices = null;
 let inMemoryPricesTime = 0;
@@ -1817,7 +1826,7 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
   if (range === '1H' || range === '1D') {
     const windowStart = now - span;
     const d1Pts = await queryD1DomesticHistory(env, id, windowStart);
-    const memPts = (domesticIntradayTicks.get(id) || []).filter(p => p[0] >= windowStart && p[0] <= now + 60);
+    const memPts = (id === 'usdt' && d1Pts.length > 0) ? [] : (domesticIntradayTicks.get(id) || []).filter(p => p[0] >= windowStart && p[0] <= now + 60);
     const combined = [...d1Pts, ...memPts];
     if (curPrice > 0) {
       const srcTs = Number(liveItem?.sourceTimestamp) > 0 ? Math.floor(Number(liveItem.sourceTimestamp)) : 0;
@@ -2019,29 +2028,55 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
 }
 
 const historyMemCache = new Map();
+const histKvWriteAt = new Map();
 
 async function wallexHistory(symbol, range, refPrice = 0) {
   const now = nowS();
   const cfg = {
-    '1H': ['1', 3600],
-    '1D': ['15', 86400],
-    '3D': ['60', 259200],
-    '1W': ['60', 604800],
-    '1M': ['1D', 2592000],
-    '1Y': ['1D', 31536000]
-  }[range] || ['15', 86400];
-  const [res, span] = cfg;
+    '1H': ['1', 3600, 60],
+    '1D': ['15', 86400, 900],
+    '3D': ['60', 259200, 3600],
+    '1W': ['60', 604800, 3600],
+    '1M': ['1D', 2592000, 86400],
+    '1Y': ['1D', 31536000, 86400]
+  }[range] || ['15', 86400, 900];
+  const [res, span, bucket] = cfg;
+  const endTs = Math.floor(now / bucket) * bucket;
+  const startTs = endTs - span;
   try {
-    const j = await fetchJSON(`https://api.wallex.ir/v1/udf/history?symbol=${symbol}&resolution=${res}&from=${now - span}&to=${now}`, 5);
+    const j = await fetchJSON(`https://api.wallex.ir/v1/udf/history?symbol=${symbol}&resolution=${res}&from=${startTs}&to=${endTs}`, 5);
     if (j?.s === 'ok' && Array.isArray(j.t) && Array.isArray(j.c) && j.t.length >= 2) {
-      const pts = [];
+      const raw = [];
       for (let i = 0; i < j.t.length; i++) {
         const ts = Number(j.t[i]), c = Number(j.c[i]);
         if (Number.isFinite(ts) && c > 0) {
-          pts.push([ts, Math.round(c)]);
+          const bTs = Math.floor(ts / bucket) * bucket;
+          raw.push([bTs, Math.round(c)]);
         }
       }
-      return validateHistoryPoints(pts, range, now, true, refPrice, true);
+      const deduped = [];
+      for (const pt of raw) {
+        if (deduped.length && deduped[deduped.length - 1][0] === pt[0]) {
+          deduped[deduped.length - 1][1] = pt[1];
+        } else {
+          deduped.push(pt);
+        }
+      }
+      // حذف جهش‌های تک‌تیکی لحظه‌ای بدون تغییر واقعی روند
+      let clean = deduped;
+      if (deduped.length >= 5) {
+        const vals = deduped.map(p => p[1]).slice().sort((a, b) => a - b);
+        const med = vals[Math.floor(vals.length / 2)] || 0;
+        if (med > 0) {
+          clean = deduped.filter((p, idx) => {
+            if (Math.abs(p[1] - med) / med <= 0.15) return true;
+            const prev = idx > 0 ? deduped[idx - 1][1] : p[1];
+            const next = idx < deduped.length - 1 ? deduped[idx + 1][1] : p[1];
+            return Math.abs(p[1] - prev) / (prev || med) <= 0.04 && Math.abs(p[1] - next) / (next || med) <= 0.04;
+          });
+        }
+      }
+      return validateHistoryPoints(clean.length >= 2 ? clean : deduped, range, now, true, refPrice, true);
     }
   } catch {}
   return [];
@@ -2101,8 +2136,26 @@ async function history(env, url, ctx = null) {
   if (it?.crypto || !isDomesticAsset) {
     if (id === 'usdt') {
       const refP = (it && !isPriceItemStale(it, 'usdt', t)) ? (it.price || 0) : 0;
+      const d1CacheKey = `hist_cache:usdt:${range}`;
       let pts = await wallexHistory('USDTTMN', range, refP);
       let srcUsed = 'wallex';
+      if (pts.length >= 2 && env?.DB) {
+        const lastW = histKvWriteAt.get(d1CacheKey) || 0;
+        if (t - lastW >= 120) {
+          histKvWriteAt.set(d1CacheKey, t);
+          const saveJob = kvSet(env, d1CacheKey, { t, points: pts }).catch(() => {});
+          if (ctx?.waitUntil) ctx.waitUntil(saveJob);
+        }
+      } else if (pts.length < 2 && env?.DB) {
+        try {
+          const saved = await kvGet(env, d1CacheKey);
+          const maxAge = (range === '1H' || range === '1D') ? 1800 : 21600;
+          if (saved && Array.isArray(saved.points) && saved.points.length >= 2 && (t - (saved.t || 0) <= maxAge)) {
+            pts = validateHistoryPoints(saved.points, range, t, true, refP, true);
+            srcUsed = 'wallex_cache';
+          }
+        } catch {}
+      }
       if (pts.length < 2) {
         const arch = await archiveHistory('usdt', range, it, env);
         pts = validateHistoryPoints(arch, range, t, true, refP, range !== '1H' && range !== '1D');
@@ -2379,19 +2432,22 @@ function verifyCsrf(req, env, url) {
   }
 }
 
+const REAL_X_CRYPTOS = new Set(['xrp','xlm','xmr','xdc','xtz','xch','xaut','xai','xem','xvg','xno','xec','xpl','xvs']);
+
 async function getDynamicCryptoIcons(env) {
   const now = nowS();
-  if (inMemoryDynamicIcons && (now - inMemoryDynamicIconsTime < 43200)) {
+  const memTtl = (inMemoryDynamicIcons && Object.keys(inMemoryDynamicIcons).length >= 300) ? 43200 : 60;
+  if (inMemoryDynamicIcons && (now - inMemoryDynamicIconsTime < memTtl)) {
     return inMemoryDynamicIcons;
   }
   if (inMemoryDynamicIconsJob) return inMemoryDynamicIconsJob;
   inMemoryDynamicIconsJob = (async () => {
-    const kvKey = 'darayi_dynamic_icons_v1';
+    const kvKey = 'darayi_dynamic_icons_v2';
     try {
       const kv = env && (env.KV || env.PRICES_KV);
       if (kv) {
         const saved = await kv.get(kvKey, { type: 'json' });
-        if (saved && saved.icons && (now - (saved.t || 0) < 43200)) {
+        if (saved && saved.icons && Object.keys(saved.icons).length >= 300 && (now - (saved.t || 0) < 43200)) {
           inMemoryDynamicIcons = saved.icons;
           inMemoryDynamicIconsTime = saved.t || now;
           return inMemoryDynamicIcons;
@@ -2399,68 +2455,117 @@ async function getDynamicCryptoIcons(env) {
       }
     } catch {}
 
+    let pricesItems = inMemoryPrices?.items || {};
+    if (!Object.keys(pricesItems).length) {
+      try {
+        const p = await getPrices(env);
+        pricesItems = p?.items || {};
+      } catch {}
+    }
+
     const base = {};
-    const [cmcRes, cpRes, cgRes] = await Promise.allSettled([
+    const [cmcRes, cpRes, cg1Res, cg2Res] = await Promise.allSettled([
       fetchJSON('https://api.coinmarketcap.com/data-api/v3/cryptocurrency/listing?start=1&limit=3500&sortBy=market_cap&sortType=desc&convert=USD', 6),
       fetchJSON('https://api.coinpaprika.com/v1/coins', 6),
-      fetchJSON('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1', 5)
+      fetchJSON('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=1', 5),
+      fetchJSON('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=2', 5)
     ]);
 
-    // 1. CoinPaprika active ranked coins first, then unranked active coins
+    const normName = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+
+    // 1. CoinPaprika active ranked coins (symbol + normalized name/slug)
     const cpMap = {};
+    const cpNameMap = {};
     if (cpRes.status === 'fulfilled' && Array.isArray(cpRes.value)) {
       const sortedCp = cpRes.value
         .filter(c => c && c.is_active !== false && c.id && c.symbol)
         .sort((a, b) => ((a.rank > 0 ? a.rank : 999999) - (b.rank > 0 ? b.rank : 999999)));
       for (const c of sortedCp) {
         const s = String(c.symbol).toLowerCase().trim();
-        if (s && !cpMap[s]) cpMap[s] = `https://static.coinpaprika.com/coin/${c.id}/logo.png`;
+        const url = `https://static.coinpaprika.com/coin/${c.id}/logo.png`;
+        if (s && !cpMap[s]) cpMap[s] = url;
+        const nn = normName(c.name);
+        if (nn && !cpNameMap[nn]) cpNameMap[nn] = url;
+        const slugPart = normName(String(c.id).split('-').slice(1).join(''));
+        if (slugPart && !cpNameMap[slugPart]) cpNameMap[slugPart] = url;
       }
     }
 
     // 2. CoinMarketCap top 3500 by market cap (official 64x64 CDN)
     const cmcList = (cmcRes.status === 'fulfilled' && cmcRes.value?.data?.cryptoCurrencyList) || [];
     const cmcTop1500 = new Set();
+    const cmcNameMap = {};
     for (let idx = 0; idx < cmcList.length; idx++) {
       const c = cmcList[idx];
       const s = String(c?.symbol || '').toLowerCase().trim();
       if (!s || !c?.id) continue;
+      const url = `https://s2.coinmarketcap.com/static/img/coins/64x64/${c.id}.png`;
       if (idx < 1500) cmcTop1500.add(s);
-      if (!base[s]) base[s] = `https://s2.coinmarketcap.com/static/img/coins/64x64/${c.id}.png`;
+      if (!base[s]) base[s] = url;
+      const nn = normName(c.name);
+      if (nn && !cmcNameMap[nn]) cmcNameMap[nn] = url;
+      const sl = normName(c.slug);
+      if (sl && !cmcNameMap[sl]) cmcNameMap[sl] = url;
     }
 
-    // 3. CoinGecko top 250 high-res coin-images
-    if (cgRes.status === 'fulfilled' && Array.isArray(cgRes.value)) {
-      const cgSeen = new Set();
-      for (const c of cgRes.value) {
-        const s = String(c?.symbol || '').toLowerCase().trim();
-        if (s && c?.image && !cgSeen.has(s)) {
-          cgSeen.add(s);
-          base[s] = c.image;
+    // 3. CoinGecko top 500 high-res coin-images
+    const cgSeen = new Set();
+    const cgNameMap = {};
+    for (const cgRes of [cg1Res, cg2Res]) {
+      if (cgRes.status === 'fulfilled' && Array.isArray(cgRes.value)) {
+        for (const c of cgRes.value) {
+          const s = String(c?.symbol || '').toLowerCase().trim();
+          if (s && c?.image && !cgSeen.has(s)) {
+            cgSeen.add(s);
+            base[s] = c.image;
+          }
+          if (c?.image) {
+            const nn = normName(c.name);
+            if (nn && !cgNameMap[nn]) cgNameMap[nn] = c.image;
+            const idn = normName(c.id);
+            if (idn && !cgNameMap[idn]) cgNameMap[idn] = c.image;
+          }
         }
       }
     }
 
-    // 4. Fill any symbol from live prices using CoinPaprika + keep top 1500 CMC + curated icons
-    const activeKeys = new Set(Object.keys(inMemoryPrices?.items || {}).map(k => k.toLowerCase()));
+    // 4. Match activeKeys via direct ticker, stripped prefix, name/slug, or tokenized x-stocks
+    const activeKeys = new Set(Object.keys(pricesItems).map(k => k.toLowerCase()));
     const out = {};
     for (const k of cmcTop1500) {
       if (base[k]) out[k] = base[k];
     }
+    const resolveKey = k => {
+      if (base[k]) return base[k];
+      if (cpMap[k]) return cpMap[k];
+      if (cgNameMap[k]) return cgNameMap[k];
+      if (cmcNameMap[k]) return cmcNameMap[k];
+      if (cpNameMap[k]) return cpNameMap[k];
+      return '';
+    };
     for (const k of activeKeys) {
-      if (base[k]) out[k] = base[k];
-      else if (cpMap[k]) out[k] = cpMap[k];
+      const stripped = k.replace(/^(1000+|1m)/, '');
+      let found = resolveKey(k) || (stripped && stripped !== k ? resolveKey(stripped) : '');
+      if (!found && k.startsWith('ok') && k.length > 3) found = resolveKey(k.slice(2));
+      if (!found && !REAL_X_CRYPTOS.has(k)) {
+        const xm = /^x([a-z]{1,6})$/.exec(k);
+        if (xm) found = `https://financialmodelingprep.com/image-stock/${xm[1].toUpperCase()}.png`;
+      }
+      if (found) out[k] = found;
     }
     for (const [k, u] of Object.entries(base)) {
       if (!out[k] && (cmcTop1500.has(k) || activeKeys.has(k))) out[k] = u;
     }
-    Object.assign(out, CRYPTO_ICONS);
+    for (const [k, u] of Object.entries(LEGACY_COINCAP_ICONS)) {
+      if (!out[k]) out[k] = u;
+    }
+    Object.assign(out, CURATED_CRYPTO_ICONS);
 
     inMemoryDynamicIcons = out;
     inMemoryDynamicIconsTime = now;
     try {
       const kv = env && (env.KV || env.PRICES_KV);
-      if (kv) {
+      if (kv && Object.keys(out).length >= 300) {
         await kv.put(kvKey, JSON.stringify({ t: now, icons: out }), { expirationTtl: 86400 });
       }
     } catch {}
@@ -2579,9 +2684,10 @@ async function route(req, env, url, ctx) {
 
   if (p === '/api/crypto-icons' && m === 'GET') {
     const icons = await getDynamicCryptoIcons(env);
+    const maxAge = Object.keys(icons).length >= 300 ? 43200 : 60;
     return json({ ok: true, icons }, 200, {
       ...corsHeaders,
-      'cache-control': 'public, max-age=43200'
+      'cache-control': `public, max-age=${maxAge}`
     });
   }
 
@@ -3046,15 +3152,15 @@ const MANIFEST = {
   start_url: '/?source=pwa',
   scope: '/',
   display: 'standalone',
-  background_color: '#ffffff',
-  theme_color: '#ffffff',
+  background_color: '#0b0d11',
+  theme_color: '#0b0d11',
   icons: [
     { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
     { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
     { src: '/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
   ]
 };
-const SW_JS = `const V='darayi-shell-v6';
+const SW_JS = `const V='darayi-shell-v8';
 self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(V).then(c=>c.addAll(['/','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png','/coin-face.png','/coin-splash.js'])).catch(()=>{}))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==V).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
 self.addEventListener('message',e=>{if(e.data&&(e.data.type==='SKIP_WAITING'||e.data==='skipWaiting')){self.skipWaiting()}});

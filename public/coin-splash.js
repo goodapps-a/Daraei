@@ -52,9 +52,9 @@ function tex(gl,src){var t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl
  var an=gl.getExtension('EXT_texture_filter_anisotropic');if(an)gl.texParameterf(gl.TEXTURE_2D,an.TEXTURE_MAX_ANISOTROPY_EXT,4);return t}
 function sideCanvas(){var c=document.createElement('canvas');c.width=64;c.height=128;var x=c.getContext('2d'),g=x.createLinearGradient(0,0,0,128);
  g.addColorStop(0,'#eaeaea');g.addColorStop(1,'#e0e0e0');x.fillStyle=g;x.fillRect(0,0,64,128);return c}
-function run(o){o=o||{};var SP=o.speed||1.25;var gold=o.theme==='gold',ink=gold?[.15,.1,.04]:[.11,.137,.165],inkC=gold?'#261a08':'#1c232a';var ov=document.getElementById('coin-splash'),fin=false,raf=0,gl=null,cv,txt,spans=[],shown=0;
+function run(o){o=o||{};var SP=o.speed||1.25;var isDark=false;try{isDark=document.documentElement.dataset.theme==='dark';}catch(e){}var clearRgb=isDark?[0.0431,0.0510,0.0667]:[1,1,1];var bgHex=isDark?'#0b0d11':'#fff';var gold=o.theme==='gold',ink=gold?[.15,.1,.04]:[.11,.137,.165],inkC=isDark?'#f4f6fa':(gold?'#261a08':'#1c232a');var ov=document.getElementById('coin-splash'),fin=false,raf=0,gl=null,cv,txt,spans=[],shown=0;
  if(!ov){ov=document.createElement('div');ov.id='coin-splash';document.body.appendChild(ov)}
- ov.style.cssText='position:fixed;inset:0;z-index:99999;background:#fff;touch-action:manipulation;opacity:1;overflow:hidden';
+ ov.style.cssText='position:fixed;inset:0;z-index:99999;background:'+bgHex+';touch-action:manipulation;opacity:1;overflow:hidden';
  function done(){if(fin)return;fin=true;cancelAnimationFrame(raf);o.onDone&&o.onDone();ov.style.transition='opacity '+(.5/SP)+'s ease';ov.style.opacity='0';
   setTimeout(function(){ov.remove();var l=gl&&gl.getExtension('WEBGL_lose_context');l&&l.loseContext()},Math.round(560/SP))}
  function still(){var i=new Image();i.onload=i.onerror=function(){ov.innerHTML='';i.style.cssText='position:absolute;left:50%;top:50%;width:min(56vmin,300px);transform:translate(-50%,-50%)';ov.appendChild(i);setTimeout(done,900)};i.src=o.fallback||o.face}
@@ -84,20 +84,20 @@ function run(o){o=o||{};var SP=o.speed||1.25;var gold=o.theme==='gold',ink=gold?
   var hw=cam.d*TH;for(zs=0;zs<80;zs+=.1){var yv=cE*Y0-sE*zs,dd=cam.d-sE*Y0-cE*zs;if(yv/(TH*dd)+oy<-1-1.2/hw)break}
   S=sim(zs);
   var U=function(p,n){return gl.getUniformLocation(p,n)},A=function(p,n){return gl.getAttribLocation(p,n)};
-  gl.clearColor(1,1,1,1);gl.enable(gl.DEPTH_TEST);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
+  gl.clearColor(clearRgb[0],clearRgb[1],clearRgb[2],1);gl.enable(gl.DEPTH_TEST);gl.enable(gl.BLEND);gl.blendFunc(gl.SRC_ALPHA,gl.ONE_MINUS_SRC_ALPHA);
   function draw(t){var f=Math.min(t/DT,S.n-1.001),i=f|0,u=f-i,a=i*6,b=a+6,d=S.d,L=function(k){return d[a+k]+(d[b+k]-d[a+k])*u};
    var y=L(0),z=L(1),th=L(2),roll=L(3),yaw=L(4),sq=L(5),Rm=mul(ry(yaw),mul(rz(roll),rx(th))),hy=R*Math.abs(Math.sin(th))+H*Math.abs(Math.cos(th)),
     M=mul(tr(0,y-.1*sq*hy,z),mul([1+.05*sq,0,0,0,0,1-.1*sq,0,0,0,0,1+.05*sq,0,0,0,0,1],Rm)),
     h=Math.max(0,y-hy),ez=Math.max(.3,R*Math.abs(Math.cos(th))+H*Math.abs(Math.sin(th))),vp=mul(tr(0,-.03*Math.max(0,sq),0),cam.vp);
    var Wd=cv.width,Hd=cv.height,pa=pj(vp,1,y,z),pb=pj(vp,-1,y,z),p0=pj(vp,0,y,z),rpx=(pa[0]-pb[0])*Wd/4;
-   gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.disable(gl.BLEND);gl.clearColor(1,1,1,0);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+   gl.bindFramebuffer(gl.FRAMEBUFFER,fb);gl.disable(gl.BLEND);gl.clearColor(clearRgb[0],clearRgb[1],clearRgb[2],0);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
    gl.useProgram(pc);gl.bindBuffer(gl.ARRAY_BUFFER,vb);gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER,ib);
    [['p',3,0],['n',3,3],['t',2,6],['k',1,8]].forEach(function(q){var l=A(pc,q[0]);gl.enableVertexAttribArray(l);gl.vertexAttribPointer(l,q[1],gl.FLOAT,false,36,q[2]*4)});
    gl.uniformMatrix4fv(U(pc,'uM'),false,M);gl.uniformMatrix4fv(U(pc,'uV'),false,vp);
    gl.uniformMatrix3fv(U(pc,'uN'),false,[Rm[0],Rm[1],Rm[2],Rm[4],Rm[5],Rm[6],Rm[8],Rm[9],Rm[10]]);gl.uniform3fv(U(pc,'uE'),cam.eye);gl.uniform1f(U(pc,'uG'),gold?1:0);gl.uniform1f(U(pc,'uSw'),t>Tc?-.4+(t-Tc-.1)*1.5:-1);gl.uniform3fv(U(pc,'uInk'),ink);
    gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,tF);gl.uniform1i(U(pc,'uF'),0);gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,tS);gl.uniform1i(U(pc,'uS'),1);
    gl.drawElements(gl.TRIANGLES,m.i.length,gl.UNSIGNED_SHORT,0);
-   gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.clearColor(1,1,1,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.enable(gl.BLEND);
+   gl.bindFramebuffer(gl.FRAMEBUFFER,null);gl.clearColor(clearRgb[0],clearRgb[1],clearRgb[2],1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.enable(gl.BLEND);
    gl.useProgram(pg);gl.depthMask(false);gl.bindBuffer(gl.ARRAY_BUFFER,gb);var ap=A(pg,'p');gl.enableVertexAttribArray(ap);gl.vertexAttribPointer(ap,3,gl.FLOAT,false,0,0);
    gl.uniformMatrix4fv(U(pg,'uV'),false,vp);gl.uniform2f(U(pg,'uC'),.3*h,z-.35*h);gl.uniform2f(U(pg,'uX'),R*(1+.25*h),ez*(1+.25*h));
    gl.uniform2f(U(pg,'uP'),.34/(1+.7*h),Math.min(.55,.22+.1*h));gl.drawArrays(gl.TRIANGLE_STRIP,0,4);gl.depthMask(true);
