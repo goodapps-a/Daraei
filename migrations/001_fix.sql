@@ -114,6 +114,9 @@ CREATE TABLE IF NOT EXISTS alert_state (
 -- ۲. ایندکس‌های ضروری برای حذف اسکن کامل جدول (Full Table Scan) — همیشه پس از ایجاد جداول
 CREATE INDEX IF NOT EXISTS idx_ph2_t ON price_history_v2(t);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS idx_otp_expires ON otp_codes(expires_at);
+CREATE INDEX IF NOT EXISTS idx_oauth_expires ON oauth_states(expires_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(triggered_at);
 

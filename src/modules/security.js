@@ -36,6 +36,38 @@ export const isEmail = (e) => typeof e === 'string' && e.length <= 254 && /^[^\s
 export const okPass = (p) => typeof p === 'string' && p.length >= 8 && p.length <= 128;
 export const normCode = (c) => String(c ?? '').replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/\D/g, '');
 
+export function getAdminEmails(env) {
+  const rawParts = [];
+  if (env && typeof env.ADMIN_EMAILS === 'string' && env.ADMIN_EMAILS.trim()) {
+    rawParts.push(...env.ADMIN_EMAILS.split(/[\s,;]+/));
+  }
+  if (env && typeof env.ADMIN_EMAIL === 'string' && env.ADMIN_EMAIL.trim()) {
+    rawParts.push(...env.ADMIN_EMAIL.split(/[\s,;]+/));
+  }
+  const out = [];
+  const seen = new Set();
+  for (const part of rawParts) {
+    const em = cleanEmail(part);
+    if (em && isEmail(em) && !seen.has(em)) {
+      seen.add(em);
+      out.push(em);
+    }
+  }
+  return out;
+}
+
+export function getPrimaryAdminEmail(env) {
+  const legacy = cleanEmail(env && env.ADMIN_EMAIL);
+  if (legacy && isEmail(legacy)) return legacy;
+  return getAdminEmails(env)[0] || '';
+}
+
+export function isEmailAdmin(env, email) {
+  const em = cleanEmail(email);
+  if (!em) return false;
+  return getAdminEmails(env).includes(em);
+}
+
 // پیش‌فرض ۱۰,۰۰۰ iteration برای رعایت سقف ۱۰ms CPU پلن رایگان کلادفلر؛ قابل تنظیم با env.PBKDF2_ITER تا سقف ۱۰۰,۰۰۰
 export const PBKDF2_DEFAULT = 10000;
 export const iterOf = (env) => Math.min(100000, Math.max(1000, Number(env && env.PBKDF2_ITER) || PBKDF2_DEFAULT));

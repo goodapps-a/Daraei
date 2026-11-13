@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
 
 CREATE TABLE IF NOT EXISTS otp_codes (
   email TEXT NOT NULL,
@@ -29,12 +30,14 @@ CREATE TABLE IF NOT EXISTS otp_codes (
   created_at INTEGER NOT NULL,
   PRIMARY KEY (email, purpose)
 );
+CREATE INDEX IF NOT EXISTS idx_otp_expires ON otp_codes(expires_at);
 
 CREATE TABLE IF NOT EXISTS oauth_states (
   state_hash TEXT PRIMARY KEY,
   verifier TEXT NOT NULL,
   expires_at INTEGER NOT NULL
 );
+CREATE INDEX IF NOT EXISTS idx_oauth_expires ON oauth_states(expires_at);
 
 CREATE TABLE IF NOT EXISTS user_data (
   user_id TEXT PRIMARY KEY,
@@ -83,6 +86,7 @@ CREATE TABLE IF NOT EXISTS rate_limits (
   count INTEGER NOT NULL DEFAULT 0,
   reset_at INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_rate_limits_reset ON rate_limits(reset_at);
 
 CREATE TABLE IF NOT EXISTS alert_delivery (
   alert_id TEXT PRIMARY KEY,

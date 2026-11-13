@@ -10,7 +10,10 @@ import {
   verifyPassword,
   parsePbkdf2Hash,
   iterOf,
-  normCode
+  normCode,
+  getAdminEmails,
+  getPrimaryAdminEmail,
+  isEmailAdmin
 } from './src/modules/security.js';
 import { D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, getStaleThresholdSec, isPriceItemStale } from './src/modules/market-core.js';
 import worker, {
@@ -981,4 +984,230 @@ test('getStaleThresholdSec and isPriceItemStale distinguish 24/7 crypto/USDT fro
   assert.equal(isPriceItemStale({ price: 85000, unit: 'IRT', kind: 'domestic', sourceTimestamp: monClose }, 'usd', tueNight), false);
 });
 
+test('multi-admin config parser handles ADMIN_EMAILS, legacy ADMIN_EMAIL, whitespace, case, and deduplication', () => {
+  const env1 = { ADMIN_EMAILS: ' Admin1@Example.com , boss@example.com ; admin1@example.com \n not-an-email ' };
+  assert.deepEqual(getAdminEmails(env1), ['admin1@example.com', 'boss@example.com']);
+  assert.equal(getPrimaryAdminEmail(env1), 'admin1@example.com');
+  assert.equal(isEmailAdmin(env1, ' BOSS@EXAMPLE.COM '), true);
+  assert.equal(isEmailAdmin(env1, 'user@example.com'), false);
+
+  // Backward compatibility: legacy ADMIN_EMAIL remains primary when both exist
+  const env2 = { ADMIN_EMAIL: 'Primary@Example.com', ADMIN_EMAILS: 'Secondary@Example.com, primary@example.com' };
+  assert.deepEqual(getAdminEmails(env2), ['secondary@example.com', 'primary@example.com']);
+  assert.equal(getPrimaryAdminEmail(env2), 'primary@example.com');
+  assert.equal(isEmailAdmin(env2, 'secondary@example.com'), true);
+});
+
+test('multi-admin isolation, live admin revocation, /api/admin/password isolation, IDOR & privilege escalation protection', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB, stats } = createSqliteD1Wrapper(db);
+
+  const secret = 'test-auth-secret-key-minimum-32-chars!!';
+  const admin1 = 'boss1@example.com';
+  const admin2 = 'boss2@example.com';
+  const normalEmail = 'member@example.com';
+  const env = {
+    DB,
+    ADMIN_EMAIL: admin1,
+    ADMIN_EMAILS: `${admin1}, ${admin2}`,
+    ADMIN_PASSWORD: 'InitAdminPassword!1',
+    AUTH_SECRET: secret
+  };
+
+  // Seed legacy admin_root data belonging to legacy/primary admin
+  db.prepare(`INSERT INTO user_data(user_id,holdings,watch,featured,settings,updated_at) VALUES('admin_root','[]','["usd","gold18"]','["usd"]','{}',5000)`).run();
+  db.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,triggered_at,attempts,created_at) VALUES('admin_root:legacy_al','admin_root','usd','above',90000,1000,1,1000)`).run();
+
+  const callApi = (path, { method = 'GET', body, token } = {}, customEnv = env) =>
+    worker.fetch(
+      new Request(`https://darayi.example${path}`, {
+        method,
+        headers: {
+          origin: 'https://darayi.example',
+          ...(body ? { 'content-type': 'application/json' } : {}),
+          'x-requested-with': 'XMLHttpRequest',
+          ...(token ? { authorization: `Bearer ${token}` } : {})
+        },
+        ...(body ? { body: JSON.stringify(body) } : {})
+      }),
+      customEnv
+    );
+
+  // Both admins log in using configured ADMIN_PASSWORD
+  const r1 = await callApi('/api/auth/login', { method: 'POST', body: { email: admin1, password: 'InitAdminPassword!1' } });
+  const j1 = await r1.json();
+  assert.equal(r1.status, 200);
+  assert.equal(j1.user.isAdmin, true);
+
+  const r2 = await callApi('/api/auth/login', { method: 'POST', body: { email: admin2, password: 'InitAdminPassword!1' } });
+  const j2 = await r2.json();
+  assert.equal(r2.status, 200);
+  assert.equal(j2.user.isAdmin, true);
+  assert.notEqual(j1.user.id, j2.user.id);
+
+  // Primary admin sees inherited admin_root data, while secondary admin MUST NOT inherit admin_root!
+  const d1 = await (await callApi('/api/me/data?fresh=1', { token: j1.token })).json();
+  assert.equal(d1.exists, true);
+  assert.deepEqual(d1.data.watch, ['usd', 'gold18']);
+
+  const d2 = await (await callApi('/api/me/data?fresh=1', { token: j2.token })).json();
+  assert.equal(d2.exists, false);
+  assert.deepEqual(d2.data.watch, []);
+
+  // Secondary admin cannot retry primary admin's alert (IDOR -> 404)
+  const crossRetry = await callApi('/api/me/alerts/legacy_al/retry', { method: 'POST', token: j2.token });
+  assert.equal(crossRetry.status, 404);
+
+  // Primary admin CAN retry their inherited legacy alert cleanly
+  const ownRetry = await callApi('/api/me/alerts/legacy_al/retry', { method: 'POST', token: j1.token });
+  assert.equal(ownRetry.status, 200);
+
+  // Secondary admin changes their own password via /api/admin/password -> MUST NOT overwrite primary admin's password or revoke primary admin's session
+  const pwRes = await callApi('/api/admin/password', {
+    method: 'POST',
+    token: j2.token,
+    body: { password: 'NewAdmin2Pass!99' }
+  });
+  assert.equal(pwRes.status, 200);
+  const pwJson = await pwRes.json();
+  assert.ok(pwJson.token);
+
+  // Primary admin's existing session MUST still be valid and able to hit /api/admin/overview
+  const ov1 = await callApi('/api/admin/overview', { token: j1.token });
+  assert.equal(ov1.status, 200);
+  const ovBody = await ov1.json();
+  assert.equal(ovBody.ok, true);
+  assert.ok(ovBody.stats.totalUsers >= 2);
+
+  // Secondary admin's old password (ADMIN_PASSWORD) MUST NO LONGER bypass their updated D1 password_hash
+  const oldPwLogin2 = await callApi('/api/auth/login', { method: 'POST', body: { email: admin2, password: 'InitAdminPassword!1' } });
+  assert.equal(oldPwLogin2.status, 401);
+  const newPwLogin2 = await callApi('/api/auth/login', { method: 'POST', body: { email: admin2, password: 'NewAdmin2Pass!99' } });
+  assert.equal(newPwLogin2.status, 200);
+  const freshTok2 = (await newPwLogin2.json()).token;
+
+  // Privilege escalation protection: adding user ignores client-supplied role:'admin', normal user gets 403 on admin routes
+  const addUserRes = await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: j1.token,
+    body: { email: normalEmail, name: 'Regular Member', password: 'MemberPass!123', role: 'admin' }
+  });
+  assert.equal(addUserRes.status, 200);
+  const addUserJson = await addUserRes.json();
+  assert.equal(addUserJson.user.role, 'user');
+
+  const memberLogin = await (await callApi('/api/auth/login', { method: 'POST', body: { email: normalEmail, password: 'MemberPass!123' } })).json();
+  assert.equal(memberLogin.user.isAdmin, false);
+  const memberAdminHit = await callApi('/api/admin/users', { token: memberLogin.token });
+  assert.equal(memberAdminHit.status, 403);
+
+  // Live admin revocation: removing admin2 from ADMIN_EMAILS immediately blocks their active session/token from /api/admin/* -> 403!
+  const revokedEnv = { ...env, ADMIN_EMAILS: admin1 };
+  const afterRevokeHit = await callApi('/api/admin/overview', { token: freshTok2 }, revokedEnv);
+  assert.equal(afterRevokeHit.status, 403);
+  const afterRevokeMe = await (await callApi('/api/me', { token: freshTok2 }, revokedEnv)).json();
+  assert.equal(afterRevokeMe.user.isAdmin, false);
+  assert.equal(afterRevokeMe.user.role, 'user');
+
+  // Verify /api/admin/overview and /api/admin/users succeed cleanly
+  const usersRes = await callApi('/api/admin/users', { token: j1.token });
+  assert.equal(usersRes.status, 200);
+  const usersJson = await usersRes.json();
+  assert.ok(usersJson.users.some((u) => u.email === admin1 && u.role === 'admin'));
+  assert.ok(usersJson.users.some((u) => u.email === normalEmail && u.role === 'user'));
+
+  // Verify cleanData preserves transfer transactions with buyPrice = 0
+  stats.reads = 0;
+  const txSave = await saveData(env, memberLogin.user.id, {
+    holdings: [
+      { id: 't1', assetId: 'usd', side: 'buy', qty: 100, buyPrice: 80000, wallet: 'اصلی', date: '1403/01/01', createdAt: 1 },
+      { id: 't2', assetId: 'usd', side: 'transfer', qty: 40, buyPrice: 0, wallet: 'اصلی', toWallet: 'صندوق', date: '1403/01/02', createdAt: 2 }
+    ],
+    watch: ['usd'],
+    featured: ['usd'],
+    alerts: [],
+    settings: { theme: 'light', unit: 'toman', privacy: false, filter: 'all' }
+  });
+  assert.equal(txSave.data.holdings.length, 2);
+});
+
+test('suspended user lookup, /api/auth/check-email, and /api/admin/users fail closed (503) on D1 error', async () => {
+  __resetWorkerStateForTests();
+  const brokenDB = {
+    prepare() {
+      return {
+        bind() {
+          return {
+            async first() { throw new Error('d1_down'); },
+            async all() { throw new Error('d1_down'); },
+            async run() { throw new Error('d1_down'); }
+          };
+        },
+        async first() { throw new Error('d1_down'); },
+        async all() { throw new Error('d1_down'); }
+      };
+    },
+    async batch() {
+      throw new Error('d1_down');
+    }
+  };
+  const secret = 'test-auth-secret-key-minimum-32-chars!!';
+  const adminEmail = 'boss@example.com';
+  const env = { DB: brokenDB, ADMIN_EMAIL: adminEmail, AUTH_SECRET: secret };
+
+  // check-email must fail closed with 503 instead of returning { exists: false }
+  const chkRes = await worker.fetch(
+    new Request('https://darayi.example/api/auth/check-email', {
+      method: 'POST',
+      headers: { origin: 'https://darayi.example', 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+      body: JSON.stringify({ email: 'user@example.com' })
+    }),
+    env
+  );
+  assert.equal(chkRes.status, 503);
+
+  // Malformed JSON in suspended_users KV row must fail closed with 503 on login
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const passHash = await hashPassword('Pass12345!', { AUTH_SECRET: secret });
+  db.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').run('u1', 'user@example.com', 'U', passHash, 1000);
+  db.prepare("INSERT INTO kv(k,v,updated_at) VALUES('suspended_users','{corrupt_json',1000)").run();
+  const { DB } = createSqliteD1Wrapper(db);
+  const badSuspEnv = { DB, ADMIN_EMAIL: adminEmail, AUTH_SECRET: secret };
+  const loginRes = await worker.fetch(
+    new Request('https://darayi.example/api/auth/login', {
+      method: 'POST',
+      headers: { origin: 'https://darayi.example', 'content-type': 'application/json', 'x-requested-with': 'XMLHttpRequest' },
+      body: JSON.stringify({ email: 'user@example.com', password: 'Pass12345!' })
+    }),
+    badSuspEnv
+  );
+  assert.equal(loginRes.status, 503);
+});
+
+test('EXPLAIN QUERY PLAN verifies new expiration cleanup indexes avoid full table scans', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+
+  const explain = (sql) =>
+    db
+      .prepare(`EXPLAIN QUERY PLAN ${sql}`)
+      .all()
+      .map((r) => r.detail)
+      .join(' | ');
+
+  assert.match(explain('SELECT id_hash FROM sessions WHERE expires_at < ?'), /USING (?:COVERING )?INDEX idx_sessions_expires/);
+  assert.doesNotMatch(explain('SELECT id_hash FROM sessions WHERE expires_at < ?'), /\bSCAN\b/);
+
+  assert.match(explain('SELECT email FROM otp_codes WHERE expires_at < ?'), /USING (?:COVERING )?INDEX idx_otp_expires/);
+  assert.doesNotMatch(explain('SELECT email FROM otp_codes WHERE expires_at < ?'), /\bSCAN\b/);
+
+  assert.match(explain('SELECT state_hash FROM oauth_states WHERE expires_at < ?'), /USING (?:COVERING )?INDEX idx_oauth_expires/);
+  assert.doesNotMatch(explain('SELECT state_hash FROM oauth_states WHERE expires_at < ?'), /\bSCAN\b/);
+
+  assert.match(explain('SELECT k FROM rate_limits WHERE reset_at > 0 AND reset_at < ?'), /USING (?:COVERING )?INDEX idx_rate_limits_reset/);
+  assert.doesNotMatch(explain('SELECT k FROM rate_limits WHERE reset_at > 0 AND reset_at < ?'), /\bSCAN\b/);
+});
 

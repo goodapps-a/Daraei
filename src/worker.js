@@ -22,8 +22,8 @@
  * ============================================================================
  */
 import { NERKHARA_MAP, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale } from './modules/market-core.js';
-import { enc, SEC_HEADERS, PROD_CSP, b64u, b64uDec, teq, cleanEmail, isEmail, okPass, normCode, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
-export { cleanData, validateTransactions, isSafePublicUrl, hashPassword, verifyPassword, normCode };
+import { enc, SEC_HEADERS, PROD_CSP, b64u, b64uDec, teq, cleanEmail, isEmail, okPass, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
+export { cleanData, validateTransactions, isSafePublicUrl, hashPassword, verifyPassword, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin };
 
 export const ASSETS = {
   usd: 'دلار آمریکا', eur: 'یورو', gbp: 'پوند انگلیس', aed: 'درهم امارات', try: 'لیر ترکیه', cad: 'دلار کانادا',
@@ -385,22 +385,23 @@ function getAuthSecret(env) {
   }
   throw new HttpError(503, 'تنظیمات امنیتی سرور (AUTH_SECRET) کامل نیست.');
 }
-function getAdminEmail(env) {
-  return cleanEmail(env && env.ADMIN_EMAIL);
-}
-function isEmailAdmin(env, email) {
-  const adm = getAdminEmail(env);
-  const em = cleanEmail(email);
-  return Boolean(adm && em && em === adm);
-}
 function getConfiguredAdminPassword(env) {
-  const adminEmail = getAdminEmail(env);
-  if (!adminEmail) return null;
+  const adminEmails = getAdminEmails(env);
+  if (!adminEmails.length) return null;
   if (env && typeof env.ADMIN_PASSWORD === 'string') {
     const p = env.ADMIN_PASSWORD.trim();
-    if (p.length >= 8 && cleanEmail(p) !== adminEmail) return p;
+    if (p.length >= 8 && !isEmailAdmin(env, cleanEmail(p))) return p;
   }
   return null;
+}
+async function canInheritLegacyAdminRoot(env, uid) {
+  const primary = getPrimaryAdminEmail(env);
+  if (!primary || !env || !env.DB || uid === 'admin_root') return false;
+  const uRow = await env.DB.prepare('SELECT email FROM users WHERE id=? LIMIT 1').bind(uid).first();
+  if (!uRow || cleanEmail(uRow.email) !== primary) return false;
+  const rootOwner = await env.DB.prepare("SELECT email FROM users WHERE id='admin_root' LIMIT 1").first();
+  if (rootOwner && cleanEmail(rootOwner.email) !== primary) return false;
+  return true;
 }
 const SESSION_CACHE_TTL_S = 30;
 const SUSPENDED_CACHE_TTL_S = 30;
@@ -427,26 +428,39 @@ function isSessionRevoked(h) {
 }
 let inMemorySuspendedUsers = null;
 let inMemorySuspendedUsersTime = 0;
-async function getSuspendedUsers(env) {
+async function getSuspendedUsers(env, forceFresh = false) {
   const now = nowS();
-  if (inMemorySuspendedUsers && (now - inMemorySuspendedUsersTime < SUSPENDED_CACHE_TTL_S)) return inMemorySuspendedUsers;
+  if (!forceFresh && inMemorySuspendedUsers && (now - inMemorySuspendedUsersTime < SUSPENDED_CACHE_TTL_S)) {
+    return inMemorySuspendedUsers;
+  }
   let list = [];
   if (env && env.DB) {
+    let row;
     try {
-      const row = await env.DB.prepare("SELECT v FROM kv WHERE k='suspended_users'").first();
-      if (row && row.v) {
+      row = await env.DB.prepare("SELECT v FROM kv WHERE k='suspended_users'").first();
+    } catch (err) {
+      console.error('getSuspendedUsers D1 error:', err?.message);
+      throw new HttpError(503, 'خطا در بررسی وضعیت حساب در دیتابیس.');
+    }
+    if (row && row.v) {
+      try {
         const parsed = JSON.parse(row.v);
         if (Array.isArray(parsed)) list = parsed;
+      } catch (err) {
+        console.error('getSuspendedUsers JSON parse error:', err?.message);
+        throw new HttpError(503, 'خطا در خواندن فهرست وضعیت کاربران.');
       }
-    } catch {}
+    }
   }
   inMemorySuspendedUsers = new Set(list.map(x => String(x).toLowerCase()));
   inMemorySuspendedUsersTime = now;
   return inMemorySuspendedUsers;
 }
-async function isUserSuspended(env, uid, email) {
-  const set = await getSuspendedUsers(env);
-  return set.has(String(uid || '').toLowerCase()) || set.has(String(email || '').toLowerCase());
+async function isUserSuspended(env, uid, email, forceFresh = false) {
+  const set = await getSuspendedUsers(env, forceFresh);
+  const uidLower = String(uid || '').toLowerCase();
+  const emailLower = cleanEmail(email);
+  return (uidLower && set.has(uidLower)) || (emailLower && set.has(emailLower));
 }
 async function hmacSign(env, msg) {
   const k = await crypto.subtle.importKey('raw', enc.encode(getAuthSecret(env)), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
@@ -455,12 +469,13 @@ async function hmacSign(env, msg) {
 async function createSignedToken(env, uid, meta = {}) {
   const sid = rand(24);
   const exp = nowS() + SESSION_S;
-  const emailLower = String(meta.email || '').toLowerCase();
+  const emailLower = cleanEmail(meta.email);
+  const isAdm = isEmailAdmin(env, emailLower);
   const payloadObj = {
     id: uid,
     email: emailLower,
     name: String(meta.name || ''),
-    isAdmin: !!meta.isAdmin || isEmailAdmin(env, emailLower),
+    isAdmin: isAdm,
     exp
   };
   const payloadB64 = b64u(enc.encode(JSON.stringify(payloadObj)));
@@ -483,13 +498,15 @@ async function verifySignedToken(env, rawToken) {
     const jsonStr = new TextDecoder().decode(b64uDec(payloadB64));
     const data = JSON.parse(jsonStr);
     if (!data || !data.email || !Number.isFinite(data.exp) || data.exp <= nowS()) return null;
-    data.isAdmin = !!data.isAdmin || isEmailAdmin(env, data.email);
-    return { sid, user: { id: data.id || ('u_' + data.email), email: data.email, name: data.name || data.email.split('@')[0], isAdmin: data.isAdmin } };
+    const emailLower = cleanEmail(data.email);
+    const liveIsAdmin = isEmailAdmin(env, emailLower);
+    return { sid, user: { id: data.id || ('u_' + emailLower), email: emailLower, name: data.name || emailLower.split('@')[0], isAdmin: liveIsAdmin } };
   } catch {
     return null;
   }
 }
-async function currentUser(req, env) {
+async function currentUser(req, env, opts = {}) {
+  const fresh = Boolean(opts && opts.fresh);
   const authHeader = req.headers.get('authorization') || '';
   const bearer = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
   const cookieToken = getCookie(req, 'sid');
@@ -505,15 +522,22 @@ async function currentUser(req, env) {
   const hFull = rawToken !== verified.sid ? await sha256(rawToken) : h;
   if (isSessionRevoked(h) || isSessionRevoked(hFull)) return null;
 
-  // ۲. کش کوتاه‌مدت نشست روی همین Isolate (با بررسی وضعیت مسدودسازی کاربر)
-  const cached = sessionUserCache.get(h);
-  if (cached && now < cached.exp) {
-    if (await isUserSuspended(env, cached.user.id, cached.user.email)) {
-      sessionUserCache.delete(h);
-      markSessionRevoked(h);
-      return null;
+  // ۲. کش کوتاه‌مدت نشست روی همین Isolate (در مسیرهای حساس یا تغییر وضعیت مسدود است و سطح دسترسی مدیر همیشه زنده محاسبه می‌شود)
+  if (!fresh) {
+    const cached = sessionUserCache.get(h);
+    if (cached && now < cached.exp) {
+      try {
+        if (await isUserSuspended(env, cached.user.id, cached.user.email, false)) {
+          sessionUserCache.delete(h);
+          markSessionRevoked(h);
+          return null;
+        }
+      } catch {
+        return null;
+      }
+      const liveIsAdmin = isEmailAdmin(env, cached.user.email);
+      return { ...cached.user, isAdmin: liveIsAdmin, role: liveIsAdmin ? 'admin' : 'user' };
     }
-    return cached.user;
   }
 
   // ۳. راستی‌آزمایی اجباری در D1 (Fail-closed: خطای D1 یا نبود سشن معتبر => عدم احراز هویت)
@@ -535,9 +559,9 @@ async function currentUser(req, env) {
     }
 
     if (!sRow.id && sRow.user_id === 'admin_root') {
-      const admEmail = getAdminEmail(env);
-      if (admEmail && cleanEmail(verified.user.email) === admEmail) {
-        admRow = await env.DB.prepare('SELECT id,email,name FROM users WHERE email=? LIMIT 1').bind(admEmail).first();
+      const primaryAdm = getPrimaryAdminEmail(env);
+      if (primaryAdm && cleanEmail(verified.user.email) === primaryAdm) {
+        admRow = await env.DB.prepare('SELECT id,email,name FROM users WHERE email=? LIMIT 1').bind(primaryAdm).first();
       }
     }
   } catch (err) {
@@ -547,9 +571,9 @@ async function currentUser(req, env) {
 
   let u = (sRow.id && sRow.email) ? { id: sRow.id, email: sRow.email, name: sRow.name } : null;
   if (!u && sRow.user_id === 'admin_root') {
-    const admEmail = getAdminEmail(env);
-    if (admEmail && cleanEmail(verified.user.email) === admEmail) {
-      u = admRow || { id: 'admin_root', email: admEmail, name: 'مدیر کل دارایی' };
+    const primaryAdm = getPrimaryAdminEmail(env);
+    if (primaryAdm && cleanEmail(verified.user.email) === primaryAdm) {
+      u = admRow || { id: 'admin_root', email: primaryAdm, name: 'مدیر کل دارایی' };
     }
   }
   if (!u) {
@@ -558,13 +582,19 @@ async function currentUser(req, env) {
     return null;
   }
 
-  if (await isUserSuspended(env, u.id, u.email)) {
-    markSessionRevoked(h);
-    sessionUserCache.delete(h);
+  try {
+    if (await isUserSuspended(env, u.id, u.email, fresh)) {
+      markSessionRevoked(h);
+      sessionUserCache.delete(h);
+      return null;
+    }
+  } catch {
     return null;
   }
 
-  u.isAdmin = isEmailAdmin(env, u.email);
+  const liveIsAdmin = isEmailAdmin(env, u.email);
+  u.isAdmin = liveIsAdmin;
+  u.role = liveIsAdmin ? 'admin' : 'user';
   const sExp = Number(sRow.expires_at) || (now + SESSION_CACHE_TTL_S);
   sessionUserCache.set(h, { user: u, exp: Math.min(now + SESSION_CACHE_TTL_S, sExp) });
   return u;
@@ -672,11 +702,13 @@ async function checkEmail(req, env) {
   await rateLimit(env, `chk_ip:${clientIp(req)}`, 25, 900, true);
   await rateLimit(env, `chk_em:${clientIp(req)}:${email}`, 12, 900, true);
   const isAdminEmail = isEmailAdmin(env, email);
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   let u = null;
-  if (env.DB) {
-    try {
-      u = await env.DB.prepare('SELECT id,password_hash,google_sub FROM users WHERE email=?').bind(email).first();
-    } catch {}
+  try {
+    u = await env.DB.prepare('SELECT id,password_hash,google_sub FROM users WHERE email=?').bind(email).first();
+  } catch (err) {
+    console.error('checkEmail D1 error:', err?.message);
+    throw new HttpError(503, 'خطا در بررسی وضعیت حساب در دیتابیس.');
   }
   if (u || isAdminEmail) {
     return json({
@@ -733,46 +765,59 @@ async function registerVerify(req, env, url) {
 }
 async function login(req, env, url) {
   getAuthSecret(env);
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const b = await readJson(req), email = cleanEmail(b.email);
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await limits(req, env, email, 'login', 10);
-  const adminEmail = getAdminEmail(env);
+  const primaryAdm = getPrimaryAdminEmail(env);
   const isAdminEmail = isEmailAdmin(env, email);
   const rawPass = String(b.password || '').slice(0, 128);
   if (!rawPass) throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
   const configuredAdminPass = getConfiguredAdminPassword(env);
 
-  let u = env.DB ? await env.DB.prepare('SELECT id,email,password_hash,name FROM users WHERE email=?').bind(email).first() : null;
-  if (u && await isUserSuspended(env, u.id, email)) {
+  let u;
+  try {
+    u = await env.DB.prepare('SELECT id,email,password_hash,name FROM users WHERE email=?').bind(email).first();
+  } catch (err) {
+    console.error('login user lookup D1 error:', err?.message);
+    throw new HttpError(503, 'خطا در ارتباط با دیتابیس.');
+  }
+  if (u && await isUserSuspended(env, u.id, email, true)) {
     throw new HttpError(403, 'حساب کاربری شما مسدود شده است.');
   }
 
-  // راه‌اندازی اولیه یا ورود مدیر کل فقط در صورتی که ADMIN_EMAIL و ADMIN_PASSWORD مستقل و امن در تنظیمات کلادفلر تعریف شده باشد
+  // راه‌اندازی اولیه ادمین در صورت نبود ردیف یا نداشتن رمز در DB (هر ادمین شناسه مجزا دارد تا با admin_root یا سایر ادمین‌ها تداخل نکند)
   if (isAdminEmail && (!u || !u.password_hash) && configuredAdminPass && teq(rawPass.trim(), configuredAdminPass)) {
-    let adminId = u?.id || 'admin_root';
-    let adminName = u?.name || 'مدیر کل دارایی';
-    if (env.DB) {
-      try {
-        const passHash = await hashPassword(configuredAdminPass, env);
-        await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, adminEmail, adminName, passHash, nowS()).run();
-        const actual = await env.DB.prepare('SELECT id,name FROM users WHERE email=?').bind(adminEmail).first();
-        if (actual?.id) adminId = actual.id;
-        if (actual?.name) adminName = actual.name;
-      } catch (err) {
-        console.error('admin setup err:', err?.message);
+    let adminId = u?.id || '';
+    if (!adminId) {
+      if (email === primaryAdm) {
+        const rootOwner = await env.DB.prepare("SELECT email FROM users WHERE id='admin_root' LIMIT 1").first();
+        adminId = (!rootOwner || cleanEmail(rootOwner.email) === email) ? 'admin_root' : rand(12);
+      } else {
+        adminId = rand(12);
       }
     }
-    const userObj = { id: adminId, email: adminEmail, name: adminName, isAdmin: true, role: 'admin' };
+    let adminName = u?.name || (email === primaryAdm ? 'مدیر کل دارایی' : email.split('@')[0]);
+    try {
+      const passHash = await hashPassword(configuredAdminPass, env);
+      await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, email, adminName, passHash, nowS()).run();
+      const actual = await env.DB.prepare('SELECT id,name FROM users WHERE email=?').bind(email).first();
+      if (actual?.id) adminId = actual.id;
+      if (actual?.name) adminName = actual.name;
+    } catch (err) {
+      console.error('admin setup D1 error:', err?.message);
+      throw new HttpError(503, 'خطا در ثبت اطلاعات مدیر در دیتابیس.');
+    }
+    const userObj = { id: adminId, email, name: adminName, isAdmin: true, role: 'admin' };
     const sess = await sessionCookie(env, url, adminId, userObj);
     return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
   }
 
   const dbPassValid = Boolean(u && u.password_hash && await verifyPassword(rawPass, u.password_hash, env));
-  const envAdminValid = Boolean(isAdminEmail && configuredAdminPass && teq(rawPass.trim(), configuredAdminPass));
-  if (!dbPassValid && !envAdminValid) {
+  if (!dbPassValid) {
     throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
   }
-  if (dbPassValid && u && u.password_hash && env.DB) {
+  if (u && u.password_hash) {
     const parsedHash = parsePbkdf2Hash(u.password_hash);
     if (parsedHash && parsedHash.iter < iterOf(env)) {
       try {
@@ -781,8 +826,8 @@ async function login(req, env, url) {
       } catch {}
     }
   }
-  const uid = u?.id || (isAdminEmail ? 'admin_root' : ('u_' + email));
-  const userObj = { id: uid, email: u?.email || email, name: u?.name || (isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0]), isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' };
+  const uid = u.id;
+  const userObj = { id: uid, email: u.email || email, name: u.name || (isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0]), isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' };
   const sess = await sessionCookie(env, url, uid, userObj);
   return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
 }
@@ -918,12 +963,9 @@ export async function loadData(env, uid, forceDb = false) {
     try {
       revRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind(uid).first();
       let resolvedTargetUid = uid;
-      if (!revRow && uid !== 'admin_root' && getAdminEmail(env)) {
-        const uRow = await env.DB.prepare('SELECT email FROM users WHERE id=?').bind(uid).first();
-        if (uRow && isEmailAdmin(env, uRow.email)) {
-          revRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind('admin_root').first();
-          if (revRow) resolvedTargetUid = 'admin_root';
-        }
+      if (!revRow && await canInheritLegacyAdminRoot(env, uid)) {
+        revRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind('admin_root').first();
+        if (revRow) resolvedTargetUid = 'admin_root';
       }
       cached.targetUid = resolvedTargetUid;
     } catch (err) {
@@ -947,15 +989,9 @@ export async function loadData(env, uid, forceDb = false) {
   let d = null;
   try {
     d = await env.DB.prepare('SELECT holdings,watch,featured,settings,updated_at FROM user_data WHERE user_id=?').bind(uid).first();
-    if (!d && uid !== 'admin_root') {
-      const admEmail = getAdminEmail(env);
-      if (admEmail) {
-        const uRow = await env.DB.prepare('SELECT email FROM users WHERE id=?').bind(uid).first();
-        if (uRow && isEmailAdmin(env, uRow.email)) {
-          d = await env.DB.prepare('SELECT holdings,watch,featured,settings,updated_at FROM user_data WHERE user_id=?').bind('admin_root').first();
-          if (d) usedAdminRoot = true;
-        }
-      }
+    if (!d && await canInheritLegacyAdminRoot(env, uid)) {
+      d = await env.DB.prepare('SELECT holdings,watch,featured,settings,updated_at FROM user_data WHERE user_id=?').bind('admin_root').first();
+      if (d) usedAdminRoot = true;
     }
   } catch (err) {
     console.error('loadData user_data D1 error:', err?.message);
@@ -1043,23 +1079,24 @@ export async function saveData(env, uid, body) {
   let expectedRev = 0;
 
   if (hasBaseRev || hasWarmCache) {
-    const curRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind(uid).first();
-    ownRev = curRow ? (Number(curRow.updated_at) || 0) : 0;
-    expectedRev = ownRev;
-    if (!curRow && uid !== 'admin_root' && getAdminEmail(env)) {
-      try {
-        const uRow = await env.DB.prepare('SELECT email FROM users WHERE id=?').bind(uid).first();
-        if (uRow && isEmailAdmin(env, uRow.email)) {
-          const admRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind('admin_root').first();
-          expectedRev = admRow ? (Number(admRow.updated_at) || 0) : 0;
-        }
-      } catch {}
+    let curRow;
+    try {
+      curRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind(uid).first();
+      ownRev = curRow ? (Number(curRow.updated_at) || 0) : 0;
+      expectedRev = ownRev;
+      if (!curRow && await canInheritLegacyAdminRoot(env, uid)) {
+        const admRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind('admin_root').first();
+        expectedRev = admRow ? (Number(admRow.updated_at) || 0) : 0;
+      }
+    } catch (err) {
+      console.error('saveData revision check D1 error:', err?.message);
+      throw new HttpError(503, 'خطا در بررسی نسخه اطلاعات در دیتابیس.');
     }
   } else {
     prev = await loadData(env, uid, true);
-    const curRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind(uid).first();
-    ownRev = curRow ? (Number(curRow.updated_at) || 0) : 0;
-    expectedRev = Number(prev.updatedAt) || ownRev;
+    const loadedTargetUid = userDataCache.get(uid)?.targetUid || uid;
+    expectedRev = Number(prev.updatedAt) || 0;
+    ownRev = loadedTargetUid === uid ? expectedRev : 0;
   }
 
   if (hasBaseRev && (!Number.isFinite(baseRev) || baseRev !== expectedRev)) {
@@ -3292,7 +3329,7 @@ async function route(req, env, url, ctx) {
 
   function requireAdmin(user) {
     if (!user) throw new HttpError(401, 'لطفاً ابتدا به حساب مدیریت وارد شوید.');
-    if (!user.isAdmin && !isEmailAdmin(env, user.email)) {
+    if (!isEmailAdmin(env, user.email)) {
       throw new HttpError(403, 'دسترسی فقط برای مدیر کل دارایی مجاز است.');
     }
   }
@@ -3345,8 +3382,12 @@ async function route(req, env, url, ctx) {
     return res;
   }
 
-  const user = await currentUser(req, env);
-  if (p === '/api/me' && m === 'GET') return json({ user: user ? { email: user.email, name: user.name, isAdmin: !!user.isAdmin, role: user.isAdmin ? 'admin' : 'user' } : null });
+  const needsFreshAuth = p.startsWith('/api/admin/') || (p === '/api/me' && m === 'DELETE') || (p === '/api/me/data' && m === 'PUT') || (p.startsWith('/api/me/alerts/') && p.endsWith('/retry') && m === 'POST');
+  const user = await currentUser(req, env, { fresh: needsFreshAuth });
+  if (p === '/api/me' && m === 'GET') {
+    const liveAdm = Boolean(user && isEmailAdmin(env, user.email));
+    return json({ user: user ? { email: user.email, name: user.name, isAdmin: liveAdm, role: liveAdm ? 'admin' : 'user' } : null });
+  }
 
   // ---------- ایندپوینت‌های پنل مدیریت (Admin) ----------
   if (p.startsWith('/api/admin/')) {
@@ -3354,39 +3395,69 @@ async function route(req, env, url, ctx) {
     requireAdmin(user);
     if (p === '/api/admin/overview' && m === 'GET') {
       const now = nowS();
-      let totalUsers = 1, activeUsers = 1, trackedHoldings = 0, totalAlerts = 0;
+      let totalUsers = 0, activeUsers = 0, trackedHoldings = 0, totalAlerts = 0;
       if (inMemoryAdminStats && (now - inMemoryAdminStatsTime < 60)) {
         ({ totalUsers, activeUsers, trackedHoldings, totalAlerts } = inMemoryAdminStats);
       } else if (env.DB) {
         try {
-          const uCount = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first();
-          totalUsers = uCount?.c || 1;
-          const susp = await getSuspendedUsers(env);
-          activeUsers = Math.max(0, totalUsers - susp.size);
-          const aCount = await env.DB.prepare('SELECT COUNT(*) AS c FROM alerts').first();
-          totalAlerts = aCount?.c || 0;
-          const hRows = await env.DB.prepare('SELECT holdings FROM user_data').all();
-          if (hRows && hRows.results) {
-            for (const r of hRows.results) {
+          const susp = await getSuspendedUsers(env, true);
+          let batchRes;
+          try {
+            batchRes = await env.DB.batch([
+              env.DB.prepare('SELECT COUNT(*) AS c FROM users'),
+              env.DB.prepare('SELECT COUNT(*) AS c FROM alerts'),
+              env.DB.prepare("SELECT COALESCE(SUM(CASE WHEN json_valid(holdings) AND json_type(holdings)='array' THEN json_array_length(holdings) ELSE 0 END), 0) AS c FROM user_data")
+            ]);
+            totalUsers = Number(batchRes[0]?.results?.[0]?.c || 0);
+            totalAlerts = Number(batchRes[1]?.results?.[0]?.c || 0);
+            trackedHoldings = Number(batchRes[2]?.results?.[0]?.c || 0);
+          } catch {
+            const [uRes, aRes, hRes] = await env.DB.batch([
+              env.DB.prepare('SELECT COUNT(*) AS c FROM users'),
+              env.DB.prepare('SELECT COUNT(*) AS c FROM alerts'),
+              env.DB.prepare('SELECT holdings FROM user_data')
+            ]);
+            totalUsers = Number(uRes?.results?.[0]?.c || 0);
+            totalAlerts = Number(aRes?.results?.[0]?.c || 0);
+            for (const r of (hRes?.results || [])) {
               try { trackedHoldings += JSON.parse(r.holdings || '[]').length; } catch {}
             }
           }
+          totalUsers = Math.max(totalUsers, getAdminEmails(env).length);
+          activeUsers = Math.max(0, totalUsers - susp.size);
           inMemoryAdminStats = { totalUsers, activeUsers, trackedHoldings, totalAlerts };
           inMemoryAdminStatsTime = now;
         } catch (e) {
+          if (e instanceof HttpError) throw e;
           console.error('admin overview db err:', e?.message);
+          throw new HttpError(503, 'خطا در دریافت آمار سیستم از دیتابیس.');
         }
       }
       let bMsg = '';
       if (inMemoryBroadcast && (now - inMemoryBroadcastTime < 3600)) {
         bMsg = inMemoryBroadcast.msg || '';
-      } else if (env.DB) {
-        try {
-          const r = await env.DB.prepare("SELECT v FROM kv WHERE k='broadcast'").first();
-          if (r && r.v) bMsg = JSON.parse(r.v).message || '';
+      } else {
+        let loadedBroadcast = false;
+        if (hasPricesKv(env)) {
+          try {
+            const kvVal = await env.PRICES_KV.get('broadcast:v1', { type: 'json', cacheTtl: 600 });
+            if (kvVal && typeof kvVal.message === 'string') {
+              bMsg = kvVal.message;
+              loadedBroadcast = true;
+            }
+          } catch {}
+        }
+        if (!loadedBroadcast && env.DB) {
+          try {
+            const r = await env.DB.prepare("SELECT v FROM kv WHERE k='broadcast'").first();
+            if (r && r.v) bMsg = JSON.parse(r.v).message || '';
+            loadedBroadcast = true;
+          } catch {}
+        }
+        if (loadedBroadcast) {
           inMemoryBroadcast = { msg: bMsg };
           inMemoryBroadcastTime = now;
-        } catch {}
+        }
       }
       const sysFeeds = await getSystemFeeds(env);
       const curItems = inMemoryPrices?.items || {};
@@ -3543,45 +3614,54 @@ async function route(req, env, url, ctx) {
     }
 
     if (p === '/api/admin/users' && m === 'GET') {
+      if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
       let usersList = [];
-      const suspendedSet = await getSuspendedUsers(env);
-      const adminEmail = getAdminEmail(env);
-      if (env.DB) {
+      const suspendedSet = await getSuspendedUsers(env, true);
+      const adminEmails = getAdminEmails(env);
+      const primaryAdm = getPrimaryAdminEmail(env);
+      try {
+        let rows;
         try {
-          const rows = await env.DB.prepare('SELECT u.id, u.email, u.name, u.created_at, (SELECT COUNT(*) FROM alerts a WHERE a.user_id = u.id) AS alertCount, (SELECT holdings FROM user_data ud WHERE ud.user_id = u.id) AS rawHoldings FROM users u ORDER BY u.created_at DESC LIMIT 100').all();
-          if (rows && rows.results) {
-            usersList = rows.results.map((r) => {
-              let hCount = 0;
-              try { hCount = JSON.parse(r.rawHoldings || '[]').length; } catch {}
-              const isAdm = isEmailAdmin(env, r.email);
-              const isSusp = suspendedSet.has(String(r.id).toLowerCase()) || suspendedSet.has(String(r.email || '').toLowerCase());
-              return {
-                id: r.id,
-                email: r.email,
-                name: r.name || r.email.split('@')[0],
-                role: isAdm ? 'admin' : 'user',
-                status: isSusp ? 'suspended' : 'active',
-                holdingsCount: hCount,
-                alertsCount: r.alertCount || 0,
-                lastLogin: isSusp ? 'مسدود' : 'فعال'
-              };
-            });
-          }
-        } catch (e) {
-          console.error('admin users list err:', e?.message);
+          rows = await env.DB.prepare("SELECT u.id, u.email, u.name, u.created_at, (SELECT COUNT(*) FROM alerts a WHERE a.user_id = u.id) AS alertCount, (SELECT CASE WHEN json_valid(ud.holdings) AND json_type(ud.holdings)='array' THEN json_array_length(ud.holdings) ELSE 0 END FROM user_data ud WHERE ud.user_id = u.id) AS holdingsCount FROM users u ORDER BY u.created_at DESC LIMIT 100").all();
+        } catch {
+          rows = await env.DB.prepare('SELECT u.id, u.email, u.name, u.created_at, (SELECT COUNT(*) FROM alerts a WHERE a.user_id = u.id) AS alertCount, (SELECT holdings FROM user_data ud WHERE ud.user_id = u.id) AS rawHoldings FROM users u ORDER BY u.created_at DESC LIMIT 100').all();
         }
+        if (rows && rows.results) {
+          usersList = rows.results.map((r) => {
+            let hCount = Number(r.holdingsCount);
+            if (!Number.isFinite(hCount)) {
+              hCount = 0;
+              try { hCount = JSON.parse(r.rawHoldings || '[]').length; } catch {}
+            }
+            const isAdm = isEmailAdmin(env, r.email);
+            const isSusp = !isAdm && (suspendedSet.has(String(r.id).toLowerCase()) || suspendedSet.has(cleanEmail(r.email)));
+            return {
+              id: r.id,
+              email: r.email,
+              name: r.name || r.email.split('@')[0],
+              role: isAdm ? 'admin' : 'user',
+              status: isSusp ? 'suspended' : 'active',
+              holdingsCount: hCount,
+              alertsCount: Number(r.alertCount || 0),
+              lastLogin: isSusp ? 'مسدود' : 'فعال'
+            };
+          });
+        }
+      } catch (e) {
+        console.error('admin users list err:', e?.message);
+        throw new HttpError(503, 'خطا در دریافت فهرست کاربران از دیتابیس.');
       }
-      if (!usersList.length && adminEmail) {
-        usersList = [{
-          id: 'admin_root',
-          email: adminEmail,
-          name: 'مدیر کل دارایی',
+      if (!usersList.length && adminEmails.length) {
+        usersList = adminEmails.map((em, idx) => ({
+          id: em === primaryAdm ? 'admin_root' : `admin_${idx + 1}`,
+          email: em,
+          name: em === primaryAdm ? 'مدیر کل دارایی' : em.split('@')[0],
           role: 'admin',
           status: 'active',
           holdingsCount: 0,
           alertsCount: 0,
           lastLogin: 'هم‌اکنون'
-        }];
+        }));
       }
       return json({ ok: true, users: usersList });
     }
@@ -3609,51 +3689,61 @@ async function route(req, env, url, ctx) {
       if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
       const b = await readJson(req);
       const newPass = String(b.newPassword || b.password || '').trim();
-      const adminEmail = getAdminEmail(env) || cleanEmail(user.email);
-      if (!adminEmail) throw new HttpError(400, 'ایمیل مدیر تعریف نشده است.');
+      const targetEmail = cleanEmail(user.email);
+      if (!targetEmail || !isEmailAdmin(env, targetEmail)) throw new HttpError(403, 'دسترسی فقط برای مدیر کل دارایی مجاز است.');
       if (!okPass(newPass)) throw new HttpError(400, 'رمز عبور جدید باید حداقل ۸ کاراکتر باشد.');
-      if (cleanEmail(newPass) === adminEmail) throw new HttpError(400, 'رمز عبور مدیر نمی‌تواند برابر با ایمیل باشد.');
+      if (cleanEmail(newPass) === targetEmail) throw new HttpError(400, 'رمز عبور مدیر نمی‌تواند برابر با ایمیل باشد.');
       const passHash = await hashPassword(newPass, env);
-      const existingAdmin = await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(adminEmail).first();
-      const adminId = existingAdmin?.id || user.id || 'admin_root';
+      const existingAdmin = await env.DB.prepare('SELECT id, name FROM users WHERE email=?').bind(targetEmail).first();
+      let adminId = existingAdmin?.id;
+      if (!adminId) {
+        if (targetEmail === getPrimaryAdminEmail(env)) {
+          const rootOwner = await env.DB.prepare("SELECT email FROM users WHERE id='admin_root' LIMIT 1").first();
+          adminId = (!rootOwner || cleanEmail(rootOwner.email) === targetEmail) ? 'admin_root' : rand(12);
+        } else {
+          adminId = rand(12);
+        }
+      }
+      const adminName = existingAdmin?.name || user.name || (targetEmail === getPrimaryAdminEmail(env) ? 'مدیر کل دارایی' : targetEmail.split('@')[0]);
       await env.DB.batch([
-        env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, adminEmail, 'مدیر کل دارایی', passHash, nowS()),
+        env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, targetEmail, adminName, passHash, nowS()),
         env.DB.prepare('DELETE FROM sessions WHERE user_id IN (?, ?)').bind(adminId, user.id || adminId)
       ]);
       for (const [k, v] of sessionUserCache) {
-        if (v?.user?.id === adminId || v?.user?.id === user.id || v?.user?.email === adminEmail) {
+        const cu = v?.user || v?.val;
+        if (cu?.id === adminId || cu?.id === user.id || cleanEmail(cu?.email || '') === targetEmail) {
           sessionUserCache.delete(k);
           markSessionRevoked(k);
         }
       }
-      const sess = await sessionCookie(env, url, adminId, { email: adminEmail, name: 'مدیر کل دارایی', isAdmin: true, role: 'admin' });
-      return json({ ok: true }, 200, { 'set-cookie': sess.cookie });
+      const sess = await sessionCookie(env, url, adminId, { email: targetEmail, name: adminName, isAdmin: true, role: 'admin' });
+      return json({ ok: true, token: sess.token }, 200, { 'set-cookie': sess.cookie });
     }
 
     if (p.startsWith('/api/admin/users/') && p.endsWith('/toggle') && m === 'POST') {
+      if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
       const rawTarget = decodeURIComponent(p.split('/')[4] || '').trim();
       const lowerParam = rawTarget.toLowerCase();
       if (!lowerParam) throw new HttpError(400, 'شناسه کاربر نامعتبر است.');
       let targetUser = null;
-      if (env.DB) {
-        try {
-          targetUser = await env.DB.prepare('SELECT id,email FROM users WHERE LOWER(id)=? OR LOWER(email)=? LIMIT 1').bind(lowerParam, lowerParam).first();
-        } catch {}
+      try {
+        targetUser = await env.DB.prepare('SELECT id,email FROM users WHERE LOWER(id)=? OR LOWER(email)=? LIMIT 1').bind(lowerParam, lowerParam).first();
+      } catch (err) {
+        console.error('admin user toggle lookup D1 err:', err?.message);
+        throw new HttpError(503, 'خطا در بررسی حساب کاربر در دیتابیس.');
       }
       const exactId = targetUser?.id || rawTarget;
       const canonicalIdLower = String(exactId).toLowerCase();
       const targetEmailLower = cleanEmail(targetUser?.email || '');
-      const adminEmail = getAdminEmail(env);
       if (
-        canonicalIdLower === 'admin_root' ||
-        canonicalIdLower === 'admin_a_h_sh' ||
-        (adminEmail && (lowerParam === adminEmail || targetEmailLower === adminEmail)) ||
+        (canonicalIdLower === 'admin_root' && (!targetEmailLower || isEmailAdmin(env, targetEmailLower))) ||
+        isEmailAdmin(env, lowerParam) ||
         (targetEmailLower && isEmailAdmin(env, targetEmailLower)) ||
         canonicalIdLower === String(user.id || '').toLowerCase()
       ) {
         throw new HttpError(400, 'امکان مسدودسازی حساب مدیر کل وجود ندارد.');
       }
-      const susp = await getSuspendedUsers(env);
+      const susp = await getSuspendedUsers(env, true);
       const wasSuspended = susp.has(canonicalIdLower) || susp.has(lowerParam) || (targetEmailLower && susp.has(targetEmailLower));
       let newStatus = 'active';
       if (wasSuspended) {
@@ -3666,11 +3756,7 @@ async function route(req, env, url, ctx) {
         if (targetEmailLower) susp.delete(targetEmailLower);
         susp.add(canonicalIdLower);
         newStatus = 'suspended';
-        if (env.DB) {
-          try {
-            await env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(exactId).run();
-          } catch {}
-        }
+        await env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(exactId).run();
         for (const [k, v] of sessionUserCache) {
           const cu = v?.user || v?.val;
           const cuId = String(cu?.id || '').toLowerCase();
@@ -3685,11 +3771,7 @@ async function route(req, env, url, ctx) {
       inMemorySuspendedUsersTime = nowS();
       inMemoryAdminStats = null;
       inMemoryAdminStatsTime = 0;
-      if (env.DB) {
-        try {
-          await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('suspended_users',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify([...susp]), nowS()).run();
-        } catch {}
-      }
+      await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('suspended_users',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify([...susp]), nowS()).run();
       return json({ ok: true, status: newStatus });
     }
 
@@ -3757,17 +3839,25 @@ async function route(req, env, url, ctx) {
     await rateLimit(env, 'retry:' + user.id, 10, 900);
     const localId = p.slice('/api/me/alerts/'.length, -'/retry'.length);
     if (!/^[A-Za-z0-9_-]{1,40}$/.test(localId)) throw new HttpError(400, 'شناسه نامعتبر است.');
-    const id = user.id + ':' + localId;
-    const row = await env.DB.prepare('SELECT id FROM alerts WHERE id=? AND user_id=?').bind(id, user.id).first();
+    if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
+    let targetId = user.id + ':' + localId;
+    let row = await env.DB.prepare('SELECT id,user_id FROM alerts WHERE id=? AND user_id=?').bind(targetId, user.id).first();
+    if (!row && await canInheritLegacyAdminRoot(env, user.id)) {
+      const legacyId = 'admin_root:' + localId;
+      row = await env.DB.prepare('SELECT id,user_id FROM alerts WHERE id=? AND user_id=?').bind(legacyId, 'admin_root').first();
+      if (row) targetId = legacyId;
+    }
     if (!row) throw new HttpError(404, 'هشدار پیدا نشد.');
+    const targetOwnerId = row.user_id || user.id;
     const revBump = Date.now() * 1000 + randInt(1000);
     await env.DB.batch([
-      env.DB.prepare('UPDATE alerts SET triggered_at=NULL,attempts=0 WHERE id=? AND user_id=?').bind(id, user.id),
-      env.DB.prepare('DELETE FROM alert_delivery WHERE alert_id=?').bind(id),
-      env.DB.prepare('INSERT INTO alert_state(alert_id,version) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET version=excluded.version').bind(id, rand(16)),
-      env.DB.prepare('UPDATE user_data SET updated_at=CASE WHEN updated_at>=? THEN updated_at+1 ELSE ? END WHERE user_id=?').bind(revBump, revBump, user.id)
+      env.DB.prepare('UPDATE alerts SET triggered_at=NULL,attempts=0 WHERE id=? AND user_id=?').bind(targetId, targetOwnerId),
+      env.DB.prepare('UPDATE user_data SET updated_at=CASE WHEN updated_at>=? THEN updated_at+1 ELSE ? END WHERE user_id=?').bind(revBump, revBump, targetOwnerId)
     ]);
+    try { await env.DB.prepare('DELETE FROM alert_delivery WHERE alert_id=?').bind(targetId).run(); } catch {}
+    try { await env.DB.prepare('INSERT INTO alert_state(alert_id,version) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET version=excluded.version').bind(targetId, rand(16)).run(); } catch {}
     userDataCache.delete(user.id);
+    if (targetOwnerId !== user.id) userDataCache.delete(targetOwnerId);
     hasActiveAlertsCache = true;
     hasActiveAlertsCacheTime = nowS();
     return json({ ok: true });

@@ -20,6 +20,9 @@ import {
   isEmail,
   okPass,
   normCode,
+  getAdminEmails,
+  getPrimaryAdminEmail,
+  isEmailAdmin as isEnvAdminEmail,
   isSafePublicUrl,
   cleanData,
   validateTransactions
@@ -1462,10 +1465,8 @@ app.get('/api/history', async (req, res) => {
 });
 
 // Persistent user store & cryptographic session management
-const ADMIN_EMAIL = cleanEmail(process.env.ADMIN_EMAIL);
 function isEmailAdmin(email: string): boolean {
-  const em = cleanEmail(email);
-  return Boolean(ADMIN_EMAIL && em && em === ADMIN_EMAIL);
+  return isEnvAdminEmail(process.env, email);
 }
 const AUTH_SECRET = (process.env.AUTH_SECRET && process.env.AUTH_SECRET.trim().length >= 16)
   ? process.env.AUTH_SECRET.trim()
@@ -1506,10 +1507,11 @@ function verifyPasswordSync(password: string, storedHash: string): boolean {
 }
 
 function getConfiguredAdminPassword(): string | null {
-  if (!ADMIN_EMAIL) return null;
+  const adminEmails = getAdminEmails(process.env);
+  if (!adminEmails.length) return null;
   const raw = String(process.env.ADMIN_PASSWORD || '').trim();
   if (!raw || raw.length < 8) return null;
-  if (cleanEmail(raw) === ADMIN_EMAIL) return null;
+  if (isEmailAdmin(cleanEmail(raw))) return null;
   return raw;
 }
 
@@ -1544,21 +1546,21 @@ const revokedSessions = new Set<string>();
 let broadcastMessage: string = '';
 
 const initialAdminPass = getConfiguredAdminPassword();
+const configuredAdminList = getAdminEmails(process.env);
+const primaryAdminEmail = getPrimaryAdminEmail(process.env);
 let systemUsers: StoredUser[] = [
-  ...(ADMIN_EMAIL
-    ? [{
-        id: 'u_admin',
-        name: 'مدیر کل دارایی',
-        email: ADMIN_EMAIL,
-        role: 'admin' as const,
-        status: 'active' as const,
-        registeredAt: '1403/01/15',
-        holdingsCount: 16,
-        alertsCount: 4,
-        lastLogin: 'هم‌اکنون',
-        passwordHash: initialAdminPass ? hashPasswordSync(initialAdminPass) : ''
-      }]
-    : []),
+  ...configuredAdminList.map((admEmail, idx) => ({
+    id: admEmail === primaryAdminEmail ? 'u_admin' : `u_admin_${idx + 1}`,
+    name: admEmail === primaryAdminEmail ? 'مدیر کل دارایی' : admEmail.split('@')[0],
+    email: admEmail,
+    role: 'admin' as const,
+    status: 'active' as const,
+    registeredAt: '1403/01/15',
+    holdingsCount: 0,
+    alertsCount: 0,
+    lastLogin: 'هم‌اکنون',
+    passwordHash: initialAdminPass ? hashPasswordSync(initialAdminPass) : ''
+  })),
   { id: 'u_2', name: 'امیرحسین رضایی', email: 'amir.financial@yahoo.com', role: 'user', status: 'active', registeredAt: '1403/06/10', holdingsCount: 12, alertsCount: 3, lastLogin: '۲ ساعت قبل', passwordHash: '' },
   { id: 'u_3', name: 'سارا تهرانی', email: 'sara.trader@gmail.com', role: 'user', status: 'active', registeredAt: '1403/08/22', holdingsCount: 5, alertsCount: 2, lastLogin: 'دیروز', passwordHash: '' },
   { id: 'u_4', name: 'رضا کریمی', email: 'reza.crypto@outlook.com', role: 'user', status: 'active', registeredAt: '1403/09/04', holdingsCount: 28, alertsCount: 7, lastLogin: '۳ روز قبل', passwordHash: '' },
@@ -1585,13 +1587,14 @@ function loadAuthSessionFromDisk() {
               if (savedUser.status === 'suspended' && !isEmailAdmin(norm)) {
                 existing.status = 'suspended';
               }
+              existing.role = isEmailAdmin(norm) ? 'admin' : 'user';
             } else if (savedUser.passwordHash && String(savedUser.passwordHash).startsWith('pbkdf2$')) {
               systemUsers.push({
                 id: String(savedUser.id || 'u_' + Date.now()),
                 name: String(savedUser.name || norm.split('@')[0]).slice(0, 80),
                 email: norm,
-                role: savedUser.role === 'admin' && isEmailAdmin(norm) ? 'admin' : 'user',
-                status: savedUser.status === 'suspended' ? 'suspended' : 'active',
+                role: isEmailAdmin(norm) ? 'admin' : 'user',
+                status: savedUser.status === 'suspended' && !isEmailAdmin(norm) ? 'suspended' : 'active',
                 registeredAt: String(savedUser.registeredAt || 'هم‌اکنون'),
                 holdingsCount: Number(savedUser.holdingsCount) || 0,
                 alertsCount: Number(savedUser.alertsCount) || 0,
@@ -1639,7 +1642,7 @@ function createSessionForUser(res: express.Response, req: express.Request, user:
   const sidHash = sha256Hex(baseSid);
   const ttlSec = 60 * 60 * 24 * 14;
   const nowSec = Math.floor(Date.now() / 1000);
-  const isAdmin = user.role === 'admin' || isEmailAdmin(user.email);
+  const isAdmin = isEmailAdmin(user.email);
   const sessionRec: SessionRecord = {
     sidHash,
     userId: user.id,
@@ -1721,12 +1724,13 @@ function resolveReqUser(req: express.Request) {
     return null;
   }
 
+  const liveAdmin = isEmailAdmin(sess.email);
   return {
     id: sess.userId,
     name: usr?.name || sess.name,
     email: sess.email,
-    role: sess.role,
-    isAdmin: sess.isAdmin
+    role: liveAdmin ? 'admin' : 'user',
+    isAdmin: liveAdmin
   };
 }
 
@@ -1802,20 +1806,21 @@ app.post('/api/auth/login', (req, res) => {
   let existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
 
   if (isAdmin) {
-    if (cleanEmail(passStr) === ADMIN_EMAIL) {
+    if (cleanEmail(passStr) === normalizedEmail) {
       return res.status(401).json({ error: 'استفاده از آدرس ایمیل به‌عنوان رمز عبور مدیر مجاز نیست.' });
     }
     const envAdminPass = getConfiguredAdminPassword();
     let adminAuthenticated = false;
     if (existing?.passwordHash && verifyPasswordSync(passStr, existing.passwordHash)) {
       adminAuthenticated = true;
-    } else if (envAdminPass && safeEqualStr(passStr, envAdminPass)) {
+    } else if ((!existing || !existing.passwordHash) && envAdminPass && safeEqualStr(passStr, envAdminPass)) {
       adminAuthenticated = true;
       if (!existing) {
+        const isPrimary = normalizedEmail === getPrimaryAdminEmail(process.env);
         existing = {
-          id: 'u_admin',
-          name: 'مدیر کل دارایی',
-          email: ADMIN_EMAIL,
+          id: isPrimary && !systemUsers.some(u => u.id === 'u_admin') ? 'u_admin' : ('u_adm_' + crypto.randomBytes(6).toString('hex')),
+          name: isPrimary ? 'مدیر کل دارایی' : normalizedEmail.split('@')[0],
+          email: normalizedEmail,
           role: 'admin',
           status: 'active',
           registeredAt: 'هم‌اکنون',
@@ -2034,7 +2039,7 @@ function sanitizeUserForAdmin(u: StoredUser) {
     id: u.id,
     name: u.name,
     email: u.email,
-    role: u.role,
+    role: isEmailAdmin(u.email) ? 'admin' : 'user',
     status: u.status,
     registeredAt: u.registeredAt,
     holdingsCount: u.holdingsCount,
@@ -2048,9 +2053,10 @@ app.get('/api/admin/users', (req, res) => {
 });
 
 app.post('/api/admin/users/:id/toggle', (req, res) => {
+  const reqAdmin = resolveReqUser(req);
   const u = systemUsers.find(x => x.id === req.params.id);
   if (!u) return res.status(404).json({ error: 'کاربر یافت نشد.' });
-  if (isEmailAdmin(u.email) || u.role === 'admin') {
+  if (isEmailAdmin(u.email) || (reqAdmin && u.id === reqAdmin.id)) {
     return res.status(400).json({ error: 'امکان تغییر وضعیت مدیر کل سیستم وجود ندارد.' });
   }
   u.status = u.status === 'active' ? 'suspended' : 'active';
@@ -2079,7 +2085,7 @@ app.post('/api/admin/logs/clear', (req, res) => {
 });
 
 app.post('/api/admin/users/add', (req, res) => {
-  const { name, email, role, password } = req.body || {};
+  const { name, email, password } = req.body || {};
   if (!name || !email) return res.status(400).json({ error: 'نام و ایمیل الزامی است.' });
   const normalizedEmail = cleanEmail(email);
   if (!isEmail(normalizedEmail) || normalizedEmail.length > 120) {
@@ -2099,7 +2105,7 @@ app.post('/api/admin/users/add', (req, res) => {
     id: 'u_' + Date.now(),
     name: String(name).trim().slice(0, 80),
     email: normalizedEmail,
-    role: role === 'admin' && isEmailAdmin(normalizedEmail) ? 'admin' : 'user',
+    role: isEmailAdmin(normalizedEmail) ? 'admin' : 'user',
     status: 'active',
     registeredAt: 'هم‌اکنون',
     holdingsCount: 0,
@@ -2120,15 +2126,18 @@ app.post('/api/admin/users/add', (req, res) => {
 
 app.post('/api/admin/password', (req, res) => {
   const reqAdmin = resolveReqUser(req);
+  if (!reqAdmin || !isEmailAdmin(reqAdmin.email)) {
+    return res.status(403).json({ error: 'دسترسی فقط برای مدیر سیستم مجاز است.' });
+  }
   const newPassword = String(req.body?.newPassword || req.body?.password || '').trim();
   if (!okPass(newPassword)) {
     return res.status(400).json({ error: 'رمز عبور جدید باید بین ۸ تا ۱۲۸ کاراکتر باشد.' });
   }
-  const targetEmail = ADMIN_EMAIL || cleanEmail(reqAdmin?.email || '');
+  const targetEmail = cleanEmail(reqAdmin.email);
   if (targetEmail && cleanEmail(newPassword) === targetEmail) {
     return res.status(400).json({ error: 'رمز عبور مدیر نمی‌تواند برابر با آدرس ایمیل باشد.' });
   }
-  const adminUser = systemUsers.find(u => isEmailAdmin(u.email) || u.role === 'admin' || (targetEmail && u.email.toLowerCase() === targetEmail));
+  const adminUser = systemUsers.find(u => u.email.toLowerCase() === targetEmail);
   if (adminUser) {
     adminUser.passwordHash = hashPasswordSync(newPassword);
     revokeUserSessions(adminUser.email);
@@ -2141,7 +2150,7 @@ app.post('/api/admin/password', (req, res) => {
     id: Date.now(),
     time: 'هم‌اکنون',
     type: 'admin',
-    msg: 'رمز عبور مدیر ارشد سامانه با موفقیت تغییر یافت و نشست‌های قبلی باطل شدند.'
+    msg: `رمز عبور مدیر (${targetEmail}) با موفقیت تغییر یافت و نشست‌های قبلی باطل شدند.`
   });
   res.json({ ok: true });
 });
