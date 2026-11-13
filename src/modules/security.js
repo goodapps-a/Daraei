@@ -1,7 +1,7 @@
 // دارایی من (Darayi) — ماژول مشترک امنیت، هدرها، هش رمز عبور، اعتبارسنجی SSRF و تراکنش‌ها
 // مشترک بین Cloudflare Worker (پروداکشن: src/worker.js) و سرور پیش‌نمایش (server.ts)
 
-const enc = new TextEncoder();
+export const enc = new TextEncoder();
 
 export const SEC_HEADERS = {
   'x-content-type-options': 'nosniff',

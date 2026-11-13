@@ -22,7 +22,7 @@
  * ============================================================================
  */
 import { NERKHARA_MAP, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale } from './modules/market-core.js';
-import { SEC_HEADERS, PROD_CSP, b64u, b64uDec, teq, cleanEmail, isEmail, okPass, normCode, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
+import { enc, SEC_HEADERS, PROD_CSP, b64u, b64uDec, teq, cleanEmail, isEmail, okPass, normCode, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
 export { cleanData, validateTransactions, isSafePublicUrl, hashPassword, verifyPassword, normCode };
 
 export const ASSETS = {
@@ -254,7 +254,6 @@ const CRYPTO_STALE_S = 180;
 const SESSION_S = 30 * 86400;
 const RANGES = { '1H': 3600, '1D': 86400, '3D': 259200, '1W': 604800, '1M': 2592000, '1Y': 31536000 };
 
-const enc = new TextEncoder();
 const nowS = () => Math.floor(Date.now() / 1000);
 const rand = (n = 32) => b64u(crypto.getRandomValues(new Uint8Array(n)));
 const sha256 = async (s) => b64u(await crypto.subtle.digest('SHA-256', enc.encode(s)));

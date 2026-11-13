@@ -17,16 +17,32 @@ let workerContent = fs.readFileSync(workerJsPath, 'utf8');
 
 // Inline local ES module imports from ./modules/*.js so dist/worker.js remains a self-contained single-file Worker bundle
 workerContent = workerContent.replace(
-  /import\s+\{[\s\S]*?\}\s+from\s+['"](\.\/modules\/[^'"]+)['"];?/g,
-  (_match, relPath) => {
+  /import\s+\{([\s\S]*?)\}\s+from\s+['"](\.\/modules\/[^'"]+)['"];?/g,
+  (_match, specifiersRaw, relPath) => {
     const modPath = path.resolve(path.dirname(workerJsPath), relPath);
     if (!fs.existsSync(modPath)) {
       throw new Error(`Module not found during build: ${modPath}`);
     }
     const modSource = fs.readFileSync(modPath, 'utf8');
+    const exportedNames = new Set();
+    const exportRegex = /^export\s+(?:async\s+)?(?:const|let|var|function|class)\s+([A-Za-z_$][A-Za-z0-9_$]*)/gm;
+    let m;
+    while ((m = exportRegex.exec(modSource)) !== null) {
+      exportedNames.add(m[1]);
+    }
+    const requested = specifiersRaw
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => s.split(/\s+as\s+/)[0].trim());
+    for (const sym of requested) {
+      if (!exportedNames.has(sym)) {
+        throw new Error(`Symbol "${sym}" imported from ${relPath} is not exported by ${modPath}`);
+      }
+    }
     return (
       `// --- Inlined from ${relPath} ---\n` +
-      modSource.replace(/^export\s+(const|let|function|async\s+function)\s+/gm, '$1 ') +
+      modSource.replace(/^export\s+(const|let|var|function|async\s+function|class)\s+/gm, '$1 ') +
       `\n// --- End ${relPath} ---`
     );
   }
@@ -45,6 +61,26 @@ const COIN_FACE_PNG = ${JSON.stringify(facePngBase64)};
 
 ${workerContent}
 `;
+
+// Verify no duplicate top-level declarations exist in the generated bundle
+{
+  const topDeclRegex = /^(?:export\s+)?(?:async\s+)?(const|let|var|function|class)\s+([A-Za-z_$][A-Za-z0-9_$]*)/;
+  const seenDecls = new Map();
+  const lines = bundled.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const match = topDeclRegex.exec(lines[i]);
+    if (match) {
+      const name = match[2];
+      const lineNo = i + 1;
+      if (seenDecls.has(name)) {
+        throw new Error(
+          `Duplicate top-level symbol "${name}" in dist/worker.js at line ${lineNo} (previously declared at line ${seenDecls.get(name)})`
+        );
+      }
+      seenDecls.set(name, lineNo);
+    }
+  }
+}
 
 function shouldCopyPublicEntry(srcPath) {
   const rel = path.relative(path.join(rootDir, 'public'), srcPath).replace(/\\/g, '/');
