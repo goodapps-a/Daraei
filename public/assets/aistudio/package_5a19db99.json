@@ -1,9 +1,0 @@
-{
-  "name": "darayi",
-  "private": true,
-  "type": "module",
-  "scripts": {
-    "build": "node scripts/build.mjs",
-    "local": "node tools/local-server.mjs"
-  }
-}

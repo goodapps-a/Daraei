@@ -1,3 +1,4 @@
+// فقط پیش‌نمایش AI Studio — پروداکشن = src/worker.js
 import express from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -13,6 +14,16 @@ import {
   isTehranMarketOpen,
   isPriceItemStale
 } from './src/modules/market-core.js';
+import {
+  buildHtmlCsp,
+  cleanEmail,
+  isEmail,
+  okPass,
+  normCode,
+  isSafePublicUrl,
+  cleanData,
+  validateTransactions
+} from './src/modules/security.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -110,41 +121,6 @@ app.use('/api', (req, res, next) => {
   }
   next();
 });
-
-function isSafePublicUrl(rawUrl: string): boolean {
-  try {
-    const str = String(rawUrl || '').trim();
-    if (!str || str.length > 512) return false;
-    const u = new URL(str);
-    if (u.protocol !== 'https:' && u.protocol !== 'wss:') return false;
-    if (u.username || u.password) return false;
-    if (u.port && u.port !== '443') return false;
-    const h = u.hostname.toLowerCase().replace(/\.$/, '');
-    if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.arpa') || h.includes(':')) return false;
-    if (!h.includes('.')) return false;
-    if (h === 'metadata.google.internal' || h === 'metadata' || h === 'instance-data') return false;
-    if (/^[0-9.]+$/.test(h) || /^0x/i.test(h)) {
-      const parts = h.split('.');
-      if (parts.length !== 4) return false;
-      const nums = parts.map(p => (p.length > 1 && p.startsWith('0')) ? NaN : Number(p));
-      if (nums.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return false;
-      const [a, b, c] = nums;
-      if (a === 0 || a === 10 || a === 127) return false;
-      if (a === 169 && b === 254) return false;
-      if (a === 172 && b >= 16 && b <= 31) return false;
-      if (a === 192 && b === 168) return false;
-      if (a === 100 && b >= 64 && b <= 127) return false;
-      if (a === 192 && b === 0 && (c === 0 || c === 2)) return false;
-      if (a === 198 && (b === 18 || b === 19)) return false;
-      if (a === 198 && b === 51 && c === 100) return false;
-      if (a === 203 && b === 0 && c === 113) return false;
-      if (a >= 224) return false;
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 // Persistent on-disk cache for genuine fetched prices (never seeded with fake data)
 const CACHE_FILE = path.join(__dirname, 'cached-prices.json');
@@ -890,18 +866,13 @@ updateAllPrices(true);
 
 // ---------- API Routes ----------
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', (_req, res) => {
   const now = Math.floor(Date.now() / 1000);
-  res.json({
-    ok: true,
-    database: true,
-    kv: 'local_file_snapshot',
-    google: false,
-    email: false,
-    marketOpen: isTehranMarketOpen(now),
-    feeds: cachedPrices.feeds || {},
-    time: now
-  });
+  res.json({ ok: true, time: now });
+});
+
+app.get('/api/auth/config', (_req, res) => {
+  res.json({ ok: true, google: false });
 });
 
 app.get('/api/prices', async (req, res) => {
@@ -1486,7 +1457,11 @@ app.get('/api/history', async (req, res) => {
 });
 
 // Persistent user store & cryptographic session management
-const ADMIN_EMAIL = 'a.h.sh.t1381@gmail.com';
+const ADMIN_EMAIL = cleanEmail(process.env.ADMIN_EMAIL);
+function isEmailAdmin(email: string): boolean {
+  const em = cleanEmail(email);
+  return Boolean(ADMIN_EMAIL && em && em === ADMIN_EMAIL);
+}
 const AUTH_SECRET = (process.env.AUTH_SECRET && process.env.AUTH_SECRET.trim().length >= 16)
   ? process.env.AUTH_SECRET.trim()
   : crypto.randomBytes(32).toString('hex');
@@ -1526,9 +1501,10 @@ function verifyPasswordSync(password: string, storedHash: string): boolean {
 }
 
 function getConfiguredAdminPassword(): string | null {
+  if (!ADMIN_EMAIL) return null;
   const raw = String(process.env.ADMIN_PASSWORD || '').trim();
   if (!raw || raw.length < 8) return null;
-  if (raw.toLowerCase() === ADMIN_EMAIL.toLowerCase()) return null;
+  if (cleanEmail(raw) === ADMIN_EMAIL) return null;
   return raw;
 }
 
@@ -1564,18 +1540,20 @@ let broadcastMessage: string = '';
 
 const initialAdminPass = getConfiguredAdminPassword();
 let systemUsers: StoredUser[] = [
-  {
-    id: 'u_admin',
-    name: 'مدیر کل دارایی',
-    email: ADMIN_EMAIL,
-    role: 'admin',
-    status: 'active',
-    registeredAt: '1403/01/15',
-    holdingsCount: 16,
-    alertsCount: 4,
-    lastLogin: 'هم‌اکنون',
-    passwordHash: initialAdminPass ? hashPasswordSync(initialAdminPass) : ''
-  },
+  ...(ADMIN_EMAIL
+    ? [{
+        id: 'u_admin',
+        name: 'مدیر کل دارایی',
+        email: ADMIN_EMAIL,
+        role: 'admin' as const,
+        status: 'active' as const,
+        registeredAt: '1403/01/15',
+        holdingsCount: 16,
+        alertsCount: 4,
+        lastLogin: 'هم‌اکنون',
+        passwordHash: initialAdminPass ? hashPasswordSync(initialAdminPass) : ''
+      }]
+    : []),
   { id: 'u_2', name: 'امیرحسین رضایی', email: 'amir.financial@yahoo.com', role: 'user', status: 'active', registeredAt: '1403/06/10', holdingsCount: 12, alertsCount: 3, lastLogin: '۲ ساعت قبل', passwordHash: hashPasswordSync('Amir#Secure2024') },
   { id: 'u_3', name: 'سارا تهرانی', email: 'sara.trader@gmail.com', role: 'user', status: 'active', registeredAt: '1403/08/22', holdingsCount: 5, alertsCount: 2, lastLogin: 'دیروز', passwordHash: hashPasswordSync('SaraTeh_Trade99') },
   { id: 'u_4', name: 'رضا کریمی', email: 'reza.crypto@outlook.com', role: 'user', status: 'active', registeredAt: '1403/09/04', holdingsCount: 28, alertsCount: 7, lastLogin: '۳ روز قبل', passwordHash: hashPasswordSync('RezaCrypto!442') },
@@ -1599,7 +1577,7 @@ function loadAuthSessionFromDisk() {
               if (savedUser.passwordHash && String(savedUser.passwordHash).startsWith('pbkdf2$')) {
                 existing.passwordHash = savedUser.passwordHash;
               }
-              if (savedUser.status === 'suspended' && norm !== ADMIN_EMAIL.toLowerCase()) {
+              if (savedUser.status === 'suspended' && !isEmailAdmin(norm)) {
                 existing.status = 'suspended';
               }
             } else if (savedUser.passwordHash && String(savedUser.passwordHash).startsWith('pbkdf2$')) {
@@ -1607,7 +1585,7 @@ function loadAuthSessionFromDisk() {
                 id: String(savedUser.id || 'u_' + Date.now()),
                 name: String(savedUser.name || norm.split('@')[0]).slice(0, 80),
                 email: norm,
-                role: savedUser.role === 'admin' ? 'admin' : 'user',
+                role: savedUser.role === 'admin' && isEmailAdmin(norm) ? 'admin' : 'user',
                 status: savedUser.status === 'suspended' ? 'suspended' : 'active',
                 registeredAt: String(savedUser.registeredAt || 'هم‌اکنون'),
                 holdingsCount: Number(savedUser.holdingsCount) || 0,
@@ -1656,7 +1634,7 @@ function createSessionForUser(res: express.Response, req: express.Request, user:
   const sidHash = sha256Hex(baseSid);
   const ttlSec = 60 * 60 * 24 * 14;
   const nowSec = Math.floor(Date.now() / 1000);
-  const isAdmin = user.role === 'admin' || user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase();
+  const isAdmin = user.role === 'admin' || isEmailAdmin(user.email);
   const sessionRec: SessionRecord = {
     sidHash,
     userId: user.id,
@@ -1755,8 +1733,7 @@ app.get('/api/download/worker.js', (req, res) => {
   }
   const candidatePaths = [
     path.join(process.cwd(), 'dist', 'worker.js'),
-    path.join(__dirname, 'dist', 'worker.js'),
-    path.join(process.cwd(), 'public', 'worker.js')
+    path.join(__dirname, 'dist', 'worker.js')
   ];
   for (const p of candidatePaths) {
     if (fs.existsSync(p)) {
@@ -1774,14 +1751,14 @@ app.get('/api/me', (req, res) => {
 
 app.post('/api/auth/check-email', (req, res) => {
   const ip = getClientIp(req);
-  const normalizedEmail = String(req.body?.email || '').trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || normalizedEmail.length > 120) {
+  const normalizedEmail = cleanEmail(req.body?.email);
+  if (!isEmail(normalizedEmail) || normalizedEmail.length > 120) {
     return res.status(400).json({ error: 'ایمیل معتبر نیست.' });
   }
   if (!checkRateLimit(`check_email_ip:${ip}`, 25, 900) || !checkRateLimit(`check_email:${ip}:${normalizedEmail}`, 12, 900)) {
     return res.status(429).json({ error: 'تعداد درخواست‌ها بیش از حد مجاز است. لطفاً کمی صبر کنید.' });
   }
-  const isAdmin = normalizedEmail === ADMIN_EMAIL.toLowerCase();
+  const isAdmin = isEmailAdmin(normalizedEmail);
   const existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
   const storeRec = userStore[normalizedEmail];
   if (existing || storeRec || isAdmin) {
@@ -1803,8 +1780,8 @@ app.post('/api/auth/login', (req, res) => {
   const ip = getClientIp(req);
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ error: 'ایمیل و رمز عبور را وارد کنید.' });
-  const normalizedEmail = String(email).trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || normalizedEmail.length > 120) {
+  const normalizedEmail = cleanEmail(email);
+  if (!isEmail(normalizedEmail) || normalizedEmail.length > 120) {
     return res.status(400).json({ error: 'ایمیل معتبر نیست.' });
   }
   if (!checkRateLimit(`login:${ip}:${normalizedEmail}`, 8, 900) || !checkRateLimit(`login_ip:${ip}`, 20, 900)) {
@@ -1812,15 +1789,15 @@ app.post('/api/auth/login', (req, res) => {
   }
 
   const passStr = String(password);
-  if (passStr.length < 8 || passStr.length > 128) {
+  if (!okPass(passStr)) {
     return res.status(401).json({ error: 'ایمیل یا رمز عبور نادرست است.' });
   }
 
-  const isAdmin = normalizedEmail === ADMIN_EMAIL.toLowerCase();
-  const existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
+  const isAdmin = isEmailAdmin(normalizedEmail);
+  let existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
 
   if (isAdmin) {
-    if (passStr.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+    if (cleanEmail(passStr) === ADMIN_EMAIL) {
       return res.status(401).json({ error: 'استفاده از آدرس ایمیل به‌عنوان رمز عبور مدیر مجاز نیست.' });
     }
     const envAdminPass = getConfiguredAdminPassword();
@@ -1829,7 +1806,23 @@ app.post('/api/auth/login', (req, res) => {
       adminAuthenticated = true;
     } else if (envAdminPass && safeEqualStr(passStr, envAdminPass)) {
       adminAuthenticated = true;
-      if (existing) existing.passwordHash = hashPasswordSync(passStr);
+      if (!existing) {
+        existing = {
+          id: 'u_admin',
+          name: 'مدیر کل دارایی',
+          email: ADMIN_EMAIL,
+          role: 'admin',
+          status: 'active',
+          registeredAt: 'هم‌اکنون',
+          holdingsCount: 0,
+          alertsCount: 0,
+          lastLogin: 'هم‌اکنون',
+          passwordHash: hashPasswordSync(passStr)
+        };
+        systemUsers.unshift(existing);
+      } else {
+        existing.passwordHash = hashPasswordSync(passStr);
+      }
     }
     if (!adminAuthenticated) {
       return res.status(401).json({ error: 'ایمیل یا رمز عبور نادرست است.' });
@@ -1871,13 +1864,21 @@ app.use('/api/admin', (req, res, next) => {
   next();
 });
 
-app.get('/api/admin/overview', (req, res) => {
+app.get('/api/admin/overview', (_req, res) => {
+  const now = Math.floor(Date.now() / 1000);
   const items = cachedPrices.items || {};
   const totalCrypto = Object.values(items).filter((i: any) => i.crypto).length;
   const totalDomestic = Object.values(items).filter((i: any) => i.kind === 'domestic').length;
   
   res.json({
     ok: true,
+    system: {
+      database: true,
+      kv: 'local_file_snapshot',
+      google: false,
+      email: false,
+      marketOpen: isTehranMarketOpen(now)
+    },
     stats: {
       totalUsers: systemUsers.length,
       activeUsers: systemUsers.filter(u => u.status === 'active').length,
@@ -2044,7 +2045,7 @@ app.get('/api/admin/users', (req, res) => {
 app.post('/api/admin/users/:id/toggle', (req, res) => {
   const u = systemUsers.find(x => x.id === req.params.id);
   if (!u) return res.status(404).json({ error: 'کاربر یافت نشد.' });
-  if (u.email.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+  if (isEmailAdmin(u.email) || u.role === 'admin') {
     return res.status(400).json({ error: 'امکان تغییر وضعیت مدیر کل سیستم وجود ندارد.' });
   }
   u.status = u.status === 'active' ? 'suspended' : 'active';
@@ -2075,25 +2076,25 @@ app.post('/api/admin/logs/clear', (req, res) => {
 app.post('/api/admin/users/add', (req, res) => {
   const { name, email, role, password } = req.body || {};
   if (!name || !email) return res.status(400).json({ error: 'نام و ایمیل الزامی است.' });
-  const normalizedEmail = String(email).trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || normalizedEmail.length > 120) {
+  const normalizedEmail = cleanEmail(email);
+  if (!isEmail(normalizedEmail) || normalizedEmail.length > 120) {
     return res.status(400).json({ error: 'ایمیل معتبر نیست.' });
   }
   if (systemUsers.some(u => u.email.toLowerCase() === normalizedEmail)) {
     return res.status(409).json({ error: 'این ایمیل قبلاً ثبت شده است.' });
   }
   const pass = String(password || '').trim();
-  if (pass.length < 8 || pass.length > 128) {
+  if (!okPass(pass)) {
     return res.status(400).json({ error: 'رمز عبور باید حداقل ۸ کاراکتر باشد.' });
   }
-  if (pass.toLowerCase() === normalizedEmail) {
+  if (cleanEmail(pass) === normalizedEmail) {
     return res.status(400).json({ error: 'رمز عبور نمی‌تواند برابر با آدرس ایمیل باشد.' });
   }
   const newUser: StoredUser = {
     id: 'u_' + Date.now(),
     name: String(name).trim().slice(0, 80),
     email: normalizedEmail,
-    role: role === 'admin' && normalizedEmail === ADMIN_EMAIL.toLowerCase() ? 'admin' : 'user',
+    role: role === 'admin' && isEmailAdmin(normalizedEmail) ? 'admin' : 'user',
     status: 'active',
     registeredAt: 'هم‌اکنون',
     holdingsCount: 0,
@@ -2113,23 +2114,29 @@ app.post('/api/admin/users/add', (req, res) => {
 });
 
 app.post('/api/admin/password', (req, res) => {
-  const newPassword = String(req.body?.newPassword || '');
-  if (newPassword.length < 8 || newPassword.length > 128) {
+  const reqAdmin = resolveReqUser(req);
+  const newPassword = String(req.body?.newPassword || req.body?.password || '').trim();
+  if (!okPass(newPassword)) {
     return res.status(400).json({ error: 'رمز عبور جدید باید بین ۸ تا ۱۲۸ کاراکتر باشد.' });
   }
-  if (newPassword.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+  const targetEmail = ADMIN_EMAIL || cleanEmail(reqAdmin?.email || '');
+  if (targetEmail && cleanEmail(newPassword) === targetEmail) {
     return res.status(400).json({ error: 'رمز عبور مدیر نمی‌تواند برابر با آدرس ایمیل باشد.' });
   }
-  const adminUser = systemUsers.find(u => u.email.toLowerCase() === ADMIN_EMAIL.toLowerCase());
+  const adminUser = systemUsers.find(u => isEmailAdmin(u.email) || u.role === 'admin' || (targetEmail && u.email.toLowerCase() === targetEmail));
   if (adminUser) {
     adminUser.passwordHash = hashPasswordSync(newPassword);
+    revokeUserSessions(adminUser.email);
+    createSessionForUser(res, req, adminUser);
     saveAuthSessionToDisk();
+  } else if (targetEmail) {
+    revokeUserSessions(targetEmail);
   }
   systemAuditLogs.unshift({
     id: Date.now(),
     time: 'هم‌اکنون',
     type: 'admin',
-    msg: 'رمز عبور مدیر ارشد سامانه با موفقیت تغییر یافت.'
+    msg: 'رمز عبور مدیر ارشد سامانه با موفقیت تغییر یافت و نشست‌های قبلی باطل شدند.'
   });
   res.json({ ok: true });
 });
@@ -2203,22 +2210,22 @@ app.post('/api/auth/register/start', (req, res) => {
   const ip = getClientIp(req);
   const { email, name, password } = req.body || {};
   if (!email || !name || !password) return res.status(400).json({ error: 'نام، ایمیل و رمز عبور را کامل وارد کنید.' });
-  const normalizedEmail = String(email).trim().toLowerCase();
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail) || normalizedEmail.length > 120) {
+  const normalizedEmail = cleanEmail(email);
+  if (!isEmail(normalizedEmail) || normalizedEmail.length > 120) {
     return res.status(400).json({ error: 'ایمیل معتبر نیست.' });
   }
   const cleanName = String(name).trim().slice(0, 80);
   const passStr = String(password);
   if (cleanName.length < 2) return res.status(400).json({ error: 'نام باید حداقل ۲ کاراکتر باشد.' });
-  if (passStr.length < 8 || passStr.length > 128) return res.status(400).json({ error: 'رمز عبور باید حداقل ۸ کاراکتر باشد.' });
-  if (normalizedEmail === ADMIN_EMAIL.toLowerCase() && passStr.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+  if (!okPass(passStr)) return res.status(400).json({ error: 'رمز عبور باید حداقل ۸ کاراکتر باشد.' });
+  if (cleanEmail(passStr) === normalizedEmail) {
     return res.status(400).json({ error: 'رمز عبور نمی‌تواند برابر با آدرس ایمیل باشد.' });
   }
-  if (!checkRateLimit(`reg_start:${ip}:${normalizedEmail}`, 5, 900) || !checkRateLimit(`reg_ip:${ip}`, 15, 900)) {
+  if (!checkRateLimit(`reg_start:${ip}:${normalizedEmail}`, 5, 900) || !checkRateLimit(`reg_ip:${ip}`, 15, 900) || !checkRateLimit(`otp_hour:${normalizedEmail}`, 5, 3600)) {
     return res.status(429).json({ error: 'تعداد درخواست‌های ثبت‌نام بیش از حد مجاز است. کمی صبر کنید.' });
   }
   if (systemUsers.some(u => u.email.toLowerCase() === normalizedEmail)) {
-    return res.status(409).json({ error: 'این ایمیل قبلاً ثبت شده است؛ وارد شوید.' });
+    return res.json({ ok: true });
   }
 
   const code = String(crypto.randomInt(100000, 1000000));
@@ -2244,8 +2251,8 @@ app.post('/api/auth/register/verify', (req, res) => {
   const ip = getClientIp(req);
   const { email, code } = req.body || {};
   if (!email || !code) return res.status(400).json({ error: 'اطلاعات ناقص است.' });
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const cleanCode = String(code).replace(/\D/g, '');
+  const normalizedEmail = cleanEmail(email);
+  const cleanCode = normCode(code);
   if (!checkRateLimit(`reg_verify:${ip}:${normalizedEmail}`, 8, 900)) {
     return res.status(429).json({ error: 'تلاش‌های ناموفق بیش از حد مجاز است. لطفاً کمی صبر کنید.' });
   }
@@ -2265,7 +2272,7 @@ app.post('/api/auth/register/verify', (req, res) => {
   }
 
   delete pendingOtps[`register:${normalizedEmail}`];
-  const isAdmin = normalizedEmail === ADMIN_EMAIL.toLowerCase();
+  const isAdmin = isEmailAdmin(normalizedEmail);
 
   let existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
   if (!existing) {
@@ -2301,13 +2308,14 @@ app.post('/api/auth/reset/start', (req, res) => {
   const ip = getClientIp(req);
   const { email } = req.body || {};
   if (!email) return res.status(400).json({ error: 'ایمیل را وارد کنید.' });
-  const normalizedEmail = String(email).trim().toLowerCase();
-  if (!checkRateLimit(`reset_start:${ip}:${normalizedEmail}`, 5, 900) || !checkRateLimit(`reset_ip:${ip}`, 15, 900)) {
+  const normalizedEmail = cleanEmail(email);
+  if (!isEmail(normalizedEmail)) return res.status(400).json({ error: 'ایمیل معتبر نیست.' });
+  if (!checkRateLimit(`reset_start:${ip}:${normalizedEmail}`, 5, 900) || !checkRateLimit(`reset_ip:${ip}`, 15, 900) || !checkRateLimit(`otp_hour:${normalizedEmail}`, 5, 3600)) {
     return res.status(429).json({ error: 'تعداد درخواست‌های بازیابی بیش از حد مجاز است. کمی صبر کنید.' });
   }
   const exists = systemUsers.some(u => u.email.toLowerCase() === normalizedEmail) || !!userStore[normalizedEmail];
   if (!exists) {
-    return res.status(404).json({ error: 'user_not_found', message: 'این ایمیل در سامانه ثبت نشده است.' });
+    return res.json({ ok: true });
   }
   const code = String(crypto.randomInt(100000, 1000000));
   pendingOtps[`reset:${normalizedEmail}`] = {
@@ -2330,8 +2338,8 @@ app.post('/api/auth/reset/verify', (req, res) => {
   const ip = getClientIp(req);
   const { email, code } = req.body || {};
   if (!email || !code) return res.status(400).json({ error: 'اطلاعات ناقص است.' });
-  const normalizedEmail = String(email).trim().toLowerCase();
-  const cleanCode = String(code).replace(/\D/g, '');
+  const normalizedEmail = cleanEmail(email);
+  const cleanCode = normCode(code);
   if (!checkRateLimit(`reset_verify:${ip}:${normalizedEmail}`, 8, 900)) {
     return res.status(429).json({ error: 'تلاش‌های ناموفق بیش از حد مجاز است.' });
   }
@@ -2365,7 +2373,7 @@ app.post('/api/auth/reset/finish', (req, res) => {
   if (!email || !resetToken || !password) {
     return res.status(400).json({ error: 'اطلاعات بازیابی رمز عبور ناقص است.' });
   }
-  const normalizedEmail = String(email).trim().toLowerCase();
+  const normalizedEmail = cleanEmail(email);
   if (!checkRateLimit(`reset_finish:${ip}:${normalizedEmail}`, 5, 900)) {
     return res.status(429).json({ error: 'تعداد درخواست‌ها بیش از حد مجاز است.' });
   }
@@ -2375,11 +2383,11 @@ app.post('/api/auth/reset/finish', (req, res) => {
   }
 
   const passStr = String(password);
-  if (passStr.length < 8 || passStr.length > 128) {
+  if (!okPass(passStr)) {
     return res.status(400).json({ error: 'رمز عبور جدید باید حداقل ۸ کاراکتر باشد.' });
   }
-  if (normalizedEmail === ADMIN_EMAIL.toLowerCase() && passStr.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
-    return res.status(400).json({ error: 'رمز عبور مدیر نمی‌تواند برابر با آدرس ایمیل باشد.' });
+  if (cleanEmail(passStr) === normalizedEmail) {
+    return res.status(400).json({ error: 'رمز عبور نمی‌تواند برابر با آدرس ایمیل باشد.' });
   }
 
   delete pendingResets[normalizedEmail];
@@ -2425,7 +2433,7 @@ app.delete('/api/me', (req, res) => {
   const email = u.email.toLowerCase();
   delete userStore[email];
   revokeUserSessions(email);
-  const idx = systemUsers.findIndex(usr => usr.email.toLowerCase() === email && usr.email.toLowerCase() !== ADMIN_EMAIL.toLowerCase());
+  const idx = systemUsers.findIndex(usr => usr.email.toLowerCase() === email && !isEmailAdmin(usr.email));
   if (idx !== -1) systemUsers.splice(idx, 1);
   saveAuthSessionToDisk();
   clearSessionCookie(res, req);
@@ -2882,15 +2890,24 @@ app.put('/api/me/data', (req, res) => {
     return res.status(401).json({ error: 'ابتدا وارد حساب کاربری خود شوید.' });
   }
   const body = req.body || {};
-  if (Array.isArray(body.holdings)) {
-    for (const h of body.holdings) {
-      if (!h || !/^[a-z0-9]{1,20}$/.test(String(h.assetId || '')) || !(Number(h.qty) > 0) || !Number.isFinite(Number(h.qty)) || !(Number(h.buyPrice) >= 0) || !Number.isFinite(Number(h.buyPrice))) {
-        return res.status(400).json({ error: 'اطلاعات معامله نامعتبر است (مقدار باید مثبت و معتبر باشد).' });
-      }
-    }
-  }
   const email = u.email.toLowerCase();
   const prevRec = userStore[email];
+  const currentRev = Number(prevRec?.updatedAt) || 0;
+  const hasBaseRev = body.baseRevision !== undefined && body.baseRevision !== null;
+  if (hasBaseRev && Number(body.baseRevision) !== currentRev) {
+    return res.status(409).json({
+      error: 'نسخه داده‌های شما قدیمی است؛ اطلاعات جدید دریافت شد.',
+      data: prevRec?.data || { holdings: [], watch: [], featured: [], alerts: [], settings: {} },
+      updatedAt: currentRev
+    });
+  }
+
+  const c = cleanData(body);
+  try {
+    validateTransactions(c.holdings);
+  } catch (err: any) {
+    return res.status(400).json({ error: err?.message || 'معامله معتبر نیست.' });
+  }
   const cleaned = cleanUserData(body, prevRec?.data?.alerts || []);
   const ledgerErr = validateHoldingsLedger(cleaned.holdings);
   if (ledgerErr) {
@@ -2905,7 +2922,7 @@ app.put('/api/me/data', (req, res) => {
   const updated = {
     exists: true,
     revision: nextRev,
-    updatedAt: Math.floor(Date.now() / 1000),
+    updatedAt: Math.max(Math.floor(Date.now() / 1000), currentRev + 1),
     data: cleaned
   };
 
@@ -2996,13 +3013,7 @@ app.get(['/', '/index.html'], (req, res) => {
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
     res.setHeader('Surrogate-Control', 'no-store');
-    const frameAncestors = isPreviewRequest(req)
-      ? "frame-ancestors 'self' https://aistudio.google.com https://*.aistudio.google.com https://*.googleusercontent.com https://*.google.com;"
-      : "frame-ancestors 'self';";
-    res.setHeader(
-      'Content-Security-Policy',
-      `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; worker-src 'self' blob:; connect-src 'self' https: wss:; ${frameAncestors} base-uri 'self'; form-action 'self'`
-    );
+    res.setHeader('Content-Security-Policy', buildHtmlCsp(isPreviewRequest(req)));
     return res.sendFile(htmlPath);
   }
   return res.status(404).send('HTML not found.');

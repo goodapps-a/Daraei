@@ -1,6 +1,29 @@
 // دارایی من (Darayi) — Cloudflare Worker (API + Cron + Static PWA)
 // اصلاح‌شده و بهینه‌سازی‌شده برای پلن رایگان کلادفلر و رفع تمام باگ‌های دریافت قیمت
+/*
+ * ============================================================================
+ * جدول متغیرهای حافظهٔ Isolate (In-Memory State) و منبع حقیقت (Source of Truth)
+ * ============================================================================
+ * | متغیر حافظه                   | منبع حقیقت (D1 / KV / Cache)      | TTL حافظه   | توضیح و رفتار در محیط چند-Isolate                     |
+ * |-------------------------------|-----------------------------------|-------------|-------------------------------------------------------|
+ * | inMemoryPrices                | KV (PRICES_KV) / D1 kv / CacheAPI | ~45s        | کش لحظه‌ای قیمت‌ها؛ همگام‌سازی با Cron و Cache API     |
+ * | inMemoryDynamicIcons          | KV (crypto_icons_v4)              | 12h (43200s)| نقشهٔ آیکون رمزارزها؛ خواندن تنبل با قفل Job همزمان    |
+ * | inMemoryBroadcast             | D1 (kv: 'broadcast')              | 1h (3600s)  | پیام عمومی بالای برنامه                               |
+ * | inMemoryAdminStats            | D1 (users / alerts / user_data)   | 60s         | آمار کلی پنل مدیریت                                   |
+ * | inMemoryAdminSettings         | D1 (kv: 'admin_settings')         | 5m (300s)   | تنظیمات کلان سامانه                                   |
+ * | inMemorySuspendedUsers        | D1 (kv: 'suspended_users')        | <= 60s      | لیست کاربران مسدود؛ اعمال حداکثر تا ۶۰ ثانیه          |
+ * | sessionUserCache (Map)        | D1 (sessions JOIN users)          | <= 60s      | کش نشست‌های معتبر برای کاهش Read دیتابیس D1           |
+ * | revokedSessionsCache (Map)    | D1 (DELETE FROM sessions)         | 60s (حداکثر)| نشست‌های باطل‌شدهٔ اخیر با پاکسازی خودکار (سقف ۱۰۰۰)  |
+ * | userDataCache (Map)           | D1 (user_data + alerts)           | 15m (900s)  | کش سبد و هشدارهای کاربر؛ ابطال فوری روی PUT/DELETE    |
+ * | inMemoryRateLimits (Map)      | D1 (rate_limits)                  | پنجرهٔ محدود| لایهٔ اول ضداسپم؛ مسیرهای حساس با persistDb=true در D1|
+ * | historyMemCache (Map)         | D1 (price_history_v2) + Archive   | 60s–900s    | کش پاسخ نمودارها در حافظه و Cloudflare Cache API      |
+ * | lastD1RecordedMap (Map)       | D1 (price_history_v2)             | طول عمر ورکر| آخرین نقطهٔ ثبت‌شدهٔ هر دارایی داخلی برای حذف Read اضافه|
+ * | hasActiveAlertsCache          | D1 (alerts WHERE triggered_at NULL)| 30m (1800s) | جلوگیری از اسکن جدول هشدارها در صورت نبود هشدار فعال  |
+ * ============================================================================
+ */
 import { NERKHARA_MAP, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale } from './modules/market-core.js';
+import { SEC_HEADERS, PROD_CSP, b64u, b64uDec, teq, cleanEmail, isEmail, okPass, normCode, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
+export { cleanData, validateTransactions, isSafePublicUrl, hashPassword, verifyPassword, normCode };
 
 export const ASSETS = {
   usd: 'دلار آمریکا', eur: 'یورو', gbp: 'پوند انگلیس', aed: 'درهم امارات', try: 'لیر ترکیه', cad: 'دلار کانادا',
@@ -233,17 +256,9 @@ const RANGES = { '1H': 3600, '1D': 86400, '3D': 259200, '1W': 604800, '1M': 2592
 
 const enc = new TextEncoder();
 const nowS = () => Math.floor(Date.now() / 1000);
-const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 const rand = (n = 32) => b64u(crypto.getRandomValues(new Uint8Array(n)));
 const sha256 = async (s) => b64u(await crypto.subtle.digest('SHA-256', enc.encode(s)));
 const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-const SEC_HEADERS = {
-  'x-content-type-options': 'nosniff',
-  'x-frame-options': 'SAMEORIGIN',
-  'referrer-policy': 'strict-origin-when-cross-origin',
-  'permissions-policy': 'camera=(), microphone=(), geolocation=(), payment=()',
-  'strict-transport-security': 'max-age=31536000; includeSubDomains'
-};
 const json = (o, status = 200, h = {}) => new Response(JSON.stringify(o), {
   status,
   headers: {
@@ -253,39 +268,7 @@ const json = (o, status = 200, h = {}) => new Response(JSON.stringify(o), {
     ...h
   }
 });
-class HttpError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
-const isEmail = (e) => typeof e === 'string' && e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
-function isPrivateOrReservedIpv4(host) {
-  if (/^\d+$/.test(host) || /^0x[0-9a-f]+$/i.test(host)) return true;
-  const parts = host.split('.');
-  if (parts.length !== 4 || !parts.every(p => /^\d{1,3}$/.test(p))) return false;
-  const [a, b] = parts.map(Number);
-  if (parts.some(p => Number(p) > 255)) return true;
-  if (a === 0 || a === 10 || a === 127) return true;
-  if (a === 100 && b >= 64 && b <= 127) return true;
-  if (a === 169 && b === 254) return true;
-  if (a === 172 && b >= 16 && b <= 31) return true;
-  if (a === 192 && (b === 0 || b === 168)) return true;
-  if (a === 198 && (b === 18 || b === 19)) return true;
-  if (a >= 224) return true;
-  return false;
-}
-function isSafePublicUrl(rawUrl) {
-  try {
-    const u = new URL(String(rawUrl || '').trim());
-    if (u.protocol !== 'https:' && u.protocol !== 'wss:') return false;
-    if (u.username || u.password) return false;
-    if (u.port && u.port !== '443') return false;
-    const h = u.hostname.toLowerCase().replace(/\.$/, '');
-    if (!h || h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local') || h.endsWith('.internal') || h.endsWith('.arpa') || h === 'metadata.google.internal' || h === 'metadata') return false;
-    if (h.startsWith('[') || h.includes(':')) return false;
-    if (isPrivateOrReservedIpv4(h)) return false;
-    if (!h.includes('.')) return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
+class HttpError extends Error { constructor(status, msg, extra = null) { super(msg); this.status = status; this.extra = extra; } }
 
 const inMemoryRateLimits = new Map();
 async function rateLimit(env, key, limit, windowS, persistDb = false) {
@@ -321,7 +304,17 @@ async function rateLimit(env, key, limit, windowS, persistDb = false) {
 }
 
 // ---------- ارسال ایمیل (Gmail Apps Script / Resend / Cloudflare) ----------
-export async function sendMail(env, { to, subject, html, text, deliveryId }) {
+const DAILY_AUTH_EMAIL_CAP = 80; // سقف روزانه ایمیل‌های احراز هویت برای حفظ حداقل ۲۰ سهمیه از ۱۰۰ ایمیل روزانه Apps Script جهت هشدار قیمت‌ها
+const DAILY_TOTAL_EMAIL_CAP = 98;
+async function consumeDailyEmailQuota(env, isAlert = false) {
+  const dayKey = new Date().toISOString().slice(0, 10);
+  if (!isAlert) {
+    await rateLimit(env, `email_auth_daily:${dayKey}`, DAILY_AUTH_EMAIL_CAP, 86400, true);
+  }
+  await rateLimit(env, `email_total_daily:${dayKey}`, DAILY_TOTAL_EMAIL_CAP, 86400, true);
+}
+export async function sendMail(env, { to, subject, html, text, deliveryId, isAlert = false }) {
+  await consumeDailyEmailQuota(env, isAlert);
   const fromAddress = env.MAIL_FROM || 'دارایی من <onboarding@resend.dev>';
   if (env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET) {
     if (!isSafePublicUrl(env.MAIL_WEBHOOK_URL)) throw new Error('unsafe_webhook_url');
@@ -360,38 +353,57 @@ const btn = (href, label) => `<p style="margin:20px 0"><a href="${esc(href)}" st
 // ---------- مدیریت نشست و کوکی‌ها ----------
 const cookieOpts = (url, maxAge) => `Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAge}${url.protocol === 'https:' ? '; Secure' : ''}`;
 function getCookie(req, name) { const m = (req.headers.get('cookie') || '').split(/;\s*/).find((c) => c.startsWith(name + '=')); try { return m ? decodeURIComponent(m.slice(name.length + 1)) : null; } catch { return null; } }
-let ephemeralIsolateSecret = null;
-let warnedMissingAuthSecret = false;
 function getAuthSecret(env) {
   if (env && typeof env.AUTH_SECRET === 'string' && env.AUTH_SECRET.trim().length >= 16) {
     return env.AUTH_SECRET.trim();
   }
-  if (!ephemeralIsolateSecret) {
-    ephemeralIsolateSecret = rand(32);
-    if (!warnedMissingAuthSecret) {
-      warnedMissingAuthSecret = true;
-      console.warn('SECURITY WARNING: AUTH_SECRET is not configured or too short. Using an ephemeral random secret for this isolate.');
-    }
-  }
-  return ephemeralIsolateSecret;
+  throw new HttpError(503, 'تنظیمات امنیتی سرور (AUTH_SECRET) کامل نیست.');
 }
 function getAdminEmail(env) {
-  return cleanEmail((env && env.ADMIN_EMAIL) ? env.ADMIN_EMAIL : 'a.h.sh.t1381@gmail.com');
+  return cleanEmail(env && env.ADMIN_EMAIL);
+}
+function isEmailAdmin(env, email) {
+  const adm = getAdminEmail(env);
+  const em = cleanEmail(email);
+  return Boolean(adm && em && em === adm);
 }
 function getConfiguredAdminPassword(env) {
   const adminEmail = getAdminEmail(env);
+  if (!adminEmail) return null;
   if (env && typeof env.ADMIN_PASSWORD === 'string') {
     const p = env.ADMIN_PASSWORD.trim();
     if (p.length >= 8 && cleanEmail(p) !== adminEmail) return p;
   }
   return null;
 }
-const revokedSessionsCache = new Set();
+const SESSION_CACHE_TTL_S = 60;
+const SUSPENDED_CACHE_TTL_S = 60;
+const REVOKED_CACHE_TTL_S = 60;
+const revokedSessionsCache = new Map();
+function markSessionRevoked(h) {
+  if (!h) return;
+  const now = nowS();
+  if (revokedSessionsCache.size > 1000) {
+    for (const [k, exp] of revokedSessionsCache) {
+      if (now >= exp) revokedSessionsCache.delete(k);
+    }
+  }
+  revokedSessionsCache.set(h, now + REVOKED_CACHE_TTL_S);
+}
+function isSessionRevoked(h) {
+  const exp = revokedSessionsCache.get(h);
+  if (!exp) return false;
+  if (nowS() >= exp) {
+    revokedSessionsCache.delete(h);
+    return false;
+  }
+  return true;
+}
 let inMemorySuspendedUsers = null;
 let inMemorySuspendedUsersTime = 0;
 async function getSuspendedUsers(env) {
   const now = nowS();
-  if (inMemorySuspendedUsers && (now - inMemorySuspendedUsersTime < 120)) return inMemorySuspendedUsers;
+  if (inMemorySuspendedUsers && (now - inMemorySuspendedUsersTime < SUSPENDED_CACHE_TTL_S)) return inMemorySuspendedUsers;
   let list = [];
   if (env && env.DB) {
     try {
@@ -417,13 +429,12 @@ async function hmacSign(env, msg) {
 async function createSignedToken(env, uid, meta = {}) {
   const sid = rand(24);
   const exp = nowS() + SESSION_S;
-  const adminEmail = getAdminEmail(env);
   const emailLower = String(meta.email || '').toLowerCase();
   const payloadObj = {
     id: uid,
     email: emailLower,
     name: String(meta.name || ''),
-    isAdmin: !!meta.isAdmin || emailLower === adminEmail,
+    isAdmin: !!meta.isAdmin || isEmailAdmin(env, emailLower),
     exp
   };
   const payloadB64 = b64u(enc.encode(JSON.stringify(payloadObj)));
@@ -435,14 +446,18 @@ async function verifySignedToken(env, rawToken) {
   const parts = rawToken.split('.');
   if (parts.length !== 3) return null;
   const [sid, payloadB64, sig] = parts;
-  const expected = await hmacSign(env, `${sid}.${payloadB64}`);
+  let expected;
+  try {
+    expected = await hmacSign(env, `${sid}.${payloadB64}`);
+  } catch {
+    return null;
+  }
   if (!teq(sig, expected)) return null;
   try {
     const jsonStr = new TextDecoder().decode(b64uDec(payloadB64));
     const data = JSON.parse(jsonStr);
     if (!data || !data.email || !Number.isFinite(data.exp) || data.exp <= nowS()) return null;
-    const adminEmail = getAdminEmail(env);
-    data.isAdmin = !!data.isAdmin || String(data.email || '').toLowerCase() === adminEmail;
+    data.isAdmin = !!data.isAdmin || isEmailAdmin(env, data.email);
     return { sid, user: { id: data.id || ('u_' + data.email), email: data.email, name: data.name || data.email.split('@')[0], isAdmin: data.isAdmin } };
   } catch {
     return null;
@@ -460,7 +475,7 @@ async function currentUser(req, env) {
   const baseSid = verified ? verified.sid : rawToken.split('.')[0];
   if (!baseSid) return null;
   const h = await sha256(baseSid);
-  if (revokedSessionsCache.has(h)) return null;
+  if (isSessionRevoked(h)) return null;
 
   const cached = sessionUserCache.get(h);
   if (cached && now < cached.exp) {
@@ -473,9 +488,8 @@ async function currentUser(req, env) {
       const u = await env.DB.prepare('SELECT u.id,u.email,u.name FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id_hash=? AND s.expires_at>?').bind(h, now).first();
       if (u) {
         if (await isUserSuspended(env, u.id, u.email)) return null;
-        const adminEmail = getAdminEmail(env);
-        u.isAdmin = (u.email && u.email.toLowerCase() === adminEmail);
-        sessionUserCache.set(h, { user: u, exp: Math.min(now + 300, now + SESSION_S) });
+        u.isAdmin = isEmailAdmin(env, u.email);
+        sessionUserCache.set(h, { user: u, exp: Math.min(now + SESSION_CACHE_TTL_S, now + SESSION_S) });
         return u;
       }
       return null;
@@ -494,7 +508,7 @@ async function sessionCookie(env, url, uid, userMeta = {}) {
   const { sid, token, payloadObj, exp } = await createSignedToken(env, uid, userMeta);
   const h = await sha256(sid);
   revokedSessionsCache.delete(h);
-  sessionUserCache.set(h, { user: { id: uid, email: payloadObj.email, name: payloadObj.name, isAdmin: payloadObj.isAdmin }, exp: Math.min(nowS() + 300, exp) });
+  sessionUserCache.set(h, { user: { id: uid, email: payloadObj.email, name: payloadObj.name, isAdmin: payloadObj.isAdmin }, exp: Math.min(nowS() + SESSION_CACHE_TTL_S, exp) });
   if (env.DB) {
     try {
       await env.DB.prepare('INSERT INTO sessions(id_hash,user_id,expires_at,created_at) VALUES(?,?,?,?)').bind(h, uid, exp, nowS()).run();
@@ -518,15 +532,6 @@ async function upsertUser(env, { email, name, sub }) {
 }
 
 // ---------- احراز هویت با رمز عبور و کد یک‌بارمصرف ----------
-const normCode = (c) => String(c ?? '').replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/\D/g, '');
-const b64uDec = (s) => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
-const teq = (a, b) => { if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false; let d = 0; for (let i = 0; i < a.length; i++) d |= a.charCodeAt(i) ^ b.charCodeAt(i); return d === 0; };
-// عدد ۱۰,۰۰۰ برای پلن رایگان کلادفلر و محدودیت ۱۰ میلی‌ثانیه زمان CPU است
-const PBKDF2_DEFAULT = 10000;
-const iterOf = (env) => Math.min(100000, Math.max(1000, Number(env && env.PBKDF2_ITER) || PBKDF2_DEFAULT));
-async function pbkdf2(pw, salt, iter) { const key = await crypto.subtle.importKey('raw', enc.encode(pw), 'PBKDF2', false, ['deriveBits']); return b64u(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, key, 256)); }
-async function hashPassword(pw, env) { const salt = crypto.getRandomValues(new Uint8Array(16)), it = iterOf(env); return `pbkdf2$${it}$${b64u(salt)}$${await pbkdf2(pw, salt, it)}`; }
-async function verifyPassword(pw, stored, env) { const [t, it, salt, h] = String(stored || `x$${iterOf(env)}$AAAAAAAAAAAAAAAAAAAAAA$x`).split('$'); const got = await pbkdf2(pw, b64uDec(salt), Number(it) || iterOf(env)); return !!stored && t === 'pbkdf2' && teq(got, h); }
 async function hmac(env, msg) { return hmacSign(env, msg); }
 const randInt = (n) => { const max = Math.floor(2 ** 32 / n) * n; let x; do { x = crypto.getRandomValues(new Uint32Array(1))[0]; } while (x >= max); return x % n; };
 
@@ -550,9 +555,7 @@ async function checkCode(env, email, purpose, code) {
   return row.payload ? JSON.parse(row.payload) : {};
 }
 const codeMail = (title, intro, code) => mailShell(title, `<p style="color:#444;line-height:1.9">${esc(intro)}</p><p style="font-size:30px;letter-spacing:8px;font-weight:800;direction:ltr;text-align:center;background:#f5f5f0;border-radius:12px;padding:14px;margin:16px 0">${esc(code)}</p><p style="font-size:12px;color:#8a8f88">این کد ۱۰ دقیقه معتبر است. آن را با کسی به اشتراک نگذار.</p>`);
-const mailCode = (env, to, subject, intro, code) => sendMail(env, { to, subject, text: `${intro}\n\n${code}\n\n(۱۰ دقیقه معتبر است)`, html: codeMail(subject, intro, code) });
-const cleanEmail = (e) => String(e || '').trim().toLowerCase();
-const okPass = (p) => typeof p === 'string' && p.length >= 8 && p.length <= 128;
+const mailCode = (env, to, subject, intro, code) => sendMail(env, { to, subject, text: `${intro}\n\n${code}\n\n(۱۰ دقیقه معتبر است)`, html: codeMail(subject, intro, code), isAlert: false });
 const clientIp = (req) => req.headers.get('cf-connecting-ip') || (req.headers.get('x-forwarded-for') || '').split(',')[0].trim() || 'local';
 const limits = async (req, env, email, kind, n) => {
   await rateLimit(env, `${kind}:${email}`, n, 900, true);
@@ -588,8 +591,7 @@ async function checkEmail(req, env) {
   if (!isEmail(email) || email.length > 120) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await rateLimit(env, `chk_ip:${clientIp(req)}`, 25, 900, true);
   await rateLimit(env, `chk_em:${clientIp(req)}:${email}`, 12, 900, true);
-  const adminEmail = getAdminEmail(env);
-  const isAdminEmail = email === adminEmail;
+  const isAdminEmail = isEmailAdmin(env, email);
   let u = null;
   if (env.DB) {
     try {
@@ -613,6 +615,7 @@ async function checkEmail(req, env) {
 }
 
 async function registerStart(req, env) {
+  getAuthSecret(env);
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const st = await getAdminSettingsObj(env);
   if (st && st.allowNewRegistrations === false) {
@@ -624,14 +627,17 @@ async function registerStart(req, env) {
   if (!okPass(b.password)) throw new HttpError(400, 'رمز عبور باید حداقل ۸ کاراکتر باشد.');
   if (cleanEmail(b.password) === email) throw new HttpError(400, 'رمز عبور نمی‌تواند برابر با آدرس ایمیل باشد.');
   await limits(req, env, email, 'reg', 3);
+  await rateLimit(env, `otp_hour:${email}`, 5, 3600, true);
   const ex = await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
-  try {
-    if (ex) await sendMail(env, { to, subject: 'حساب دارایی من از قبل وجود دارد', text: 'با این ایمیل قبلاً ثبت‌نام شده است. وارد شو یا از «فراموشی رمز عبور» استفاده کن.', html: mailShell('حساب از قبل وجود دارد', '<p style="color:#444;line-height:1.9">با این ایمیل قبلاً ثبت‌نام شده است. وارد شو یا اگر رمز را فراموش کرده‌ای از «فراموشی رمز عبور» استفاده کن.</p>') });
-    else await mailCode(env, email, 'کد تأیید ثبت‌نام', 'برای تکمیل ثبت‌نام در دارایی من این کد را وارد کن.', await issueCode(env, email, 'register', { name, hash: await hashPassword(b.password, env) }));
-  } catch (e) { throw mailFailed(e); }
+  if (!ex) {
+    try {
+      await mailCode(env, email, 'کد تأیید ثبت‌نام', 'برای تکمیل ثبت‌نام در دارایی من این کد را وارد کن.', await issueCode(env, email, 'register', { name, hash: await hashPassword(b.password, env) }));
+    } catch (e) { throw mailFailed(e); }
+  }
   return json({ ok: true });
 }
 async function registerVerify(req, env, url) {
+  getAuthSecret(env);
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const b = await readJson(req), email = cleanEmail(b.email);
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
@@ -640,17 +646,18 @@ async function registerVerify(req, env, url) {
   if (await env.DB.prepare('SELECT 1 AS x FROM users WHERE email=?').bind(email).first()) throw new HttpError(409, 'این ایمیل قبلاً ثبت شده است.');
   const id = rand(12);
   await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(id, email, p.name, p.hash, nowS()).run();
-  const isAdmin = email === getAdminEmail(env);
+  const isAdmin = isEmailAdmin(env, email);
   const userObj = { email, name: p.name || email.split('@')[0], isAdmin, role: isAdmin ? 'admin' : 'user' };
   const sess = await sessionCookie(env, url, id, userObj);
   return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
 }
 async function login(req, env, url) {
+  getAuthSecret(env);
   const b = await readJson(req), email = cleanEmail(b.email);
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await limits(req, env, email, 'login', 10);
   const adminEmail = getAdminEmail(env);
-  const isAdminEmail = email === adminEmail;
+  const isAdminEmail = isEmailAdmin(env, email);
   const rawPass = String(b.password || '').slice(0, 128);
   if (!rawPass) throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
   const configuredAdminPass = getConfiguredAdminPassword(env);
@@ -660,9 +667,9 @@ async function login(req, env, url) {
     throw new HttpError(403, 'حساب کاربری شما مسدود شده است.');
   }
 
-  // راه‌اندازی اولیه یا ورود مدیر کل فقط در صورتی که ADMIN_PASSWORD مستقل و امن در تنظیمات کلادفلر تعریف شده باشد
+  // راه‌اندازی اولیه یا ورود مدیر کل فقط در صورتی که ADMIN_EMAIL و ADMIN_PASSWORD مستقل و امن در تنظیمات کلادفلر تعریف شده باشد
   if (isAdminEmail && (!u || !u.password_hash) && configuredAdminPass && teq(rawPass.trim(), configuredAdminPass)) {
-    let adminId = u?.id || 'admin_a_h_sh';
+    let adminId = u?.id || 'admin_root';
     if (env.DB) {
       try {
         const passHash = await hashPassword(configuredAdminPass, env);
@@ -681,19 +688,30 @@ async function login(req, env, url) {
   if (!dbPassValid && !envAdminValid) {
     throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
   }
-  const uid = u?.id || (isAdminEmail ? 'admin_a_h_sh' : ('u_' + email));
+  if (dbPassValid && u && u.password_hash && env.DB) {
+    const parsedHash = parsePbkdf2Hash(u.password_hash);
+    if (parsedHash && parsedHash.iter < iterOf(env)) {
+      try {
+        const upgradedHash = await hashPassword(rawPass, env);
+        await env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(upgradedHash, u.id).run();
+      } catch {}
+    }
+  }
+  const uid = u?.id || (isAdminEmail ? 'admin_root' : ('u_' + email));
   const userObj = { email: u?.email || email, name: u?.name || (isAdminEmail ? 'مدیر کل دارایی' : email.split('@')[0]), isAdmin: isAdminEmail, role: isAdminEmail ? 'admin' : 'user' };
   const sess = await sessionCookie(env, url, uid, userObj);
   return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
 }
 async function resetStart(req, env) {
+  getAuthSecret(env);
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const email = cleanEmail((await readJson(req)).email);
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await limits(req, env, email, 'rst', 3);
+  await rateLimit(env, `otp_hour:${email}`, 5, 3600, true);
   const u = await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
   if (!u) {
-    throw new HttpError(404, 'user_not_found');
+    return json({ ok: true });
   }
   try {
     await mailCode(env, email, 'کد بازیابی رمز عبور', 'برای تعیین رمز عبور جدید این کد را وارد کن.', await issueCode(env, email, 'reset', null));
@@ -703,6 +721,7 @@ async function resetStart(req, env) {
   return json({ ok: true });
 }
 async function resetVerify(req, env) {
+  getAuthSecret(env);
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const b = await readJson(req), email = cleanEmail(b.email);
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
@@ -713,6 +732,7 @@ async function resetVerify(req, env) {
   return json({ ok: true, resetToken: token });
 }
 async function resetFinish(req, env, url) {
+  getAuthSecret(env);
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const b = await readJson(req), email = cleanEmail(b.email);
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
@@ -726,13 +746,19 @@ async function resetFinish(req, env, url) {
   const used = await env.DB.prepare("DELETE FROM otp_codes WHERE email=? AND purpose='reset_ok' AND code_hash=? RETURNING email").bind(email, row.code_hash).first();
   if (!used) throw new HttpError(400, 'این درخواست قبلاً استفاده شده است.');
   await env.DB.batch([env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(await hashPassword(b.password, env), u.id), env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(u.id), env.DB.prepare("DELETE FROM otp_codes WHERE email=? AND purpose='reset_ok'").bind(email)]);
-  for (const [k, v] of sessionUserCache) { if (v?.user?.id === u.id) sessionUserCache.delete(k); }
-  const isAdmin = email === getAdminEmail(env);
+  for (const [k, v] of sessionUserCache) {
+    if (v?.user?.id === u.id || v?.user?.email === email) {
+      sessionUserCache.delete(k);
+      markSessionRevoked(k);
+    }
+  }
+  const isAdmin = isEmailAdmin(env, email);
   const userObj = { email, name: u.name || email.split('@')[0], isAdmin, role: isAdmin ? 'admin' : 'user' };
   const sess = await sessionCookie(env, url, u.id, userObj);
   return json({ ok: true, user: userObj }, 200, { 'set-cookie': sess.cookie });
 }
 async function googleStart(env, url) {
+  getAuthSecret(env);
   if (!env.GOOGLE_CLIENT_ID || !env.GOOGLE_CLIENT_SECRET || !env.DB) {
     return new Response(null, {
       status: 302,
@@ -747,6 +773,7 @@ async function googleStart(env, url) {
 }
 function decodeJwt(t) { const p = t.split('.')[1]; const bin = atob(p.replace(/-/g, '+').replace(/_/g, '/')); return JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)))); }
 async function googleCallback(env, url, req) {
+  getAuthSecret(env);
   const fail = (code) => new Response(null, { status: 302, headers: { location: `/?auth_error=${code}`, 'cache-control': 'no-store' } });
   if (url.searchParams.get('error')) return fail('denied');
   if (!env.DB) return fail('invalid');
@@ -775,25 +802,13 @@ async function readJson(req) {
   text += decoder.decode();
   try { const o = JSON.parse(text || '{}'); if (!o || typeof o !== 'object' || Array.isArray(o)) throw 0; return o; } catch { throw new HttpError(400, 'درخواست نامعتبر است.'); }
 }
-const num = (v) => (typeof v === 'number' || typeof v === 'string') && v !== '' ? Number(v) : NaN;
-const str = (v, n) => (typeof v === 'string' ? v.slice(0, n) : '');
-export function cleanData(b) {
-  const known = (id) => typeof id === 'string' && /^[a-z0-9]{1,20}$/.test(id);
-  const holdings = (Array.isArray(b.holdings) ? b.holdings : []).slice(0, 500).map((h) => h && ({ id: /^[A-Za-z0-9_-]{1,40}$/.test(h.id) ? h.id : '', assetId: h.assetId, qty: num(h.qty), buyPrice: num(h.buyPrice), fee: num(h.fee ?? 0), side: ['buy', 'sell', 'transfer'].includes(h.side) ? h.side : 'buy', wallet: str(h.wallet, 60), toWallet: str(h.toWallet, 60), createdAt: num(h.createdAt) || 0, date: str(h.date, 10), note: str(h.note, 200) }))
-    .filter((h) => h && h.id && known(h.assetId) && h.qty > 0 && h.buyPrice > 0 && h.fee >= 0 && Number.isFinite(h.qty + h.buyPrice + h.fee));
-  const watch = [...new Set(Array.isArray(b.watch) ? b.watch : [])].filter(known).slice(0, 50);
-  const featured = [...new Set(Array.isArray(b.featured) ? b.featured : [])].filter(known).slice(0, 24);
-  const alerts = (Array.isArray(b.alerts) ? b.alerts : []).slice(0, 50).map((a) => a && ({ id: /^[A-Za-z0-9_-]{1,40}$/.test(a.id) ? a.id : '', assetId: a.assetId, direction: a.direction, price: num(a.price), currency: ['USDT', 'USD', 'IRT'].includes(a.currency) ? a.currency : 'IRT', triggeredAt: num(a.triggeredAt) > 0 ? Math.floor(num(a.triggeredAt)) : null }))
-    .filter((a) => a && a.id && known(a.assetId) && (a.direction === 'above' || a.direction === 'below') && a.price > 0 && Number.isFinite(a.price));
-  const s = b.settings && typeof b.settings === 'object' ? b.settings : {};
-  const settings = { theme: s.theme === 'dark' ? 'dark' : 'light', unit: s.unit === 'rial' ? 'rial' : 'toman', privacy: !!s.privacy, filter: ['all', 'currency', 'gold', 'crypto', 'global'].includes(s.filter) ? s.filter : 'all' };
-  return { holdings, watch, featured, alerts, settings };
-}
-async function loadData(env, uid) {
+export async function loadData(env, uid, forceDb = false) {
   if (!env.DB) return { exists: false, updatedAt: 0, data: { holdings: [], watch: [], featured: [], alerts: [], settings: {} } };
   const now = nowS();
-  const cached = userDataCache.get(uid);
-  if (cached && now < cached.exp) return cached.val;
+  if (!forceDb) {
+    const cached = userDataCache.get(uid);
+    if (cached && now < cached.exp) return cached.val;
+  }
   const d = await env.DB.prepare('SELECT holdings,watch,featured,settings,updated_at FROM user_data WHERE user_id=?').bind(uid).first();
   const al = await env.DB.prepare(`SELECT a.id,asset_id,direction,price,triggered_at,a.attempts,COALESCE(c.currency,'IRT') AS currency FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id WHERE user_id=? ORDER BY created_at,a.id`).bind(uid).all();
   const alerts = (al.results || []).map((a) => ({ id: a.id.slice(uid.length + 1), assetId: a.asset_id, direction: a.direction, price: a.price, currency: a.currency, attempts: a.attempts, triggeredAt: a.triggered_at ? a.triggered_at * 1000 : null }));
@@ -802,50 +817,78 @@ async function loadData(env, uid) {
   userDataCache.set(uid, { val: res, exp: now + 900 });
   return res;
 }
-function validateTransactions(records) {
-  const balances = new Map();
-  for (const h of records.map((x, i) => ({ ...x, _i: i })).sort((a, b) => a.date.localeCompare(b.date) || (a.createdAt || a._i) - (b.createdAt || b._i))) {
-    const key = h.assetId + ':' + (h.wallet || 'اصلی'), balance = balances.get(key) || 0;
-    if (h.side === 'buy') balances.set(key, balance + h.qty);
-    else {
-      if (balance + 1e-10 < h.qty) throw new HttpError(400, 'موجودی کیف پول برای این معامله کافی نیست.');
-      balances.set(key, balance - h.qty);
-      if (h.side === 'transfer') { if (!h.toWallet || h.toWallet === (h.wallet || 'اصلی')) throw new HttpError(400, 'کیف پول مقصد معتبر نیست.'); const to = h.assetId + ':' + h.toWallet; balances.set(to, (balances.get(to) || 0) + h.qty); }
-    }
-  }
-}
-async function saveData(env, uid, body) {
+export async function saveData(env, uid, body) {
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
-  const c = cleanData(body); validateTransactions(c.holdings); const t = Date.now() * 1000 + randInt(1000);
+  const c = cleanData(body);
+  try {
+    validateTransactions(c.holdings);
+  } catch (e) {
+    throw new HttpError(400, e?.message || 'معامله معتبر نیست.');
+  }
   if (c.holdings.length !== (body.holdings || []).length || c.alerts.length !== (body.alerts || []).length) throw new HttpError(400, 'بعضی رکوردها معتبر نیستند؛ داده ذخیره نشد.');
   if (new Set(c.holdings.map(x => x.id)).size !== c.holdings.length || new Set(c.alerts.map(x => x.id)).size !== c.alerts.length) throw new HttpError(400, 'شناسه تکراری است.');
 
+  const hasBaseRev = body.baseRevision !== undefined && body.baseRevision !== null;
+  const baseRev = hasBaseRev ? Number(body.baseRevision) : null;
+  const curRow = await env.DB.prepare('SELECT updated_at FROM user_data WHERE user_id=?').bind(uid).first();
+  const currentRev = curRow ? (Number(curRow.updated_at) || 0) : 0;
+
+  if (hasBaseRev && (!Number.isFinite(baseRev) || baseRev !== currentRev)) {
+    const latest = await loadData(env, uid, true);
+    throw new HttpError(409, 'نسخه داده‌های شما قدیمی است؛ اطلاعات جدید دریافت شد.', { data: latest.data, updatedAt: latest.updatedAt });
+  }
+
+  const t = Math.max(Date.now() * 1000 + randInt(1000), currentRev + 1);
   const prev = await loadData(env, uid);
 
   const prevAlertsSig = JSON.stringify((prev.data?.alerts || []).map(a => [a.id, a.assetId, a.direction, a.price, a.currency, Boolean(a.triggeredAt)]));
   const newAlertsSig = JSON.stringify(c.alerts.map(a => [a.id, a.assetId, a.direction, a.price, a.currency, Boolean(a.triggeredAt)]));
   const alertsChanged = prevAlertsSig !== newAlertsSig;
 
-  const stmts = [
-    env.DB.prepare('INSERT INTO user_data(user_id,holdings,watch,featured,settings,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET holdings=excluded.holdings,watch=excluded.watch,featured=excluded.featured,settings=excluded.settings,updated_at=excluded.updated_at')
-      .bind(uid, JSON.stringify(c.holdings), JSON.stringify(c.watch), JSON.stringify(c.featured), JSON.stringify(c.settings), t)
-  ];
+  const hJson = JSON.stringify(c.holdings);
+  const wJson = JSON.stringify(c.watch);
+  const fJson = JSON.stringify(c.featured);
+  const sJson = JSON.stringify(c.settings);
 
+  const alertStmts = [];
   if (alertsChanged) {
     const ids = c.alerts.map(a => uid + ':' + a.id);
-    stmts.push(env.DB.prepare(`DELETE FROM alerts WHERE user_id=?${ids.length ? ' AND id NOT IN (' + ids.map(() => '?').join(',') + ')' : ''}`).bind(uid, ...ids));
+    alertStmts.push(env.DB.prepare(`DELETE FROM alerts WHERE user_id=?${ids.length ? ' AND id NOT IN (' + ids.map(() => '?').join(',') + ')' : ''}`).bind(uid, ...ids));
     for (const a of c.alerts) {
       const aid = uid + ':' + a.id;
       const trigSec = a.triggeredAt ? (a.triggeredAt > 2000000000 ? Math.floor(a.triggeredAt / 1000) : Math.floor(a.triggeredAt)) : null;
       const same = 'alerts.asset_id=excluded.asset_id AND alerts.direction=excluded.direction AND alerts.price=excluded.price';
-      stmts.push(env.DB.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,triggered_at,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET triggered_at=CASE WHEN ${same} THEN COALESCE(alerts.triggered_at,excluded.triggered_at) ELSE excluded.triggered_at END,attempts=CASE WHEN ${same} THEN alerts.attempts ELSE 0 END,asset_id=excluded.asset_id,direction=excluded.direction,price=excluded.price WHERE alerts.user_id=excluded.user_id`).bind(aid, uid, a.assetId, a.direction, a.price, trigSec, nowS()));
-      stmts.push(env.DB.prepare(`INSERT INTO alert_units(alert_id,currency) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET currency=excluded.currency`).bind(aid, a.currency));
+      alertStmts.push(env.DB.prepare(`INSERT INTO alerts(id,user_id,asset_id,direction,price,triggered_at,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET triggered_at=CASE WHEN ${same} THEN COALESCE(alerts.triggered_at,excluded.triggered_at) ELSE excluded.triggered_at END,attempts=CASE WHEN ${same} THEN alerts.attempts ELSE 0 END,asset_id=excluded.asset_id,direction=excluded.direction,price=excluded.price WHERE alerts.user_id=excluded.user_id`).bind(aid, uid, a.assetId, a.direction, a.price, trigSec, nowS()));
+      alertStmts.push(env.DB.prepare(`INSERT INTO alert_units(alert_id,currency) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET currency=excluded.currency`).bind(aid, a.currency));
     }
+  }
+
+  if (hasBaseRev) {
+    const wr = currentRev === 0
+      ? await env.DB.prepare('INSERT OR IGNORE INTO user_data(user_id,holdings,watch,featured,settings,updated_at) VALUES(?,?,?,?,?,?)')
+          .bind(uid, hJson, wJson, fJson, sJson, t).run()
+      : await env.DB.prepare('UPDATE user_data SET holdings=?,watch=?,featured=?,settings=?,updated_at=? WHERE user_id=? AND updated_at=?')
+          .bind(hJson, wJson, fJson, sJson, t, uid, currentRev).run();
+    if (!wr || !wr.meta || wr.meta.changes !== 1) {
+      const latest = await loadData(env, uid, true);
+      throw new HttpError(409, 'نسخه داده‌های شما قدیمی است؛ اطلاعات جدید دریافت شد.', { data: latest.data, updatedAt: latest.updatedAt });
+    }
+    if (alertStmts.length) {
+      await env.DB.batch(alertStmts);
+    }
+  } else {
+    const stmts = [
+      env.DB.prepare('INSERT INTO user_data(user_id,holdings,watch,featured,settings,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET holdings=excluded.holdings,watch=excluded.watch,featured=excluded.featured,settings=excluded.settings,updated_at=excluded.updated_at')
+        .bind(uid, hJson, wJson, fJson, sJson, t),
+      ...alertStmts
+    ];
+    await env.DB.batch(stmts);
+  }
+
+  if (alertsChanged) {
     hasActiveAlertsCache = c.alerts.some(a => !a.triggeredAt) ? true : null;
     hasActiveAlertsCacheTime = nowS();
   }
-
-  await env.DB.batch(stmts);
 
   const prevAlertsMap = new Map((prev.data?.alerts || []).map(a => [a.id, a]));
   const mergedAlerts = c.alerts.map(a => {
@@ -867,13 +910,18 @@ async function deleteAccount(env, user) {
   for (const [k, v] of sessionUserCache) {
     if (v?.user?.id === user.id || v?.val?.id === user.id) {
       sessionUserCache.delete(k);
-      revokedSessionsCache.add(k);
+      markSessionRevoked(k);
     }
   }
   if (!env.DB) return;
   await env.DB.batch([
-    env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(user.id), env.DB.prepare('DELETE FROM user_data WHERE user_id=?').bind(user.id),
-    env.DB.prepare('DELETE FROM alerts WHERE user_id=?').bind(user.id), env.DB.prepare('DELETE FROM otp_codes WHERE email=?').bind(user.email),
+    env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(user.id),
+    env.DB.prepare('DELETE FROM user_data WHERE user_id=?').bind(user.id),
+    env.DB.prepare('DELETE FROM alert_units WHERE alert_id IN (SELECT id FROM alerts WHERE user_id=?)').bind(user.id),
+    env.DB.prepare('DELETE FROM alert_state WHERE alert_id IN (SELECT id FROM alerts WHERE user_id=?)').bind(user.id),
+    env.DB.prepare('DELETE FROM alert_delivery WHERE alert_id IN (SELECT id FROM alerts WHERE user_id=?)').bind(user.id),
+    env.DB.prepare('DELETE FROM alerts WHERE user_id=?').bind(user.id),
+    env.DB.prepare('DELETE FROM otp_codes WHERE email=?').bind(user.email),
     env.DB.prepare('DELETE FROM users WHERE id=?').bind(user.id),
   ]);
 }
@@ -1227,13 +1275,16 @@ export async function recordD1DomesticHistory(env, items, now = nowS(), forceCro
   lastD1HistoryWriteTime = now;
 
   try {
-    // اگر حافظه آخرین نقاط D1 خالی است، یک بار آخرین نقطه هر دارایی را از D1 بخوان تا از نوشتن قیمت‌های تکراری جلوگیری شود
+    // اگر حافظه آخرین نقاط D1 خالی است، یک بار آخرین نقطه هر دارایی را با PK از D1 بخوان تا از نوشتن قیمت‌های تکراری و اسکن کامل جدول جلوگیری شود
     if (lastD1RecordedMap.size === 0) {
       try {
-        const rows = await env.DB.prepare(
-          'SELECT asset_id, t, price FROM price_history_v2 WHERE t >= ? GROUP BY asset_id HAVING t = MAX(t)'
-        ).bind(now - 86400).all();
-        for (const r of (rows?.results || [])) {
+        const batchRes = await env.DB.batch(
+          D1_HISTORY_ASSET_IDS.map((id) =>
+            env.DB.prepare('SELECT asset_id,t,price FROM price_history_v2 WHERE asset_id=? ORDER BY t DESC LIMIT 1').bind(id)
+          )
+        );
+        for (const res of (batchRes || [])) {
+          const r = res && res.results && res.results[0];
           if (r && r.asset_id && Number(r.price) > 0) {
             lastD1RecordedMap.set(r.asset_id, { price: Number(r.price), t: Number(r.t) });
           }
@@ -2243,9 +2294,9 @@ export async function checkAlerts(env, items) {
     hasActiveAlertsCacheTime = t;
   } catch { return 0; }
 
-  const canSendMail = Boolean(env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET || env.RESEND_API_KEY && env.MAIL_FROM || env.EMAIL && env.MAIL_FROM);
+  const canSendMail = Boolean(env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET || env.RESEND_API_KEY || env.EMAIL);
   let sent = 0;
-  const rows = (await env.DB.prepare(`SELECT a.id,a.user_id,a.asset_id,a.direction,a.price,a.attempts,COALESCE(c.currency,'IRT') AS currency,COALESCE(g.version,'legacy') AS version,u.email,u.name FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id LEFT JOIN alert_state g ON g.alert_id=a.id JOIN users u ON u.id=a.user_id LEFT JOIN alert_delivery d ON d.alert_id=a.id WHERE a.triggered_at IS NULL AND a.attempts<5 AND COALESCE(d.retry_at,0)<=unixepoch() AND COALESCE(d.lease_until,0)<=unixepoch()`).all()).results;
+  const rows = (await env.DB.prepare(`SELECT a.id,a.user_id,a.asset_id,a.direction,a.price,a.attempts,COALESCE(c.currency,'IRT') AS currency,COALESCE(g.version,'legacy') AS version,u.email,u.name FROM alerts a LEFT JOIN alert_units c ON c.alert_id=a.id LEFT JOIN alert_state g ON g.alert_id=a.id JOIN users u ON u.id=a.user_id LEFT JOIN alert_delivery d ON d.alert_id=a.id WHERE a.triggered_at IS NULL AND a.attempts<5 AND COALESCE(d.retry_at,0)<=? AND COALESCE(d.lease_until,0)<=?`).bind(t, t).all()).results;
   for (const a of rows) {
     let cur = items[a.asset_id];
     if (!cur || (cur.crypto && a.asset_id !== 'usdt' && cur.unit !== 'USDT') || isPriceItemStale(cur, a.asset_id, t)) continue;
@@ -2275,14 +2326,18 @@ export async function checkAlerts(env, items) {
         to: a.email,
         subject: `هشدار قیمت: ${name}`,
         text: `${name} به ${dir} ${fa(a.price)} ${unit} رسید. قیمت فعلی: ${fa(cur.price)} ${unit}.`,
-        html: mailShell(`هشدار قیمت ${name}`, `<p style="color:#444;line-height:1.9">${esc(name)} <b>${dir} ${fa(a.price)} ${unit}</b> رسید.</p><p style="font-size:22px;font-weight:800;color:#17231e;margin:6px 0">${fa(cur.price)} <span style="font-size:13px">${unit}</span></p><p style="font-size:12px;color:#8a8f88">این هشدار فقط یک بار ارسال می‌شود. برای فعال‌سازی دوباره، آن را در برنامه ویرایش کن.</p>${btn(env.APP_URL || '#', 'باز کردن دارایی من')}`)
+        html: mailShell(`هشدار قیمت ${name}`, `<p style="color:#444;line-height:1.9">${esc(name)} <b>${dir} ${fa(a.price)} ${unit}</b> رسید.</p><p style="font-size:22px;font-weight:800;color:#17231e;margin:6px 0">${fa(cur.price)} <span style="font-size:13px">${unit}</span></p><p style="font-size:12px;color:#8a8f88">این هشدار فقط یک بار ارسال می‌شود. برای فعال‌سازی دوباره، آن را در برنامه ویرایش کن.</p>${btn(env.APP_URL || '#', 'باز کردن دارایی من')}`),
+        isAlert: true
       });
       await env.DB.prepare("UPDATE alerts SET triggered_at=? WHERE id=? AND triggered_at IS NULL AND asset_id=? AND price=? AND direction=? AND COALESCE((SELECT version FROM alert_state WHERE alert_id=alerts.id),'legacy')=?").bind(t, a.id, a.asset_id, a.price, a.direction, a.version).run();
       if (a.user_id) userDataCache.delete(a.user_id);
       sent++;
     } catch (e) {
       console.error('alert mail failed', e.message);
-      await env.DB.batch([env.DB.prepare("UPDATE alerts SET triggered_at=?,attempts=attempts+1 WHERE id=?").bind(t, a.id), env.DB.prepare('UPDATE alert_delivery SET lease_until=0,retry_at=? WHERE alert_id=?').bind(t + Math.min(3600, 60 * 2 ** a.attempts), a.id)]);
+      await env.DB.batch([
+        env.DB.prepare("UPDATE alerts SET attempts=attempts+1,triggered_at=CASE WHEN attempts+1>=5 THEN ? ELSE triggered_at END WHERE id=?").bind(t, a.id),
+        env.DB.prepare('UPDATE alert_delivery SET lease_until=0,retry_at=? WHERE alert_id=?').bind(t + Math.min(3600, 60 * 2 ** a.attempts), a.id)
+      ]);
       if (a.user_id) userDataCache.delete(a.user_id);
     }
   }
@@ -2323,17 +2378,20 @@ export async function refreshMeta(env) {
   if (env.DB) {
     const t = nowS();
     const keepDays = Math.max(3, Math.min(14, Number(env.PRICE_HISTORY_DAYS) || 7));
-    try {
-      await env.DB.batch([
-        env.DB.prepare('DELETE FROM sessions WHERE expires_at<?').bind(t),
-        env.DB.prepare('DELETE FROM otp_codes WHERE expires_at<?').bind(t),
-        env.DB.prepare('DELETE FROM oauth_states WHERE expires_at<?').bind(t),
-        env.DB.prepare('DELETE FROM rate_limits WHERE reset_at<?').bind(t),
-        env.DB.prepare("DELETE FROM kv WHERE k LIKE 'h:%' AND updated_at<?").bind(t - 86400),
-        env.DB.prepare('DELETE FROM price_history_v2 WHERE t < ?').bind(t - keepDays * 86400)
-      ]);
-    } catch (e) {
-      console.error('cleanup failed', e?.message);
+    const cleanups = [
+      () => env.DB.prepare('DELETE FROM sessions WHERE expires_at<?').bind(t).run(),
+      () => env.DB.prepare('DELETE FROM otp_codes WHERE expires_at<?').bind(t).run(),
+      () => env.DB.prepare('DELETE FROM oauth_states WHERE expires_at<?').bind(t).run(),
+      () => env.DB.prepare('DELETE FROM rate_limits WHERE reset_at<?').bind(t).run(),
+      () => env.DB.prepare("DELETE FROM kv WHERE k LIKE 'h:%' AND updated_at<?").bind(t - 86400).run(),
+      () => env.DB.prepare('DELETE FROM price_history_v2 WHERE t < ?').bind(t - keepDays * 86400).run()
+    ];
+    for (const runCleanup of cleanups) {
+      try {
+        await runCleanup();
+      } catch (e) {
+        console.error('cleanup failed', e?.message);
+      }
     }
   }
 }
@@ -2597,15 +2655,11 @@ async function route(req, env, url, ctx) {
   }
 
   if (p === '/api/health' && m === 'GET') {
-    return json({
-      ok: true,
-      database: !!env.DB,
-      kv: hasPricesKv(env) ? 'bound' : 'unbound_optional',
-      google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
-      email: !!(env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET || env.RESEND_API_KEY && env.MAIL_FROM),
-      marketOpen: isTehranMarketOpen(nowS()),
-      time: nowS()
-    }, 200, corsHeaders);
+    return json({ ok: true, time: nowS() }, 200, corsHeaders);
+  }
+
+  if (p === '/api/auth/config' && m === 'GET') {
+    return json({ ok: true, google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) }, 200, corsHeaders);
   }
 
   // دریافت لحظه‌ای قیمت‌ها: کش کوتاه‌مدت کنترل‌شده (۲۰ ثانیه) + بازیابی از KV Snapshot در Cold Start
@@ -2718,8 +2772,8 @@ async function route(req, env, url, ctx) {
       const baseSid = rawToken.split('.')[0];
       const h = await sha256(baseSid);
       const hFull = await sha256(rawToken);
-      revokedSessionsCache.add(h);
-      revokedSessionsCache.add(hFull);
+      markSessionRevoked(h);
+      markSessionRevoked(hFull);
       sessionUserCache.delete(h);
       sessionUserCache.delete(hFull);
       if (env.DB) {
@@ -2733,8 +2787,7 @@ async function route(req, env, url, ctx) {
 
   function requireAdmin(user) {
     if (!user) throw new HttpError(401, 'لطفاً ابتدا به حساب مدیریت وارد شوید.');
-    const adminEmail = getAdminEmail(env);
-    if (!user.isAdmin && (user.email || '').toLowerCase() !== adminEmail) {
+    if (!user.isAdmin && !isEmailAdmin(env, user.email)) {
       throw new HttpError(403, 'دسترسی فقط برای مدیر کل دارایی مجاز است.');
     }
   }
@@ -2805,13 +2858,20 @@ async function route(req, env, url, ctx) {
       const totalDomestic = Object.values(curItems).filter(i => i.kind === 'domestic').length;
       return json({
         ok: true,
+        system: {
+          database: !!env.DB,
+          kv: hasPricesKv(env) ? 'bound' : 'unbound_optional',
+          google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
+          email: !!(env.MAIL_WEBHOOK_URL && env.MAIL_WEBHOOK_SECRET || env.RESEND_API_KEY || env.EMAIL),
+          marketOpen: isTehranMarketOpen(now)
+        },
         stats: {
           totalUsers,
           activeUsers,
           trackedHoldings,
           totalAlerts,
-          uptimeSeconds: 86400,
-          memoryMb: 16,
+          uptimeSeconds: null,
+          memoryMb: null,
           totalMarkets: Object.keys(curItems).length,
           totalCrypto,
           totalDomestic,
@@ -2957,7 +3017,7 @@ async function route(req, env, url, ctx) {
             usersList = rows.results.map((r) => {
               let hCount = 0;
               try { hCount = JSON.parse(r.rawHoldings || '[]').length; } catch {}
-              const isAdm = (r.email && r.email.toLowerCase() === adminEmail);
+              const isAdm = isEmailAdmin(env, r.email);
               const isSusp = suspendedSet.has(String(r.id).toLowerCase()) || suspendedSet.has(String(r.email || '').toLowerCase());
               return {
                 id: r.id,
@@ -2975,9 +3035,9 @@ async function route(req, env, url, ctx) {
           console.error('admin users list err:', e?.message);
         }
       }
-      if (!usersList.length) {
+      if (!usersList.length && adminEmail) {
         usersList = [{
-          id: 'admin_a_h_sh',
+          id: 'admin_root',
           email: adminEmail,
           name: 'مدیر کل دارایی',
           role: 'admin',
@@ -2991,18 +3051,19 @@ async function route(req, env, url, ctx) {
     }
 
     if (p === '/api/admin/users/add' && m === 'POST') {
+      if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
       const b = await readJson(req);
       const email = cleanEmail(b.email), name = String(b.name || '').trim().slice(0, 40);
       if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
       const pass = String(b.password || '').trim();
       if (!okPass(pass)) throw new HttpError(400, 'رمز عبور باید حداقل ۸ کاراکتر باشد.');
       if (cleanEmail(pass) === email) throw new HttpError(400, 'رمز عبور نمی‌تواند برابر با ایمیل باشد.');
+      const existing = await env.DB.prepare('SELECT 1 FROM users WHERE email=?').bind(email).first();
+      if (existing) throw new HttpError(409, 'این ایمیل قبلاً ثبت شده است.');
       const id = rand(12);
-      if (env.DB) {
-        const passHash = await hashPassword(pass, env);
-        await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash, name=excluded.name').bind(id, email, name || email.split('@')[0], passHash, nowS()).run();
-      }
-      const isAdm = email === getAdminEmail(env);
+      const passHash = await hashPassword(pass, env);
+      await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(id, email, name || email.split('@')[0], passHash, nowS()).run();
+      const isAdm = isEmailAdmin(env, email);
       return json({ ok: true, user: { id, email, name: name || email.split('@')[0], role: isAdm ? 'admin' : 'user', status: 'active' } });
     }
 
@@ -3010,19 +3071,21 @@ async function route(req, env, url, ctx) {
       if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
       const b = await readJson(req);
       const newPass = String(b.newPassword || b.password || '').trim();
-      const adminEmail = getAdminEmail(env);
+      const adminEmail = getAdminEmail(env) || cleanEmail(user.email);
+      if (!adminEmail) throw new HttpError(400, 'ایمیل مدیر تعریف نشده است.');
       if (!okPass(newPass)) throw new HttpError(400, 'رمز عبور جدید باید حداقل ۸ کاراکتر باشد.');
       if (cleanEmail(newPass) === adminEmail) throw new HttpError(400, 'رمز عبور مدیر نمی‌تواند برابر با ایمیل باشد.');
       const passHash = await hashPassword(newPass, env);
-      const adminId = user.id || 'admin_a_h_sh';
+      const existingAdmin = await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(adminEmail).first();
+      const adminId = existingAdmin?.id || user.id || 'admin_root';
       await env.DB.batch([
         env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, adminEmail, 'مدیر کل دارایی', passHash, nowS()),
-        env.DB.prepare('DELETE FROM sessions WHERE user_id=?').bind(adminId)
+        env.DB.prepare('DELETE FROM sessions WHERE user_id IN (?, ?)').bind(adminId, user.id || adminId)
       ]);
       for (const [k, v] of sessionUserCache) {
-        if (v?.user?.id === adminId || v?.user?.email === adminEmail) {
+        if (v?.user?.id === adminId || v?.user?.id === user.id || v?.user?.email === adminEmail) {
           sessionUserCache.delete(k);
-          revokedSessionsCache.add(k);
+          markSessionRevoked(k);
         }
       }
       const sess = await sessionCookie(env, url, adminId, { email: adminEmail, name: 'مدیر کل دارایی', isAdmin: true, role: 'admin' });
@@ -3033,7 +3096,7 @@ async function route(req, env, url, ctx) {
       const targetId = decodeURIComponent(p.split('/')[4] || '').trim().toLowerCase();
       if (!targetId) throw new HttpError(400, 'شناسه کاربر نامعتبر است.');
       const adminEmail = getAdminEmail(env);
-      if (targetId === 'admin_a_h_sh' || targetId === adminEmail || targetId === String(user.id || '').toLowerCase()) {
+      if (targetId === 'admin_root' || targetId === 'admin_a_h_sh' || (adminEmail && targetId === adminEmail) || targetId === String(user.id || '').toLowerCase()) {
         throw new HttpError(400, 'امکان مسدودسازی حساب مدیر کل وجود ندارد.');
       }
       const susp = await getSuspendedUsers(env);
@@ -3050,7 +3113,7 @@ async function route(req, env, url, ctx) {
         for (const [k, v] of sessionUserCache) {
           if (String(v?.user?.id || '').toLowerCase() === targetId || String(v?.user?.email || '').toLowerCase() === targetId) {
             sessionUserCache.delete(k);
-            revokedSessionsCache.add(k);
+            markSessionRevoked(k);
           }
         }
       }
@@ -3080,11 +3143,7 @@ async function route(req, env, url, ctx) {
     if (p === '/api/admin/logs' && m === 'GET') {
       return json({
         ok: true,
-        logs: [
-          { time: 'هم‌اکنون', type: 'system', msg: 'هسته امنیتی Cloudflare Worker فعال و آماده پردازش معاملات است.' },
-          { time: '۵ دقیقه قبل', type: 'auth', msg: 'بررسی خودکار نشست‌ها و توکن‌های امنیتی انجام شد.' },
-          { time: '۱۰ دقیقه قبل', type: 'system', msg: 'به‌روزرسانی موفق نرخ‌های طلا، ارز و رمزارز از منابع معتبر' }
-        ]
+        logs: []
       });
     }
 
@@ -3131,6 +3190,8 @@ async function route(req, env, url, ctx) {
       env.DB.prepare('INSERT INTO alert_state(alert_id,version) VALUES(?,?) ON CONFLICT(alert_id) DO UPDATE SET version=excluded.version').bind(id, rand(16))
     ]);
     userDataCache.delete(user.id);
+    hasActiveAlertsCache = true;
+    hasActiveAlertsCacheTime = nowS();
     return json({ ok: true });
   }
   if (p === '/api/me/data' && m === 'GET') return json(await loadData(env, user.id));
@@ -3204,7 +3265,7 @@ export default {
       try {
         return await route(req, env, url, ctx);
       } catch (e) {
-        if (e instanceof HttpError) return json({ error: e.message }, e.status);
+        if (e instanceof HttpError) return json({ error: e.message, ...(e.extra && typeof e.extra === 'object' ? e.extra : {}) }, e.status);
         console.error('unhandled route error:', e && e.stack || e);
         return json({ error: 'خطای داخلی سرور رخ داده است.' }, 500);
       }
@@ -3227,7 +3288,7 @@ export default {
           'pragma': 'no-cache',
           'expires': '0',
           ...SEC_HEADERS,
-          'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; connect-src 'self' https: wss://stream.binance.com:443 wss://data-stream.binance.vision; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+          'content-security-policy': PROD_CSP
         }
       });
     }

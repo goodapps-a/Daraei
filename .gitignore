@@ -11,4 +11,4 @@ cached-prices.json
 cached-intraday-history.json
 .wrangler/
 .dev.vars
-
+public/worker.js

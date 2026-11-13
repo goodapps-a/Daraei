@@ -52,7 +52,7 @@ function tex(gl,src){var t=gl.createTexture();gl.bindTexture(gl.TEXTURE_2D,t);gl
  var an=gl.getExtension('EXT_texture_filter_anisotropic');if(an)gl.texParameterf(gl.TEXTURE_2D,an.TEXTURE_MAX_ANISOTROPY_EXT,4);return t}
 function sideCanvas(){var c=document.createElement('canvas');c.width=64;c.height=128;var x=c.getContext('2d'),g=x.createLinearGradient(0,0,0,128);
  g.addColorStop(0,'#eaeaea');g.addColorStop(1,'#e0e0e0');x.fillStyle=g;x.fillRect(0,0,64,128);return c}
-function run(o){o=o||{};var SP=o.speed||1.25;var isDark=false;try{isDark=document.documentElement.dataset.theme==='dark';}catch(e){}var clearRgb=isDark?[0.0431,0.0510,0.0667]:[1,1,1];var bgHex=isDark?'#0b0d11':'#fff';var gold=o.theme==='gold',ink=gold?[.15,.1,.04]:[.11,.137,.165],inkC=isDark?'#f4f6fa':(gold?'#261a08':'#1c232a');var ov=document.getElementById('coin-splash'),fin=false,raf=0,gl=null,cv,txt,spans=[],shown=0;
+function run(o){o=o||{};var SP=o.speed||1.25;var isDark=false;try{isDark=document.documentElement.dataset.theme==='dark';}catch(e){}var clearRgb=isDark?[0.0431,0.0510,0.0667]:[1,1,1];var bgHex=isDark?'#0b0d11':'#fff';var gold=o.theme==='gold',ink=isDark?[.52,.35,.06]:(gold?[.15,.1,.04]:[.11,.137,.165]),edgeInk=isDark?[.91,.71,.20]:ink,inkC=isDark?'#f3c65f':(gold?'#261a08':'#1c232a');var ov=document.getElementById('coin-splash'),fin=false,raf=0,gl=null,cv,txt,spans=[],shown=0;
  if(!ov){ov=document.createElement('div');ov.id='coin-splash';document.body.appendChild(ov)}
  ov.style.cssText='position:fixed;inset:0;z-index:99999;background:'+bgHex+';touch-action:manipulation;opacity:1;overflow:hidden';
  function done(){if(fin)return;fin=true;cancelAnimationFrame(raf);o.onDone&&o.onDone();ov.style.transition='opacity '+(.5/SP)+'s ease';ov.style.opacity='0';
@@ -103,7 +103,7 @@ function run(o){o=o||{};var SP=o.speed||1.25;var isDark=false;try{isDark=documen
    gl.uniform2f(U(pg,'uP'),.34/(1+.7*h),Math.min(.55,.22+.1*h));gl.drawArrays(gl.TRIANGLE_STRIP,0,4);gl.depthMask(true);
    /* uniform-width screen-space outline: black where an empty pixel is within rho (silhouette) or, on faces, where the side is within rho (crease) */
    gl.disable(gl.DEPTH_TEST);gl.useProgram(pq);gl.bindBuffer(gl.ARRAY_BUFFER,qb);var aq=A(pq,'p');gl.enableVertexAttribArray(aq);gl.vertexAttribPointer(aq,2,gl.FLOAT,false,0,0);
-   gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,ft);gl.uniform1i(U(pq,'uT'),0);gl.uniform2f(U(pq,'uPx'),1/Wd,1/Hd);gl.uniform1f(U(pq,'uRho'),.17*rpx);gl.uniform3fv(U(pq,'uInk'),ink);
+   gl.activeTexture(gl.TEXTURE0);gl.bindTexture(gl.TEXTURE_2D,ft);gl.uniform1i(U(pq,'uT'),0);gl.uniform2f(U(pq,'uPx'),1/Wd,1/Hd);gl.uniform1f(U(pq,'uRho'),.17*rpx);gl.uniform3fv(U(pq,'uInk'),edgeInk);
    var hf=rpx*1.15+4;gl.enable(gl.SCISSOR_TEST);gl.scissor(Math.floor((p0[0]*.5+.5)*Wd-hf),Math.floor((p0[1]*.5+.5)*Hd-hf),Math.ceil(2*hf),Math.ceil(2*hf));
    gl.drawArrays(gl.TRIANGLE_STRIP,0,4);gl.disable(gl.SCISSOR_TEST);gl.enable(gl.DEPTH_TEST)}
   if(reduced){draw(END);spans.forEach(function(e){e.style.transform='none'});setTimeout(done,900);return}var t0=performance.now(),at=[TU+.15,TU+.4];

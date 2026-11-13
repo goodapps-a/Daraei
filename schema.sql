@@ -80,8 +80,8 @@ CREATE TABLE IF NOT EXISTS api_keys (
 
 CREATE TABLE IF NOT EXISTS rate_limits (
   k TEXT PRIMARY KEY,
-  n INTEGER NOT NULL,
-  win INTEGER NOT NULL
+  count INTEGER NOT NULL,
+  reset_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS alert_delivery (
@@ -112,3 +112,4 @@ CREATE TABLE IF NOT EXISTS price_history_v2 (
   price REAL NOT NULL,
   PRIMARY KEY (asset_id, t)
 );
+CREATE INDEX IF NOT EXISTS idx_ph2_t ON price_history_v2(t);
