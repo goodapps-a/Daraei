@@ -9232,7 +9232,21 @@ checkSession();const qParams=new URLSearchParams(window.location.search);if(qPar
     const stEl = pill.querySelector('.server-status-state');
     const sepEl = pill.querySelector('.server-status-sep');
     const tmEl = pill.querySelector('.server-status-time');
-    if (stEl) stEl.textContent = 'در حال بروزرسانی قیمت‌ها';
+    if (stEl) {
+      const oldText = stEl.textContent;
+      if (oldText !== 'در حال بروزرسانی قیمت‌ها') {
+        stEl.style.transition = 'opacity 0.25s ease, transform 0.25s cubic-bezier(.22,1,.36,1)';
+        stEl.style.opacity = '0';
+        stEl.style.transform = 'translateY(-4px)';
+        setTimeout(() => {
+          stEl.textContent = 'در حال بروزرسانی قیمت‌ها';
+          stEl.style.opacity = '1';
+          stEl.style.transform = 'translateY(0)';
+        }, 120);
+      } else {
+        stEl.textContent = 'در حال بروزرسانی قیمت‌ها';
+      }
+    }
     if (tmEl) tmEl.textContent = '';
     if (sepEl) sepEl.style.display = 'none';
     topbar.classList.add('is-status-expanded');
