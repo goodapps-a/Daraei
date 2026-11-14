@@ -21,3 +21,20 @@ ALTER TABLE alert_delivery ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE alert_delivery ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE alert_state ADD COLUMN version TEXT NOT NULL DEFAULT 'legacy';
 ALTER TABLE alert_units ADD COLUMN currency TEXT NOT NULL DEFAULT 'IRT';
+
+-- ۴. ثبت وضعیت اجرای مایگریشن 003 در جدول schema_migrations:
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'applied',
+  details TEXT NOT NULL DEFAULT '{}'
+);
+
+INSERT INTO schema_migrations (version, name, applied_at, status, details)
+VALUES ('003_legacy_columns', 'Non-destructive legacy column additions for rate_limits, sessions, and alerts', CAST(strftime('%s', 'now') AS INTEGER), 'applied', '{"file":"003_legacy_columns.sql"}')
+ON CONFLICT(version) DO UPDATE SET
+  name = excluded.name,
+  status = 'applied',
+  applied_at = CASE WHEN schema_migrations.applied_at > 0 THEN schema_migrations.applied_at ELSE excluded.applied_at END;
+

@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   id_hash TEXT PRIMARY KEY,
   user_id TEXT NOT NULL,
   expires_at INTEGER NOT NULL,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS otp_codes (
   payload TEXT,
   expires_at INTEGER NOT NULL,
   attempts INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL,
+  created_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (email, purpose)
 );
 CREATE INDEX IF NOT EXISTS idx_otp_expires ON otp_codes(expires_at);
@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS user_data (
   watch TEXT NOT NULL DEFAULT '[]',
   featured TEXT NOT NULL DEFAULT '[]',
   settings TEXT NOT NULL DEFAULT '{}',
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS alerts (
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS alerts (
   price REAL NOT NULL,
   triggered_at INTEGER,
   attempts INTEGER NOT NULL DEFAULT 0,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(triggered_at);
@@ -64,7 +64,7 @@ CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(triggered_at);
 CREATE TABLE IF NOT EXISTS kv (
   k TEXT PRIMARY KEY,
   v TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS price_history (
@@ -78,7 +78,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
   key_hash TEXT PRIMARY KEY,
   label TEXT,
   active INTEGER NOT NULL DEFAULT 1,
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS rate_limits (
@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS alert_delivery (
 CREATE TABLE IF NOT EXISTS mail_deliveries (
   delivery_id TEXT PRIMARY KEY,
   status TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS alert_units (
@@ -123,6 +123,14 @@ CREATE TABLE IF NOT EXISTS admin_roles (
   email TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'secondary_admin',
   granted_by TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_admin_roles_email ON admin_roles(email);
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'applied',
+  details TEXT NOT NULL DEFAULT '{}'
+);

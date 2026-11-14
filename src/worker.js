@@ -194,6 +194,7 @@ let inMemoryPrimaryAdminLoaded = false;
 let inMemorySecondaryAdmins = null;
 let inMemorySecondaryAdminsTime = 0;
 let adminRolesTableEnsured = false;
+let schemaMigrationsEnsured = false;
 const sessionUserCache = new Map();
 const userDataCache = new Map();
 
@@ -275,6 +276,32 @@ class HttpError extends Error { constructor(status, msg, extra = null) { super(m
 const memRateLimiter = createMemoryRateLimiter(2000);
 let rateLimitSchemaMode = 'standard'; // 'standard' | 'legacy_altered'
 
+async function getTableColumnsSet(env, tableName) {
+  if (!env || !env.DB || !/^[a-zA-Z0-9_]+$/.test(tableName)) return new Set();
+  try {
+    const res = await env.DB.prepare(`PRAGMA table_info(${tableName})`).all();
+    return new Set((res?.results || []).map((c) => String(c.name || '').toLowerCase()).filter(Boolean));
+  } catch {
+    return new Set();
+  }
+}
+
+async function ensureTableColumns(env, tableName, columnSpecs) {
+  const added = [];
+  if (!env || !env.DB || !Array.isArray(columnSpecs) || !columnSpecs.length) return added;
+  const cols = await getTableColumnsSet(env, tableName);
+  for (const [colName, colDef] of columnSpecs) {
+    const lower = String(colName).toLowerCase();
+    if (cols.size > 0 && cols.has(lower)) continue;
+    try {
+      await env.DB.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${colName} ${colDef}`).run();
+      added.push(`${tableName}.${colName}`);
+      cols.add(lower);
+    } catch {}
+  }
+  return added;
+}
+
 async function executeRateLimitDbUpsert(env, key, resetAt, now) {
   const sqlStandard =
     'INSERT INTO rate_limits(k, count, reset_at) VALUES(?, 1, ?) ON CONFLICT(k) DO UPDATE SET count = CASE WHEN rate_limits.reset_at <= ? THEN 1 ELSE rate_limits.count + 1 END, reset_at = CASE WHEN rate_limits.reset_at <= ? THEN excluded.reset_at ELSE rate_limits.reset_at END RETURNING count, reset_at';
@@ -288,10 +315,18 @@ async function executeRateLimitDbUpsert(env, key, resetAt, now) {
     return await env.DB.prepare(sqlStandard).bind(key, resetAt, now, now).first();
   } catch (err) {
     const msg = String(err?.message || '');
+    if (/no such table:\s*rate_limits/i.test(msg)) {
+      try { await env.DB.prepare('CREATE TABLE IF NOT EXISTS rate_limits (k TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, reset_at INTEGER NOT NULL DEFAULT 0)').run(); } catch {}
+      try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_rate_limits_reset ON rate_limits(reset_at)').run(); } catch {}
+      return await env.DB.prepare(sqlStandard).bind(key, resetAt, now, now).first();
+    }
     // اگر جدول قدیمی پروداکشن فقط ستون‌های (k, n, win) را داشته باشد، بدون حذف جدول یا حدس مقادیر، ستون‌های جدید را غیرمخرب اضافه کن
-    if (msg.includes('no column named count') || msg.includes('no column named reset_at')) {
-      try { await env.DB.prepare('ALTER TABLE rate_limits ADD COLUMN count INTEGER NOT NULL DEFAULT 0').run(); } catch {}
-      try { await env.DB.prepare('ALTER TABLE rate_limits ADD COLUMN reset_at INTEGER NOT NULL DEFAULT 0').run(); } catch {}
+    if (msg.includes('no column named count') || msg.includes('no column named reset_at') || /no such column:\s*(?:count|reset_at)/i.test(msg)) {
+      await ensureTableColumns(env, 'rate_limits', [
+        ['count', 'INTEGER NOT NULL DEFAULT 0'],
+        ['reset_at', 'INTEGER NOT NULL DEFAULT 0']
+      ]);
+      try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_rate_limits_reset ON rate_limits(reset_at)').run(); } catch {}
       rateLimitSchemaMode = 'legacy_altered';
       return await env.DB.prepare(sqlLegacyAltered).bind(key, resetAt, now, now).first();
     }
@@ -479,10 +514,14 @@ async function isUserSuspended(env, uid, email, forceFresh = false) {
 async function ensureAdminRolesTable(env) {
   if (!env || !env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   if (adminRolesTableEnsured) return;
-  await env.DB.batch([
-    env.DB.prepare("CREATE TABLE IF NOT EXISTS admin_roles (user_id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'secondary_admin', granted_by TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL)"),
-    env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_admin_roles_email ON admin_roles(email)')
+  await env.DB.prepare("CREATE TABLE IF NOT EXISTS admin_roles (user_id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'secondary_admin', granted_by TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0)").run();
+  await ensureTableColumns(env, 'admin_roles', [
+    ['email', "TEXT NOT NULL DEFAULT ''"],
+    ['role', "TEXT NOT NULL DEFAULT 'secondary_admin'"],
+    ['granted_by', "TEXT NOT NULL DEFAULT ''"],
+    ['created_at', 'INTEGER NOT NULL DEFAULT 0']
   ]);
+  await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_admin_roles_email ON admin_roles(email)').run();
   adminRolesTableEnsured = true;
 }
 async function getSecondaryAdmins(env, forceFresh = false) {
@@ -759,19 +798,52 @@ async function upsertUser(env, { email, name, sub }) {
 async function hmac(env, msg) { return hmacSign(env, msg); }
 const randInt = (n) => { const max = Math.floor(2 ** 32 / n) * n; let x; do { x = crypto.getRandomValues(new Uint32Array(1))[0]; } while (x >= max); return x % n; };
 
+async function ensureLegacyOtpSchema(env) {
+  if (!env || !env.DB) return;
+  try {
+    await env.DB.prepare('CREATE TABLE IF NOT EXISTS otp_codes (email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, payload TEXT, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (email, purpose))').run();
+  } catch {}
+  await ensureTableColumns(env, 'otp_codes', [
+    ['payload', 'TEXT'],
+    ['attempts', 'INTEGER NOT NULL DEFAULT 0'],
+    ['created_at', 'INTEGER NOT NULL DEFAULT 0']
+  ]);
+  try {
+    await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_otp_expires ON otp_codes(expires_at)').run();
+  } catch {}
+}
+
 async function issueCode(env, email, purpose, payload) {
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   const code = String(randInt(1e6)).padStart(6, '0');
-  await env.DB.batch([
-    env.DB.prepare('DELETE FROM otp_codes WHERE email=? AND purpose=?').bind(email, purpose),
-    env.DB.prepare('INSERT INTO otp_codes(email,purpose,code_hash,payload,expires_at,created_at) VALUES(?,?,?,?,?,?)').bind(email, purpose, await hmac(env, `${email}:${purpose}:${code}`), payload ? JSON.stringify(payload) : null, nowS() + 600, nowS())
-  ]);
+  const codeHash = await hmac(env, `${email}:${purpose}:${code}`);
+  const payloadJson = payload ? JSON.stringify(payload) : null;
+  const now = nowS();
+  const runBatch = () =>
+    env.DB.batch([
+      env.DB.prepare('DELETE FROM otp_codes WHERE email=? AND purpose=?').bind(email, purpose),
+      env.DB.prepare('INSERT INTO otp_codes(email,purpose,code_hash,payload,expires_at,created_at) VALUES(?,?,?,?,?,?)').bind(email, purpose, codeHash, payloadJson, now + 600, now)
+    ]);
+  try {
+    await runBatch();
+  } catch (err) {
+    if (!/no such (?:column|table)|has no column/i.test(String(err?.message || ''))) throw err;
+    await ensureLegacyOtpSchema(env);
+    await runBatch();
+  }
   return code;
 }
 async function checkCode(env, email, purpose, code) {
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   code = normCode(code);
-  const row = await env.DB.prepare('UPDATE otp_codes SET attempts=attempts+1 WHERE email=? AND purpose=? AND expires_at>? AND attempts<5 RETURNING code_hash,payload').bind(email, purpose, nowS()).first();
+  let row;
+  try {
+    row = await env.DB.prepare('UPDATE otp_codes SET attempts=attempts+1 WHERE email=? AND purpose=? AND expires_at>? AND attempts<5 RETURNING code_hash,payload').bind(email, purpose, nowS()).first();
+  } catch (err) {
+    if (!/no such (?:column|table)|has no column/i.test(String(err?.message || ''))) throw err;
+    await ensureLegacyOtpSchema(env);
+    row = await env.DB.prepare('UPDATE otp_codes SET attempts=attempts+1 WHERE email=? AND purpose=? AND expires_at>? AND attempts<5 RETURNING code_hash,payload').bind(email, purpose, nowS()).first();
+  }
   if (!row || code.length !== 6) throw new HttpError(400, 'کد نامعتبر یا منقضی شده است؛ کد جدید بگیر.');
   if (!teq(await hmac(env, `${email}:${purpose}:${code}`), row.code_hash)) throw new HttpError(400, 'کد اشتباه است.');
   const used = await env.DB.prepare('DELETE FROM otp_codes WHERE email=? AND purpose=? AND code_hash=? RETURNING email').bind(email, purpose, row.code_hash).first();
@@ -1340,7 +1412,12 @@ export async function saveData(env, uid, body) {
       try {
         await env.DB.batch([...alertStmts, ...alertUnitStmts]);
       } catch {
-        try { await env.DB.batch(alertStmts); } catch {}
+        try {
+          await ensureLegacyAlertSchema(env);
+          await env.DB.batch([...alertStmts, ...alertUnitStmts]);
+        } catch {
+          try { await env.DB.batch(alertStmts); } catch {}
+        }
       }
     }
   } else {
@@ -1352,7 +1429,12 @@ export async function saveData(env, uid, body) {
     try {
       await env.DB.batch([...stmts, ...alertUnitStmts]);
     } catch {
-      await env.DB.batch(stmts);
+      try {
+        await ensureLegacyAlertSchema(env);
+        await env.DB.batch([...stmts, ...alertUnitStmts]);
+      } catch {
+        await env.DB.batch(stmts);
+      }
     }
   }
 
@@ -3011,18 +3093,27 @@ let hasActiveAlertsCacheTime = 0;
 
 async function ensureLegacyAlertSchema(env) {
   if (!env || !env.DB) return;
-  const ddl = [
+  const createStmts = [
     "CREATE TABLE IF NOT EXISTS alert_units (alert_id TEXT PRIMARY KEY, currency TEXT NOT NULL DEFAULT 'IRT')",
     "CREATE TABLE IF NOT EXISTS alert_state (alert_id TEXT PRIMARY KEY, version TEXT NOT NULL DEFAULT 'legacy')",
-    'CREATE TABLE IF NOT EXISTS alert_delivery (alert_id TEXT PRIMARY KEY, lease_until INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0)',
-    "ALTER TABLE alert_units ADD COLUMN currency TEXT NOT NULL DEFAULT 'IRT'",
-    "ALTER TABLE alert_state ADD COLUMN version TEXT NOT NULL DEFAULT 'legacy'",
-    'ALTER TABLE alert_delivery ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0',
-    'ALTER TABLE alert_delivery ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0'
+    'CREATE TABLE IF NOT EXISTS alert_delivery (alert_id TEXT PRIMARY KEY, lease_until INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0)'
   ];
-  for (const sql of ddl) {
+  for (const sql of createStmts) {
     try { await env.DB.prepare(sql).run(); } catch {}
   }
+  await ensureTableColumns(env, 'alerts', [
+    ['triggered_at', 'INTEGER'],
+    ['attempts', 'INTEGER NOT NULL DEFAULT 0'],
+    ['created_at', 'INTEGER NOT NULL DEFAULT 0']
+  ]);
+  await ensureTableColumns(env, 'alert_units', [['currency', "TEXT NOT NULL DEFAULT 'IRT'"]]);
+  await ensureTableColumns(env, 'alert_state', [['version', "TEXT NOT NULL DEFAULT 'legacy'"]]);
+  await ensureTableColumns(env, 'alert_delivery', [
+    ['lease_until', 'INTEGER NOT NULL DEFAULT 0'],
+    ['retry_at', 'INTEGER NOT NULL DEFAULT 0']
+  ]);
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id)').run(); } catch {}
+  try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(triggered_at)').run(); } catch {}
 }
 
 export async function checkAlerts(env, items) {
@@ -3145,8 +3236,160 @@ export async function runCron(env) {
   return { sent };
 }
 
+export async function ensureDatabaseMigrations(env, opts = {}) {
+  if (!env || !env.DB) {
+    return { ok: false, reason: 'no_db', addedColumns: [], appliedMigrations: [] };
+  }
+  const force = Boolean(opts && opts.force);
+  if (!force && schemaMigrationsEnsured) {
+    return { ok: true, cached: true, addedColumns: [], rateLimitSchemaMode, appliedMigrations: ['001_fix', '002_admin_roles', '003_legacy_columns', '004_schema_reconcile'] };
+  }
+
+  const now = nowS();
+  const tableDdls = [
+    "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'applied', details TEXT NOT NULL DEFAULT '{}')",
+    'CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT, google_sub TEXT UNIQUE, password_hash TEXT, created_at INTEGER NOT NULL DEFAULT 0)',
+    'CREATE TABLE IF NOT EXISTS sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL DEFAULT 0)',
+    'CREATE TABLE IF NOT EXISTS otp_codes (email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, payload TEXT, expires_at INTEGER NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (email, purpose))',
+    'CREATE TABLE IF NOT EXISTS oauth_states (state_hash TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires_at INTEGER NOT NULL)',
+    "CREATE TABLE IF NOT EXISTS user_data (user_id TEXT PRIMARY KEY, holdings TEXT NOT NULL DEFAULT '[]', watch TEXT NOT NULL DEFAULT '[]', featured TEXT NOT NULL DEFAULT '[]', settings TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL DEFAULT 0)",
+    'CREATE TABLE IF NOT EXISTS alerts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, direction TEXT NOT NULL, price REAL NOT NULL, triggered_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL DEFAULT 0)',
+    "CREATE TABLE IF NOT EXISTS alert_units (alert_id TEXT PRIMARY KEY, currency TEXT NOT NULL DEFAULT 'IRT' CHECK(currency IN ('IRT','USD','USDT')))",
+    'CREATE TABLE IF NOT EXISTS alert_delivery (alert_id TEXT PRIMARY KEY, lease_until INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0)',
+    "CREATE TABLE IF NOT EXISTS alert_state (alert_id TEXT PRIMARY KEY, version TEXT NOT NULL DEFAULT 'legacy')",
+    'CREATE TABLE IF NOT EXISTS kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0)',
+    'CREATE TABLE IF NOT EXISTS price_history (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY (asset_id, t))',
+    'CREATE TABLE IF NOT EXISTS price_history_v2 (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY (asset_id, t))',
+    'CREATE TABLE IF NOT EXISTS api_keys (key_hash TEXT PRIMARY KEY, label TEXT, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL DEFAULT 0)',
+    'CREATE TABLE IF NOT EXISTS rate_limits (k TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, reset_at INTEGER NOT NULL DEFAULT 0)',
+    'CREATE TABLE IF NOT EXISTS mail_deliveries (delivery_id TEXT PRIMARY KEY, status TEXT NOT NULL, updated_at INTEGER NOT NULL DEFAULT 0)',
+    "CREATE TABLE IF NOT EXISTS admin_roles (user_id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'secondary_admin', granted_by TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL DEFAULT 0)"
+  ];
+
+  for (const sql of tableDdls) {
+    try { await env.DB.prepare(sql).run(); } catch {}
+  }
+
+  const columnMatrix = [
+    ['users', [['name', 'TEXT'], ['google_sub', 'TEXT'], ['password_hash', 'TEXT'], ['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['sessions', [['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['otp_codes', [['payload', 'TEXT'], ['attempts', 'INTEGER NOT NULL DEFAULT 0'], ['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['user_data', [['holdings', "TEXT NOT NULL DEFAULT '[]'"], ['watch', "TEXT NOT NULL DEFAULT '[]'"], ['featured', "TEXT NOT NULL DEFAULT '[]'"], ['settings', "TEXT NOT NULL DEFAULT '{}'"], ['updated_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['alerts', [['triggered_at', 'INTEGER'], ['attempts', 'INTEGER NOT NULL DEFAULT 0'], ['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['alert_units', [['currency', "TEXT NOT NULL DEFAULT 'IRT'"]]],
+    ['alert_delivery', [['lease_until', 'INTEGER NOT NULL DEFAULT 0'], ['retry_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['alert_state', [['version', "TEXT NOT NULL DEFAULT 'legacy'"]]],
+    ['rate_limits', [['count', 'INTEGER NOT NULL DEFAULT 0'], ['reset_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['admin_roles', [['email', "TEXT NOT NULL DEFAULT ''"], ['role', "TEXT NOT NULL DEFAULT 'secondary_admin'"], ['granted_by', "TEXT NOT NULL DEFAULT ''"], ['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['schema_migrations', [['name', "TEXT NOT NULL DEFAULT ''"], ['applied_at', 'INTEGER NOT NULL DEFAULT 0'], ['status', "TEXT NOT NULL DEFAULT 'applied'"], ['details', "TEXT NOT NULL DEFAULT '{}'"]]]
+  ];
+
+  const addedColumns = [];
+  for (const [tbl, specs] of columnMatrix) {
+    const newlyAdded = await ensureTableColumns(env, tbl, specs);
+    addedColumns.push(...newlyAdded);
+  }
+
+  if (addedColumns.includes('users.google_sub')) {
+    try { await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL').run(); } catch {}
+  }
+
+  const rlCols = await getTableColumnsSet(env, 'rate_limits');
+  if (rlCols.has('n') || rlCols.has('win')) {
+    rateLimitSchemaMode = 'legacy_altered';
+  }
+
+  const indexDdls = [
+    'CREATE INDEX IF NOT EXISTS idx_ph2_t ON price_history_v2(t)',
+    'CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)',
+    'CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at)',
+    'CREATE INDEX IF NOT EXISTS idx_otp_expires ON otp_codes(expires_at)',
+    'CREATE INDEX IF NOT EXISTS idx_oauth_expires ON oauth_states(expires_at)',
+    'CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id)',
+    'CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(triggered_at)',
+    'CREATE INDEX IF NOT EXISTS idx_rate_limits_reset ON rate_limits(reset_at)',
+    'CREATE INDEX IF NOT EXISTS idx_admin_roles_email ON admin_roles(email)'
+  ];
+  for (const sql of indexDdls) {
+    try { await env.DB.prepare(sql).run(); } catch {}
+  }
+
+  const migrationsToRecord = [
+    ['001_fix', 'Base tables, alert auxiliary tables, and core indexes', JSON.stringify({ file: '001_fix.sql' })],
+    ['002_admin_roles', 'Secondary and primary admin RBAC table and email index', JSON.stringify({ file: '002_admin_roles.sql' })],
+    ['003_legacy_columns', 'Non-destructive legacy column additions for rate_limits, sessions, and alerts', JSON.stringify({ file: '003_legacy_columns.sql', addedColumns })],
+    ['004_schema_reconcile', 'Idempotent schema, index, and migration tracking reconciliation', JSON.stringify({ file: '004_schema_reconcile.sql', addedColumns, rateLimitSchemaMode, destructive: false })]
+  ];
+  for (const [ver, name, details] of migrationsToRecord) {
+    try {
+      await env.DB.prepare(
+        "INSERT INTO schema_migrations(version, name, applied_at, status, details) VALUES(?, ?, ?, 'applied', ?) ON CONFLICT(version) DO UPDATE SET name=excluded.name, status='applied', details=excluded.details, applied_at=CASE WHEN schema_migrations.applied_at > 0 THEN schema_migrations.applied_at ELSE excluded.applied_at END"
+      ).bind(ver, name, now, details).run();
+    } catch {}
+  }
+
+  schemaMigrationsEnsured = true;
+  adminRolesTableEnsured = true;
+  return {
+    ok: true,
+    cached: false,
+    addedColumns,
+    rateLimitSchemaMode,
+    appliedMigrations: migrationsToRecord.map((m) => m[0])
+  };
+}
+
+export async function getDatabaseMigrationStatus(env) {
+  if (!env || !env.DB) {
+    throw new HttpError(503, 'دیتابیس در دسترس نیست.');
+  }
+  const requiredTables = [
+    'users', 'sessions', 'otp_codes', 'oauth_states', 'user_data', 'alerts',
+    'alert_units', 'alert_delivery', 'alert_state', 'kv', 'price_history',
+    'price_history_v2', 'api_keys', 'rate_limits', 'mail_deliveries', 'admin_roles', 'schema_migrations'
+  ];
+  const requiredIndexes = [
+    'idx_ph2_t', 'idx_sessions_user', 'idx_sessions_expires', 'idx_otp_expires',
+    'idx_oauth_expires', 'idx_alerts_user', 'idx_alerts_active', 'idx_rate_limits_reset', 'idx_admin_roles_email'
+  ];
+
+  let masterRows = [];
+  try {
+    const res = await env.DB.prepare("SELECT type, name, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
+    masterRows = res?.results || [];
+  } catch {}
+
+  const existingTables = new Set(masterRows.filter((r) => r.type === 'table').map((r) => r.name));
+  const existingIndexes = new Set(masterRows.filter((r) => r.type === 'index').map((r) => r.name));
+  const missingTables = requiredTables.filter((t) => !existingTables.has(t));
+  const missingIndexes = requiredIndexes.filter((idx) => !existingIndexes.has(idx));
+
+  const rateLimitsColumns = [...(await getTableColumnsSet(env, 'rate_limits'))];
+  const adminRolesColumns = [...(await getTableColumnsSet(env, 'admin_roles'))];
+
+  let migrations = [];
+  try {
+    const mRes = await env.DB.prepare('SELECT version, name, applied_at, status, details FROM schema_migrations ORDER BY version ASC').all();
+    migrations = mRes?.results || [];
+  } catch {}
+
+  return {
+    ok: true,
+    healthy: missingTables.length === 0 && missingIndexes.length === 0 && rateLimitsColumns.includes('count') && rateLimitsColumns.includes('reset_at'),
+    missingTables,
+    missingIndexes,
+    rateLimitsColumns,
+    adminRolesColumns,
+    rateLimitSchemaMode,
+    migrations
+  };
+}
+
 export async function refreshMeta(env) {
   if (env && env.DB) {
+    try {
+      await ensureDatabaseMigrations(env);
+    } catch {}
     const t = nowS();
     const keepDays = Math.max(3, Math.min(14, Number(env.PRICE_HISTORY_DAYS) || 7));
     const cutoffTs = t - keepDays * 86400;
@@ -3159,8 +3402,10 @@ export async function refreshMeta(env) {
           await env.DB.prepare('DELETE FROM rate_limits WHERE reset_at > 0 AND reset_at < ?').bind(t).run();
         } catch (err) {
           if (!/no such column:\s*reset_at/i.test(String(err?.message || ''))) throw err;
-          try { await env.DB.prepare('ALTER TABLE rate_limits ADD COLUMN count INTEGER NOT NULL DEFAULT 0').run(); } catch {}
-          try { await env.DB.prepare('ALTER TABLE rate_limits ADD COLUMN reset_at INTEGER NOT NULL DEFAULT 0').run(); } catch {}
+          await ensureTableColumns(env, 'rate_limits', [
+            ['count', 'INTEGER NOT NULL DEFAULT 0'],
+            ['reset_at', 'INTEGER NOT NULL DEFAULT 0']
+          ]);
           try { await env.DB.prepare('CREATE INDEX IF NOT EXISTS idx_rate_limits_reset ON rate_limits(reset_at)').run(); } catch {}
         }
       },
@@ -3224,6 +3469,7 @@ export function __resetWorkerStateForTests() {
   inMemoryPrimaryAdminLoaded = false;
   inMemorySystemFeeds = null;
   adminRolesTableEnsured = false;
+  schemaMigrationsEnsured = false;
 }
 
 export function __ageUserDataCacheForTests(secondsAgo = 10) {
@@ -3824,6 +4070,18 @@ async function route(req, env, url, ctx) {
         feeds: [...sysFeeds].sort((a, b) => (a.priority || 0) - (b.priority || 0)).map(formatFeed),
         broadcast: bMsg
       });
+    }
+
+    if (p === '/api/admin/migrations' && m === 'GET') {
+      const status = await getDatabaseMigrationStatus(env);
+      return json(status);
+    }
+
+    if (p === '/api/admin/migrations/run' && m === 'POST') {
+      requirePrimaryAdmin(user);
+      const runResult = await ensureDatabaseMigrations(env, { force: true });
+      const status = await getDatabaseMigrationStatus(env);
+      return json({ ok: true, runResult, status });
     }
 
     if (p === '/api/admin/refresh-prices' && m === 'POST') {

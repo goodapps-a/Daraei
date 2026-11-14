@@ -35,6 +35,8 @@ import worker, {
   recordD1DomesticHistory,
   checkAlerts,
   refreshMeta,
+  ensureDatabaseMigrations,
+  getDatabaseMigrationStatus,
   history,
   __resetWorkerStateForTests,
   __ageUserDataCacheForTests
@@ -1745,4 +1747,130 @@ test('CoinSplash v3 supports white background in light mode and black background
   }
   assert.ok(html.includes("mode: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'"));
 });
+
+test('004_schema_reconcile.sql, ensureDatabaseMigrations, and getDatabaseMigrationStatus are idempotent, non-destructive, and preserve all legacy data', async () => {
+  __resetWorkerStateForTests();
+  const migFiles = [
+    './migrations/001_fix.sql',
+    './migrations/002_admin_roles.sql',
+    './migrations/003_legacy_columns.sql',
+    './migrations/004_schema_reconcile.sql'
+  ];
+
+  // 1. Verify no migration file contains destructive statements (DROP TABLE, DROP COLUMN, TRUNCATE, DELETE FROM)
+  for (const relPath of migFiles) {
+    const rawSql = fs.readFileSync(new URL(relPath, import.meta.url), 'utf8');
+    const codeOnly = rawSql
+      .split(/\r?\n/)
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n');
+    assert.equal(/\b(?:DROP\s+TABLE|DROP\s+COLUMN|TRUNCATE|DELETE\s+FROM)\b/i.test(codeOnly), false, `Destructive SQL found in ${relPath}`);
+  }
+
+  // 2. Verify 004_schema_reconcile.sql is idempotent when executed multiple times on an empty DB
+  const emptyDb = new DatabaseSync(':memory:');
+  const mig004 = fs.readFileSync(new URL('./migrations/004_schema_reconcile.sql', import.meta.url), 'utf8');
+  assert.doesNotThrow(() => emptyDb.exec(mig004));
+  assert.doesNotThrow(() => emptyDb.exec(mig004));
+  assert.doesNotThrow(() => emptyDb.exec(mig004));
+  const trackedInEmpty = emptyDb.prepare('SELECT version, status FROM schema_migrations ORDER BY version').all();
+  assert.ok(trackedInEmpty.some((r) => r.version === '004_schema_reconcile' && r.status === 'applied'));
+
+  // 3. Verify legacy DB with pre-existing users, holdings, alerts, price_history, price_history_v2, kv, and legacy rate_limits(k, n, win)
+  // is upgraded conditionally by ensureDatabaseMigrations without duplicate column errors or data loss
+  const legacyDb = new DatabaseSync(':memory:');
+  const now = Math.floor(Date.now() / 1000);
+  legacyDb.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL);
+    CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE otp_codes (email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, PRIMARY KEY(email, purpose));
+    CREATE TABLE oauth_states (state_hash TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE rate_limits (k TEXT PRIMARY KEY, n INTEGER NOT NULL, win INTEGER NOT NULL);
+    CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE user_data (user_id TEXT PRIMARY KEY, holdings TEXT NOT NULL DEFAULT '[]', watch TEXT NOT NULL DEFAULT '[]', featured TEXT NOT NULL DEFAULT '[]', settings TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL);
+    CREATE TABLE alerts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, direction TEXT NOT NULL, price REAL NOT NULL, created_at INTEGER NOT NULL);
+    CREATE TABLE alert_units (alert_id TEXT PRIMARY KEY);
+    CREATE TABLE alert_state (alert_id TEXT PRIMARY KEY);
+    CREATE TABLE alert_delivery (alert_id TEXT PRIMARY KEY);
+    CREATE TABLE price_history (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY (asset_id, t));
+    CREATE TABLE price_history_v2 (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY (asset_id, t)) WITHOUT ROWID;
+  `);
+
+  legacyDb.prepare('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?)').run('u_keep', 'keep@example.com', 'نگهداری کاربر', now);
+  legacyDb.prepare('INSERT INTO user_data(user_id,holdings,watch,featured,settings,updated_at) VALUES(?,?,?,?,?,?)').run(
+    'u_keep',
+    JSON.stringify([{ id: 'tx_keep', assetId: 'gold18', side: 'buy', qty: 10, buyPrice: 4500000, wallet: 'اصلی', date: '1403/09/01' }]),
+    JSON.stringify(['gold18', 'usd']),
+    JSON.stringify(['gold18']),
+    JSON.stringify({ theme: 'dark', unit: 'toman' }),
+    now
+  );
+  legacyDb.prepare('INSERT INTO alerts(id,user_id,asset_id,direction,price,created_at) VALUES(?,?,?,?,?,?)').run('u_keep:al1', 'u_keep', 'gold18', 'above', 5000000, now);
+  legacyDb.prepare('INSERT INTO price_history(asset_id,t,price) VALUES(?,?,?)').run('usd', now - 7200, 81000);
+  legacyDb.prepare('INSERT INTO price_history_v2(asset_id,t,price) VALUES(?,?,?)').run('usd', now - 3600, 82500);
+  legacyDb.prepare('INSERT INTO rate_limits(k,n,win) VALUES(?,?,?)').run('legacy_rl_key', 4, now + 600);
+  legacyDb.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?)').run('admin_settings', JSON.stringify({ maintenance: false, baseCurrency: 'toman' }), now);
+
+  const { DB } = createSqliteD1Wrapper(legacyDb);
+
+  // First run of ensureDatabaseMigrations adds missing columns and creates missing tables/indexes
+  const firstRun = await ensureDatabaseMigrations({ DB }, { force: true });
+  assert.equal(firstRun.ok, true);
+  assert.equal(firstRun.rateLimitSchemaMode, 'legacy_altered');
+  assert.ok(firstRun.addedColumns.includes('rate_limits.count'));
+  assert.ok(firstRun.addedColumns.includes('rate_limits.reset_at'));
+  assert.ok(firstRun.addedColumns.includes('sessions.created_at'));
+  assert.ok(firstRun.addedColumns.includes('otp_codes.payload'));
+  assert.ok(firstRun.addedColumns.includes('otp_codes.attempts'));
+  assert.ok(firstRun.addedColumns.includes('otp_codes.created_at'));
+  assert.ok(firstRun.addedColumns.includes('alerts.triggered_at'));
+  assert.ok(firstRun.addedColumns.includes('alerts.attempts'));
+  assert.ok(firstRun.addedColumns.includes('alert_units.currency'));
+  assert.ok(firstRun.addedColumns.includes('alert_delivery.lease_until'));
+  assert.ok(firstRun.addedColumns.includes('alert_delivery.retry_at'));
+  assert.ok(firstRun.addedColumns.includes('alert_state.version'));
+  assert.ok(firstRun.addedColumns.includes('users.password_hash'));
+  assert.ok(firstRun.addedColumns.includes('users.google_sub'));
+
+  // Second forced run is 100% idempotent: 0 columns added, no duplicate column errors
+  const secondRun = await ensureDatabaseMigrations({ DB }, { force: true });
+  assert.equal(secondRun.ok, true);
+  assert.deepEqual(secondRun.addedColumns, []);
+
+  // Running 004_schema_reconcile.sql after ensureDatabaseMigrations is also 100% idempotent
+  assert.doesNotThrow(() => legacyDb.exec(mig004));
+
+  // Verify migration status report
+  const status = await getDatabaseMigrationStatus({ DB });
+  assert.equal(status.healthy, true);
+  assert.deepEqual(status.missingTables, []);
+  assert.deepEqual(status.missingIndexes, []);
+  assert.equal(status.migrations.length, 4);
+
+  // Verify 100% of pre-existing user, holdings, alert, price history, kv, and rate_limits data was preserved
+  const keptUser = legacyDb.prepare("SELECT email, name FROM users WHERE id='u_keep'").get();
+  assert.equal(keptUser.email, 'keep@example.com');
+  assert.equal(keptUser.name, 'نگهداری کاربر');
+
+  const keptData = legacyDb.prepare("SELECT holdings, watch, settings FROM user_data WHERE user_id='u_keep'").get();
+  assert.equal(JSON.parse(keptData.holdings)[0].id, 'tx_keep');
+  assert.deepEqual(JSON.parse(keptData.watch), ['gold18', 'usd']);
+  assert.equal(JSON.parse(keptData.settings).theme, 'dark');
+
+  const keptAlert = legacyDb.prepare("SELECT price, attempts FROM alerts WHERE id='u_keep:al1'").get();
+  assert.equal(keptAlert.price, 5000000);
+  assert.equal(keptAlert.attempts, 0);
+
+  const keptPh1 = legacyDb.prepare("SELECT price FROM price_history WHERE asset_id='usd'").get();
+  assert.equal(keptPh1.price, 81000);
+  const keptPh2 = legacyDb.prepare("SELECT price FROM price_history_v2 WHERE asset_id='usd'").get();
+  assert.equal(keptPh2.price, 82500);
+
+  const keptRl = legacyDb.prepare("SELECT n, win, count, reset_at FROM rate_limits WHERE k='legacy_rl_key'").get();
+  assert.equal(keptRl.n, 4);
+  assert.equal(keptRl.win, now + 600);
+  assert.equal(keptRl.count, 0);
+  assert.equal(keptRl.reset_at, 0);
+});
+
 

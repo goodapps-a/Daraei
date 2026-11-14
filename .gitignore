@@ -12,3 +12,5 @@ cached-intraday-history.json
 .wrangler/
 .dev.vars
 public/worker.js
+bun.lock
+bun.lockb

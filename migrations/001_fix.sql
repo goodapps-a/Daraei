@@ -111,6 +111,14 @@ CREATE TABLE IF NOT EXISTS alert_state (
   version TEXT NOT NULL DEFAULT 'legacy'
 );
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'applied',
+  details TEXT NOT NULL DEFAULT '{}'
+);
+
 -- ۲. ایندکس‌های ضروری برای حذف اسکن کامل جدول (Full Table Scan) — همیشه پس از ایجاد جداول
 CREATE INDEX IF NOT EXISTS idx_ph2_t ON price_history_v2(t);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -120,7 +128,12 @@ CREATE INDEX IF NOT EXISTS idx_oauth_expires ON oauth_states(expires_at);
 CREATE INDEX IF NOT EXISTS idx_alerts_user ON alerts(user_id);
 CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(triggered_at);
 
--- ۳. مراحل بعدی مایگریشن:
--- - برای پشتیبانی از ادمین‌های ثانویه در دیتابیس، فایل کاملاً تکرارپذیر migrations/002_admin_roles.sql را اجرا کنید.
--- - در صورتی که دیتابیس قدیمی پروداکشن فاقد ستون‌های جدید در جداول از پیش ساخته‌شده است، فایل migrations/003_legacy_columns.sql را بررسی و تنها دستورات ستون‌های مفقود را اجرا کنید.
+-- ۳. ثبت وضعیت اجرای مایگریشن 001 به صورت تکرارپذیر (Idempotent)
+INSERT INTO schema_migrations (version, name, applied_at, status, details)
+VALUES ('001_fix', 'Base tables, alert auxiliary tables, and core indexes', CAST(strftime('%s', 'now') AS INTEGER), 'applied', '{"file":"001_fix.sql"}')
+ON CONFLICT(version) DO UPDATE SET
+  name = excluded.name,
+  status = 'applied',
+  applied_at = CASE WHEN schema_migrations.applied_at > 0 THEN schema_migrations.applied_at ELSE excluded.applied_at END;
+
 
