@@ -16,6 +16,7 @@ import {
   getPrimaryAdminEmail,
   isEmailAdmin,
   getConfiguredAdminPassword,
+  getAdminSecret,
   extractInlineScriptBodies,
   buildHtmlCsp,
   sha256Hex,
@@ -23,13 +24,14 @@ import {
   createMemoryRateLimiter
 } from './src/modules/security.js';
 import crypto from 'node:crypto';
-import { D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, getStaleThresholdSec, isPriceItemStale } from './src/modules/market-core.js';
+import { D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, getStaleThresholdSec, isPriceItemStale, parseBonbastPayload } from './src/modules/market-core.js';
 import worker, {
   loadData,
   saveData,
   rateLimit,
   writePricesKvSnapshot,
   getPrices,
+  refreshPrices,
   recordD1DomesticHistory,
   checkAlerts,
   refreshMeta,
@@ -1520,4 +1522,227 @@ test('shared security helpers: sha256Hex, hmacHex, createMemoryRateLimiter, getC
   assert.equal(getConfiguredAdminPassword({ ADMIN_EMAILS: 'admin@example.com', ADMIN_PASSWORD: 'StrongAdminPassword!' }), 'StrongAdminPassword!');
   assert.equal(getConfiguredAdminPassword({ ADMIN_EMAILS: 'admin@example.com', ADMIN_PASSWORD: 'admin@example.com' }), null);
   assert.equal(getConfiguredAdminPassword({ ADMIN_PASSWORD: 'StrongAdminPassword!' }), null);
+
+  assert.equal(getAdminSecret({ ADMIN_SECRET: 'RootSecret!2025' }), 'RootSecret!2025');
+  assert.equal(getAdminSecret({ ADMIN_PASSWORD: 'LegacySecret!2025' }), 'LegacySecret!2025');
+  assert.equal(getAdminSecret({ ADMIN_SECRET: 'short' }), null);
+  assert.equal(getAdminSecret({ ADMIN_EMAIL: 'root@example.com', ADMIN_SECRET: 'root@example.com' }), null);
 });
+
+test('first admin is claimed with ADMIN_SECRET while subsequent admins are managed in panel without secrets', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+
+  const env = {
+    DB,
+    AUTH_SECRET: 'test-auth-secret-key-minimum-32-chars!!',
+    ADMIN_SECRET: 'InitialRootSecret#2025'
+  };
+
+  const get = (url, bearer) =>
+    worker.fetch(
+      new Request(url, {
+        method: 'GET',
+        headers: bearer ? { authorization: `Bearer ${bearer}` } : {}
+      }),
+      env
+    );
+  const post = (url, body, bearer) =>
+    worker.fetch(
+      new Request(url, {
+        method: 'POST',
+        headers: {
+          origin: 'https://darayi.example',
+          'content-type': 'application/json',
+          'x-requested-with': 'XMLHttpRequest',
+          ...(bearer ? { authorization: `Bearer ${bearer}` } : {})
+        },
+        body: JSON.stringify(body || {})
+      }),
+      env
+    );
+
+  // Before claim: canClaimPrimaryAdmin is true
+  const cfgBefore = await (await get('https://darayi.example/api/auth/config')).json();
+  assert.equal(cfgBefore.canClaimPrimaryAdmin, true);
+
+  // Wrong secret is rejected with 401
+  const badClaim = await post('https://darayi.example/api/auth/claim-admin', {
+    email: 'owner@example.com',
+    name: 'مدیر اول',
+    secret: 'wrong-secret',
+    password: 'OwnerPass!123'
+  });
+  assert.equal(badClaim.status, 401);
+
+  // Valid claim succeeds and promotes first admin
+  const okClaim = await post('https://darayi.example/api/auth/claim-admin', {
+    email: 'owner@example.com',
+    name: 'مدیر اول',
+    secret: 'InitialRootSecret#2025',
+    password: 'OwnerPass!123'
+  });
+  assert.equal(okClaim.status, 200);
+  const claimBody = await okClaim.json();
+  assert.equal(claimBody.user.isAdmin, true);
+  assert.equal(claimBody.user.isPrimaryAdmin, true);
+  assert.ok(claimBody.token);
+
+  // Config now locks claim endpoint
+  const cfgAfter = await (await get('https://darayi.example/api/auth/config')).json();
+  assert.equal(cfgAfter.canClaimPrimaryAdmin, false);
+
+  // Second claim attempt fails closed with 409 even with valid secret
+  const secondClaim = await post('https://darayi.example/api/auth/claim-admin', {
+    email: 'attacker@example.com',
+    secret: 'InitialRootSecret#2025',
+    password: 'AttackPass!123'
+  });
+  assert.equal(secondClaim.status, 409);
+
+  // Primary admin creates a secondary admin directly in the panel (no secret needed)
+  const addSecRes = await post('https://darayi.example/api/admin/users/add', {
+    email: 'co-admin@example.com',
+    name: 'ادمین دوم',
+    password: 'SecondAdminPass!1',
+    role: 'admin'
+  }, claimBody.token);
+  assert.equal(addSecRes.status, 200);
+  const addSecBody = await addSecRes.json();
+  assert.equal(addSecBody.user.role, 'admin');
+  assert.equal(addSecBody.user.isPrimaryAdmin, false);
+
+  // Secondary admin cannot log in with ADMIN_SECRET; must use personal password
+  const secBadLogin = await post('https://darayi.example/api/auth/login', {
+    email: 'co-admin@example.com',
+    password: 'InitialRootSecret#2025'
+  });
+  assert.equal(secBadLogin.status, 401);
+
+  const secOkLogin = await post('https://darayi.example/api/auth/login', {
+    email: 'co-admin@example.com',
+    password: 'SecondAdminPass!1'
+  });
+  assert.equal(secOkLogin.status, 200);
+  const secLoginBody = await secOkLogin.json();
+  assert.equal(secLoginBody.user.isAdmin, true);
+  assert.equal(secLoginBody.user.isPrimaryAdmin, false);
+
+  // Primary admin creates a normal user and promotes them via /role without any secret
+  const addUserRes = await post('https://darayi.example/api/admin/users/add', {
+    email: 'member2@example.com',
+    name: 'کاربر عادی',
+    password: 'MemberPass!123',
+    role: 'user'
+  }, claimBody.token);
+  assert.equal(addUserRes.status, 200);
+  const memberId = (await addUserRes.json()).user.id;
+
+  const promoteRes = await post(`https://darayi.example/api/admin/users/${memberId}/role`, { role: 'admin' }, claimBody.token);
+  assert.equal(promoteRes.status, 200);
+  assert.equal((await promoteRes.json()).user.role, 'admin');
+});
+
+test('parseBonbastPayload & refreshPrices enforce NerkhAra -> Bonbast -> IranMarket domestic API priority', async () => {
+  __resetWorkerStateForTests();
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  // parseBonbastPayload validates reset, staleness, comma formatting, and iqd1 (/100)
+  assert.deepEqual(parseBonbastPayload({ reset: 1, usd1: '85000' }, nowSec).dict, {});
+  assert.deepEqual(parseBonbastPayload({ usd1: '85000', last_modified: '2020-01-01 00:00:00' }, nowSec).dict, {});
+
+  const parsedBb = parseBonbastPayload({
+    usd1: '85,200',
+    eur1: '92,100',
+    gbp1: '108,500',
+    iqd1: '6,525',
+    emami1: '68,000,000',
+    gol18: '5,900,000',
+    last_modified: new Date((nowSec - 60) * 1000).toISOString().replace('T', ' ').slice(0, 19)
+  }, nowSec);
+  assert.equal(parsedBb.dict.usd.price, 85200);
+  assert.equal(parsedBb.dict.eur.price, 92100);
+  assert.equal(parsedBb.dict.iqd.price, 65.25);
+  assert.equal(parsedBb.dict.gold18.price, 5900000);
+  assert.equal(parsedBb.dict.coin.price, 68000000);
+
+  // refreshPrices priority: NerkhAra (1st) -> Bonbast (2nd) -> IranMarket (3rd)
+  const origFetch = globalThis.fetch;
+  const isoNow = new Date(nowSec * 1000).toISOString();
+  const bbLastMod = isoNow.replace('T', ' ').slice(0, 19);
+
+  globalThis.fetch = async (input, init) => {
+    const url = typeof input === 'string' ? input : input?.url || '';
+    if (url === 'https://nerkhara.com/api/v1/latest.json') {
+      // NerkhAra provides usd/eur/gold18, omits gbp so Bonbast should provide gbp before IranMarket
+      return new Response(JSON.stringify({
+        stale: false,
+        generated_utc: isoNow,
+        items: [
+          { id: 'usd', price: 85100, unit: 'IRT', updated_utc: isoNow },
+          { id: 'eur', price: 92000, unit: 'IRT', updated_utc: isoNow },
+          { id: 'gold18', price: 5910000, unit: 'IRT', updated_utc: isoNow }
+        ]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://www.bonbast.com/') {
+      return new Response('<script>var param = "test_param_token_123";</script>', {
+        status: 200,
+        headers: { 'content-type': 'text/html', 'set-cookie': 'sessionid=bb_sess_1; Path=/' }
+      });
+    }
+    if (url === 'https://www.bonbast.com/json') {
+      return new Response(JSON.stringify({
+        usd1: '86000',
+        eur1: '93000',
+        gbp1: '108900',
+        sekkeh1: '68500000',
+        emami1: '69500000',
+        last_modified: bbLastMod
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url === 'https://iran-market.github.io/data/latest-toman.json') {
+      return new Response(JSON.stringify({
+        data: {
+          generated_at: isoNow,
+          categories: {
+            currency: [
+              { symbol: 'GBP_IRR_FREE', price: 105000, timestamp: isoNow },
+              { symbol: 'CHF_IRR_FREE', price: 96500, timestamp: isoNow }
+            ]
+          }
+        }
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({}), { status: 404 });
+  };
+
+  try {
+    const res = await refreshPrices({}, true, true);
+    assert.equal(res.items.usd.src, 'nerkhara');
+    assert.equal(res.items.usd.price, 85100);
+    assert.equal(res.items.eur.src, 'nerkhara');
+    // GBP was omitted by NerkhAra, so Bonbast wins over IranMarket
+    assert.equal(res.items.gbp.src, 'bonbast');
+    assert.equal(res.items.gbp.price, 108900);
+    // CHF was omitted by both NerkhAra and Bonbast, so IranMarket provides it
+    assert.equal(res.items.chf.src, 'iran_market');
+    assert.equal(res.items.chf.price, 96500);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('CoinSplash v3 supports white background in light mode and black background in dark mode', () => {
+  const splashJs = fs.readFileSync(new URL('./public/coin-splash.js', import.meta.url), 'utf8');
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+
+  for (const source of [splashJs, html]) {
+    assert.ok(source.includes("dark?'#000':'#fff'") || (source.includes('#000') && source.includes('#fff')), 'Dark mode black (#000) and light mode white (#fff) backgrounds should be present');
+    assert.ok(source.includes('gl_FragColor=vec4(uCl,uA*exp(-2.6*dot(d,d)))'), 'Gold halo shader FH should be present');
+  }
+  assert.ok(html.includes("mode: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'"));
+});
+

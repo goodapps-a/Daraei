@@ -31,6 +31,56 @@ export const NERKHARA_MAP = {
   silver999: 'silver-999'
 };
 
+export const BONBAST_MAP = {
+  usd: ['usd1', 1],
+  eur: ['eur1', 1],
+  gbp: ['gbp1', 1],
+  aed: ['aed1', 1],
+  try: ['try1', 1],
+  cny: ['cny1', 1],
+  cad: ['cad1', 1],
+  aud: ['aud1', 1],
+  chf: ['chf1', 1],
+  sar: ['sar1', 1],
+  qar: ['qar1', 1],
+  kwd: ['kwd1', 1],
+  omr: ['omr1', 1],
+  iqd: ['iqd1', 100],
+  afn: ['afn1', 1],
+  rub: ['rub1', 1],
+  inr: ['inr1', 1],
+  gold18: ['gol18', 1],
+  gram: ['mithqal', 1],
+  coin: ['emami1', 1],
+  bahar: ['azadi1', 1],
+  halfcoin: ['azadi1_2', 1],
+  quartercoin: ['azadi1_4', 1],
+  gramcoin: ['azadi1g', 1]
+};
+
+export function parseBonbastPayload(data, nowSec = Math.floor(Date.now() / 1000)) {
+  if (!data || typeof data !== 'object' || data.reset) {
+    return { dict: {}, ts: null };
+  }
+  const rawLastMod = typeof data.last_modified === 'string' ? data.last_modified.trim() : '';
+  const ts = rawLastMod
+    ? (parseUtcTimestamp(/\b(?:UTC|GMT|Z)\b/i.test(rawLastMod) ? rawLastMod : `${rawLastMod} UTC`, nowSec) || parseUtcTimestamp(rawLastMod, nowSec))
+    : null;
+  if (ts && (nowSec - ts) > 72 * 3600) {
+    return { dict: {}, ts };
+  }
+  const dict = {};
+  for (const [id, [key, scale]] of Object.entries(BONBAST_MAP)) {
+    const raw = Number(String(data[key] ?? '').replace(/,/g, ''));
+    if (!Number.isFinite(raw) || raw <= 0) continue;
+    const price = scale > 1 ? Number((raw / scale).toFixed(2)) : Math.round(raw);
+    if (Number.isFinite(price) && price > 0) {
+      dict[id] = { price, srcTs: ts };
+    }
+  }
+  return { dict, ts };
+}
+
 export const DOMESTIC_META = {
   usd: { name: 'دلار آمریکا', sym: 'USD', cat: 'currency' },
   eur: { name: 'یورو', sym: 'EUR', cat: 'currency' },

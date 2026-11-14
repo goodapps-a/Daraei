@@ -21,9 +21,9 @@
  * | hasActiveAlertsCache          | D1 (alerts WHERE triggered_at NULL)| 30m (1800s) | جلوگیری از اسکن جدول هشدارها در صورت نبود هشدار فعال  |
  * ============================================================================
  */
-import { NERKHARA_MAP, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale } from './modules/market-core.js';
-import { enc, SEC_HEADERS, PROD_CSP, buildHtmlCsp, b64u, b64uDec, teq, sha256, hmacB64u, createMemoryRateLimiter, cleanEmail, isEmail, okPass, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, getConfiguredAdminPassword, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
-export { cleanData, validateTransactions, isSafePublicUrl, hashPassword, verifyPassword, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin };
+import { NERKHARA_MAP, BONBAST_MAP, parseBonbastPayload, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale } from './modules/market-core.js';
+import { enc, SEC_HEADERS, PROD_CSP, buildHtmlCsp, b64u, b64uDec, teq, sha256, hmacB64u, createMemoryRateLimiter, cleanEmail, isEmail, okPass, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, getConfiguredAdminPassword, getAdminSecret, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
+export { cleanData, validateTransactions, isSafePublicUrl, hashPassword, verifyPassword, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, parseBonbastPayload, getAdminSecret };
 
 export const ASSETS = {
   usd: 'دلار آمریکا', eur: 'یورو', gbp: 'پوند انگلیس', aed: 'درهم امارات', try: 'لیر ترکیه', cad: 'دلار کانادا',
@@ -189,6 +189,8 @@ let lastKvWriteTime = 0;
 let domesticPrevCloseCache = null;
 let domesticPrevCloseTime = 0;
 const ADMIN_ROLE_CACHE_TTL_S = 30;
+let inMemoryPrimaryAdminEmail = null;
+let inMemoryPrimaryAdminLoaded = false;
 let inMemorySecondaryAdmins = null;
 let inMemorySecondaryAdminsTime = 0;
 let adminRolesTableEnsured = false;
@@ -378,8 +380,35 @@ function getAuthSecret(env) {
   }
   throw new HttpError(503, 'تنظیمات امنیتی سرور (AUTH_SECRET) کامل نیست.');
 }
+async function getResolvedPrimaryAdminEmail(env, forceFresh = false) {
+  const envPrimary = getPrimaryAdminEmail(env);
+  if (envPrimary) return envPrimary;
+  if (!forceFresh && inMemoryPrimaryAdminLoaded) return inMemoryPrimaryAdminEmail || '';
+  let found = '';
+  if (env && env.DB) {
+    try {
+      const row = await env.DB.prepare("SELECT v FROM kv WHERE k='primary_admin_email'").first();
+      if (row && row.v) {
+        const parsed = cleanEmail(JSON.parse(row.v));
+        if (isEmail(parsed)) found = parsed;
+      }
+    } catch {}
+    if (!found) {
+      try {
+        const roleRow = await env.DB.prepare("SELECT email FROM admin_roles WHERE role='primary_admin' LIMIT 1").first();
+        if (roleRow && roleRow.email) {
+          const parsed = cleanEmail(roleRow.email);
+          if (isEmail(parsed)) found = parsed;
+        }
+      } catch {}
+    }
+  }
+  inMemoryPrimaryAdminEmail = found || null;
+  inMemoryPrimaryAdminLoaded = true;
+  return found;
+}
 async function canInheritLegacyAdminRoot(env, uid) {
-  const primary = getPrimaryAdminEmail(env);
+  const primary = await getResolvedPrimaryAdminEmail(env);
   if (!primary || !env || !env.DB || uid === 'admin_root') return false;
   const uRow = await env.DB.prepare('SELECT email FROM users WHERE id=? LIMIT 1').bind(uid).first();
   if (!uRow || cleanEmail(uRow.email) !== primary) return false;
@@ -469,6 +498,7 @@ async function getSecondaryAdmins(env, forceFresh = false) {
   try {
     const res = await env.DB.prepare('SELECT user_id, email, role, granted_by, created_at FROM admin_roles').all();
     for (const r of (res?.results || [])) {
+      if (r.role === 'primary_admin') continue;
       const em = cleanEmail(r.email);
       const uid = String(r.user_id || '').toLowerCase();
       const entry = {
@@ -497,7 +527,7 @@ async function getSecondaryAdmins(env, forceFresh = false) {
 async function resolveAdminStatus(env, uid, email, forceFresh = false) {
   const em = cleanEmail(email);
   const uidLower = String(uid || '').toLowerCase();
-  const primaryAdm = getPrimaryAdminEmail(env);
+  const primaryAdm = await getResolvedPrimaryAdminEmail(env, forceFresh);
   const isPrimaryAdmin = Boolean(em && primaryAdm && em === primaryAdm);
   if (isPrimaryAdmin) {
     return { isAdmin: true, isPrimaryAdmin: true, adminTier: 'primary', envPinned: true, role: 'admin' };
@@ -562,7 +592,7 @@ async function verifySignedToken(env, rawToken) {
     const data = JSON.parse(jsonStr);
     if (!data || !data.email || !Number.isFinite(data.exp) || data.exp <= nowS()) return null;
     const emailLower = cleanEmail(data.email);
-    const liveIsAdmin = isEmailAdmin(env, emailLower);
+    const liveIsAdmin = isEmailAdmin(env, emailLower) || (inMemoryPrimaryAdminLoaded && inMemoryPrimaryAdminEmail === emailLower);
     return { sid, user: { id: data.id || ('u_' + emailLower), email: emailLower, name: data.name || emailLower.split('@')[0], isAdmin: liveIsAdmin } };
   } catch {
     return null;
@@ -628,7 +658,7 @@ async function currentUser(req, env, opts = {}) {
     }
 
     if (!sRow.id && sRow.user_id === 'admin_root') {
-      const primaryAdm = getPrimaryAdminEmail(env);
+      const primaryAdm = await getResolvedPrimaryAdminEmail(env, fresh);
       if (primaryAdm && cleanEmail(verified.user.email) === primaryAdm) {
         admRow = await env.DB.prepare('SELECT id,email,name FROM users WHERE email=? LIMIT 1').bind(primaryAdm).first();
       }
@@ -640,7 +670,7 @@ async function currentUser(req, env, opts = {}) {
 
   let u = (sRow.id && sRow.email) ? { id: sRow.id, email: sRow.email, name: sRow.name } : null;
   if (!u && sRow.user_id === 'admin_root') {
-    const primaryAdm = getPrimaryAdminEmail(env);
+    const primaryAdm = await getResolvedPrimaryAdminEmail(env, fresh);
     if (primaryAdm && cleanEmail(verified.user.email) === primaryAdm) {
       u = admRow || { id: 'admin_root', email: primaryAdm, name: 'مدیر کل دارایی' };
     }
@@ -785,7 +815,9 @@ async function checkEmail(req, env) {
   if (!isEmail(email) || email.length > 120) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await rateLimit(env, `chk_ip:${clientIp(req)}`, 25, 900, true);
   await rateLimit(env, `chk_em:${clientIp(req)}:${email}`, 12, 900, true);
-  const isAdminEmail = isEmailAdmin(env, email);
+  const primaryAdm = await getResolvedPrimaryAdminEmail(env);
+  const isEnvAdminEmail = isEmailAdmin(env, email);
+  const isPrimaryOrEnvAdmin = isEnvAdminEmail || Boolean(primaryAdm && email === primaryAdm);
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   let u = null;
   try {
@@ -794,11 +826,11 @@ async function checkEmail(req, env) {
     console.error('checkEmail D1 error:', err?.message);
     throw new HttpError(503, 'خطا در بررسی وضعیت حساب در دیتابیس.');
   }
-  if (u || isAdminEmail) {
+  if (u || isPrimaryOrEnvAdmin) {
     return json({
       ok: true,
       exists: true,
-      hasPassword: Boolean(u?.password_hash || (isAdminEmail && getConfiguredAdminPassword(env))),
+      hasPassword: Boolean(u?.password_hash || (isEnvAdminEmail && getConfiguredAdminPassword(env))),
       hasGoogle: Boolean(u?.google_sub)
     });
   }
@@ -853,7 +885,7 @@ async function login(req, env, url) {
   const b = await readJson(req), email = cleanEmail(b.email);
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await limits(req, env, email, 'login', 10);
-  const primaryAdm = getPrimaryAdminEmail(env);
+  const primaryAdm = await getResolvedPrimaryAdminEmail(env, true);
   const isEnvAdminEmail = isEmailAdmin(env, email);
   const rawPass = String(b.password || '').slice(0, 128);
   if (!rawPass) throw new HttpError(401, 'ایمیل یا رمز عبور اشتباه است.');
@@ -923,6 +955,66 @@ async function login(req, env, url) {
     role: admStatus.role
   };
   const sess = await sessionCookie(env, url, uid, userObj);
+  return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
+}
+async function claimPrimaryAdmin(req, env, url) {
+  getAuthSecret(env);
+  if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
+  await rateLimit(env, `ip:claim_admin:${clientIp(req)}`, 10, 900, true);
+  const configuredSecret = getAdminSecret(env);
+  if (!configuredSecret) {
+    throw new HttpError(403, 'سیکرت مدیر کل روی سرور تنظیم نشده است.');
+  }
+  const b = await readJson(req);
+  const secret = String(b.secret || '').trim();
+  if (!secret || !teq(secret, configuredSecret)) {
+    throw new HttpError(401, 'سیکرت ادمین کل نامعتبر است.');
+  }
+  const existingPrimary = await getResolvedPrimaryAdminEmail(env, true);
+  await ensureAdminRolesTable(env);
+  let rolePrimary = null;
+  try {
+    rolePrimary = await env.DB.prepare("SELECT email FROM admin_roles WHERE role='primary_admin' LIMIT 1").first();
+  } catch {}
+  if (existingPrimary || rolePrimary) {
+    throw new HttpError(409, 'مدیر اصلی سیستم قبلاً انتخاب شده است. ادمین‌های بعدی فقط از داخل پنل مدیریت تعریف می‌شوند.');
+  }
+
+  const email = cleanEmail(b.email);
+  if (!isEmail(email) || email.length > 120) throw new HttpError(400, 'ایمیل معتبر نیست.');
+  const rawName = String(b.name || '').trim().slice(0, 40);
+  if (rawName && rawName.length < 2) throw new HttpError(400, 'نام باید حداقل ۲ کاراکتر باشد.');
+  const password = String(b.password || '').slice(0, 128);
+  if (!okPass(password)) throw new HttpError(400, 'رمز عبور باید حداقل ۸ کاراکتر باشد.');
+  if (cleanEmail(password) === email) throw new HttpError(400, 'رمز عبور نمی‌تواند برابر با آدرس ایمیل باشد.');
+
+  const existingUser = await env.DB.prepare('SELECT id,email,name FROM users WHERE email=?').bind(email).first();
+  if (existingUser && await isUserSuspended(env, existingUser.id, email, true)) {
+    throw new HttpError(403, 'حساب کاربری شما مسدود شده است.');
+  }
+  let adminId = existingUser?.id || '';
+  if (!adminId) {
+    const rootOwner = await env.DB.prepare("SELECT email FROM users WHERE id='admin_root' LIMIT 1").first();
+    adminId = (!rootOwner || cleanEmail(rootOwner.email) === email) ? 'admin_root' : rand(12);
+  }
+  const adminName = rawName || existingUser?.name || 'مدیر کل دارایی';
+  const passHash = await hashPassword(password, env);
+  const tNow = nowS();
+
+  await env.DB.batch([
+    env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET name=excluded.name, password_hash=excluded.password_hash').bind(adminId, email, adminName, passHash, tNow),
+    env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('primary_admin_email',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify(email), tNow),
+    env.DB.prepare("INSERT OR REPLACE INTO admin_roles(user_id,email,role,granted_by,created_at) VALUES(?,?,'primary_admin','secret_claim',?)").bind(adminId, email, tNow)
+  ]);
+
+  inMemoryPrimaryAdminEmail = email;
+  inMemoryPrimaryAdminLoaded = true;
+  invalidateAdminRoleCache();
+  inMemoryAdminStats = null;
+  inMemoryAdminStatsTime = 0;
+
+  const userObj = { id: adminId, email, name: adminName, isAdmin: true, isPrimaryAdmin: true, adminTier: 'primary', role: 'admin' };
+  const sess = await sessionCookie(env, url, adminId, userObj);
   return json({ ok: true, user: userObj, token: sess.token }, 200, { 'set-cookie': sess.cookie });
 }
 async function resetStart(req, env) {
@@ -1288,7 +1380,7 @@ export async function saveData(env, uid, body) {
 }
 async function deleteAccount(env, user) {
   const emailLower = cleanEmail(user?.email || '');
-  const primaryAdm = getPrimaryAdminEmail(env);
+  const primaryAdm = await getResolvedPrimaryAdminEmail(env, true);
   if (user && (user.isPrimaryAdmin || (primaryAdm && emailLower === primaryAdm) || String(user.id || '').toLowerCase() === 'admin_root')) {
     throw new HttpError(403, 'حساب مدیر اصلی سیستم قابل حذف نیست.');
   }
@@ -1836,6 +1928,50 @@ async function queryD1DomesticHistory(env, id, sinceTs) {
   }
 }
 
+async function fetchBonbastData(nowSec = nowS()) {
+  try {
+    const pageRes = await fetch('https://www.bonbast.com/', {
+      headers: {
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+      },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!pageRes.ok) return { dict: {}, ts: null };
+    const html = await pageRes.text();
+    const paramMatch = /param\s*:\s*["']([^"']+)["']/.exec(html) || /param\s*=\s*["']([^"']+)["']/.exec(html);
+    const param = paramMatch && paramMatch[1];
+    if (!param) return { dict: {}, ts: null };
+
+    const setCookies = typeof pageRes.headers.getSetCookie === 'function'
+      ? pageRes.headers.getSetCookie()
+      : (pageRes.headers.get('set-cookie') ? [pageRes.headers.get('set-cookie')] : []);
+    const cookieHeader = setCookies
+      .map((c) => String(c).split(';')[0].trim())
+      .filter(Boolean)
+      .join('; ');
+
+    const postRes = await fetch('https://www.bonbast.com/json', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        origin: 'https://www.bonbast.com',
+        referer: 'https://www.bonbast.com/',
+        'x-requested-with': 'XMLHttpRequest',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        ...(cookieHeader ? { cookie: cookieHeader } : {})
+      },
+      body: 'param=' + encodeURIComponent(param),
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!postRes.ok) return { dict: {}, ts: null };
+    const data = await postRes.json();
+    return parseBonbastPayload(data, nowSec);
+  } catch {
+    return { dict: {}, ts: null };
+  }
+}
+
 export async function refreshPrices(env, force = false, skipSideEffects = false) {
   if (inFlightRefreshJob) {
     return await inFlightRefreshJob;
@@ -1885,14 +2021,23 @@ export async function refreshPrices(env, force = false, skipSideEffects = false)
     const domestic = async () => {
       if (!force && t - (feeds.domestic?.checkedAt || 0) < 15 && feeds.domestic?.ok && feeds.tether?.ok) return;
 
-      // واکشی هم‌زمان منابع اصلی برای سرعت بالا: ایران‌مارکت و نرخ‌آرا
-      const [imResult, naResult] = await Promise.allSettled([
-        fetchJSON('https://iran-market.github.io/data/latest-toman.json', 5),
-        fetchJSON('https://nerkhara.com/api/v1/latest.json', 5)
+      let feedActiveMap = new Map();
+      try {
+        const sysFeeds = await getSystemFeeds(env);
+        feedActiveMap = new Map(sysFeeds.map((f) => [f.id, f.status === 'active']));
+      } catch {}
+      const isFeedOn = (id) => (feedActiveMap.has(id) ? feedActiveMap.get(id) : true);
+
+      // واکشی هم‌زمان منابع داخلی: نرخ‌آرا (اول)، بن‌بست (دوم) و ایران‌مارکت (سوم)
+      const [imResult, naResult, bbResult] = await Promise.allSettled([
+        isFeedOn('f_nerkh') ? fetchJSON('https://iran-market.github.io/data/latest-toman.json', 5) : Promise.resolve(null),
+        isFeedOn('f_nerkhara') ? fetchJSON('https://nerkhara.com/api/v1/latest.json', 5) : Promise.resolve(null),
+        isFeedOn('f_bonbast') ? fetchBonbastData(t) : Promise.resolve({ dict: {}, ts: null })
       ]);
 
       const imData = imResult.status === 'fulfilled' ? imResult.value : null;
       const naData = naResult.status === 'fulfilled' ? naResult.value : null;
+      const bbDict = (bbResult.status === 'fulfilled' && bbResult.value && bbResult.value.dict) ? bbResult.value.dict : {};
 
       // دیکشنری نرخ‌آرا با بررسی دقیق stale، unit و updated_utc
       const naDict = {};
@@ -2026,12 +2171,13 @@ export async function refreshPrices(env, force = false, skipSideEffects = false)
         source: usdtSourceUsed || feeds.tether?.source || null
       };
 
-      // --- ب) تصمیم‌گیری مستقل برای تک‌تک دارایی‌های داخلی (۲۶ دارایی ارز، طلا و سکه) ---
+      // --- ب) تصمیم‌گیری مستقل برای تک‌تک دارایی‌های داخلی (نرخ‌آرا -> بن‌بست -> ایران‌مارکت -> نرخ‌سنج -> پرشین‌تولباکس) ---
       const prevClosesMap = await getDomesticPrevCloses();
       const resolvedDomesticIds = new Set();
       const sourcesSummary = {};
       const nerkharaHasUsdEur = Boolean(naDict.usd && naDict.eur);
-      const iranMarketHasUsdEur = Boolean(imDict.USD && imDict.EUR);
+      const bonbastHasUsdEur = Boolean(bbDict.usd && bbDict.eur);
+      const iranMarketHasUsdEur = Boolean(imDict.USD_IRR_FREE && imDict.EUR_IRR_FREE);
 
       for (const id of ALL_DOMESTIC_IDS) {
         const meta = DOMESTIC_META[id];
@@ -2040,8 +2186,8 @@ export async function refreshPrices(env, force = false, skipSideEffects = false)
 
         const imItem = imSym ? imDict[imSym] : null;
         const naItem = naKey ? naDict[naKey] : null;
+        const bbItem = BONBAST_MAP[id] ? bbDict[id] : null;
 
-        // اولویت اصلی با نرخ‌آرا (آخرین API اضافه‌شده) و تضمین منبع یکسان برای دلار و یورو
         let chosen = null;
         const buildNerkhara = (item) => ({
           src: 'nerkhara',
@@ -2055,6 +2201,13 @@ export async function refreshPrices(env, force = false, skipSideEffects = false)
             spreadPct: Number.isFinite(Number(item.spread_pct)) ? Number(item.spread_pct) : undefined
           }
         });
+        const buildBonbast = (item) => ({
+          src: 'bonbast',
+          price: Number(item.price),
+          rawChg: null,
+          ts: item.srcTs,
+          extra: { priceType: 'sell' }
+        });
         const buildIranMarket = (item) => ({
           src: 'iran_market',
           price: Math.round(Number(item.price)),
@@ -2066,15 +2219,21 @@ export async function refreshPrices(env, force = false, skipSideEffects = false)
         if (id === 'usd' || id === 'eur') {
           if (nerkharaHasUsdEur && naItem) {
             chosen = buildNerkhara(naItem);
+          } else if (bonbastHasUsdEur && bbItem) {
+            chosen = buildBonbast(bbItem);
           } else if (iranMarketHasUsdEur && imItem) {
             chosen = buildIranMarket(imItem);
           } else if (naItem) {
             chosen = buildNerkhara(naItem);
+          } else if (bbItem) {
+            chosen = buildBonbast(bbItem);
           } else if (imItem) {
             chosen = buildIranMarket(imItem);
           }
         } else if (naItem) {
           chosen = buildNerkhara(naItem);
+        } else if (bbItem) {
+          chosen = buildBonbast(bbItem);
         } else if (imItem) {
           chosen = buildIranMarket(imItem);
         }
@@ -3061,6 +3220,9 @@ export function __resetWorkerStateForTests() {
   inMemorySuspendedUsersTime = 0;
   inMemorySecondaryAdmins = null;
   inMemorySecondaryAdminsTime = 0;
+  inMemoryPrimaryAdminEmail = null;
+  inMemoryPrimaryAdminLoaded = false;
+  inMemorySystemFeeds = null;
   adminRolesTableEnsured = false;
 }
 
@@ -3077,8 +3239,9 @@ const DEFAULT_SYSTEM_FEEDS = [
   { id: 'f_gate', name: 'Gate.io Engine', url: 'https://api.gateio.ws/api/v4/spot/tickers', type: 'crypto', status: 'active', pingMs: 55, reliability: '100%', priority: 3 },
   { id: 'f_binance_ws', name: 'Binance MiniTicker WS', url: 'wss://stream.binance.com:443/ws/!miniTicker@arr', type: 'websocket', status: 'active', pingMs: 24, reliability: '100%', priority: 4 },
   { id: 'f_nerkhara', name: 'NerkhAra Validated Feed', url: 'https://nerkhara.com/api/v1/latest.json', type: 'domestic', status: 'active', pingMs: 34, reliability: '99.9%', priority: 5 },
-  { id: 'f_nerkh', name: 'TGJU / IranMarket Rate', url: 'https://iran-market.github.io/data/latest-toman.json', type: 'domestic', status: 'active', pingMs: 38, reliability: '99.6%', priority: 6 },
-  { id: 'f_wallex', name: 'Wallex USDT/TMN Bridge', url: 'https://api.wallex.ir/v1/markets', type: 'tether', status: 'active', pingMs: 30, reliability: '100%', priority: 7 }
+  { id: 'f_bonbast', name: 'Bonbast Market Rate', url: 'https://www.bonbast.com', type: 'domestic', status: 'active', pingMs: 42, reliability: '99.7%', priority: 6 },
+  { id: 'f_nerkh', name: 'TGJU / IranMarket Rate', url: 'https://iran-market.github.io/data/latest-toman.json', type: 'domestic', status: 'active', pingMs: 38, reliability: '99.6%', priority: 7 },
+  { id: 'f_wallex', name: 'Wallex USDT/TMN Bridge', url: 'https://api.wallex.ir/v1/markets', type: 'tether', status: 'active', pingMs: 30, reliability: '100%', priority: 8 }
 ];
 
 let inMemorySystemFeeds = null;
@@ -3091,7 +3254,12 @@ async function getSystemFeeds(env) {
       if (row && row.v) {
         const parsed = JSON.parse(row.v);
         if (Array.isArray(parsed) && parsed.length) {
-          inMemorySystemFeeds = parsed;
+          const seenIds = new Set(parsed.map((f) => f && f.id).filter(Boolean));
+          const merged = [...parsed];
+          for (const def of DEFAULT_SYSTEM_FEEDS) {
+            if (!seenIds.has(def.id)) merged.push({ ...def });
+          }
+          inMemorySystemFeeds = merged;
           return inMemorySystemFeeds;
         }
       }
@@ -3334,7 +3502,12 @@ async function route(req, env, url, ctx) {
   }
 
   if (p === '/api/auth/config' && m === 'GET') {
-    return json({ ok: true, google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) }, 200, corsHeaders);
+    const primaryAdm = await getResolvedPrimaryAdminEmail(env);
+    return json({
+      ok: true,
+      google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET),
+      canClaimPrimaryAdmin: Boolean(!primaryAdm && getAdminSecret(env))
+    }, 200, corsHeaders);
   }
 
   // دریافت لحظه‌ای قیمت‌ها: کش کوتاه‌مدت کنترل‌شده (۲۰ ثانیه) + بازیابی از KV Snapshot در Cold Start
@@ -3449,6 +3622,7 @@ async function route(req, env, url, ctx) {
     return registerVerify(req, env, url);
   }
   if (p === '/api/auth/login' && m === 'POST') return login(req, env, url);
+  if (p === '/api/auth/claim-admin' && m === 'POST') return claimPrimaryAdmin(req, env, url);
   if (p === '/api/auth/reset/start' && m === 'POST') { await ensureNotMaintenance(); return resetStart(req, env); }
   if (p === '/api/auth/reset/verify' && m === 'POST') { await ensureNotMaintenance(); return resetVerify(req, env); }
   if (p === '/api/auth/reset/finish' && m === 'POST') { await ensureNotMaintenance(); return resetFinish(req, env, url); }
@@ -3585,7 +3759,8 @@ async function route(req, env, url, ctx) {
               try { trackedHoldings += JSON.parse(r.holdings || '[]').length; } catch {}
             }
           }
-          totalUsers = Math.max(totalUsers, getAdminEmails(env).length);
+          const primOverview = await getResolvedPrimaryAdminEmail(env);
+          totalUsers = Math.max(totalUsers, getAdminEmails(env).length || (primOverview ? 1 : 0));
           activeUsers = Math.max(0, totalUsers - susp.size);
           inMemoryAdminStats = { totalUsers, activeUsers, trackedHoldings, totalAlerts };
           inMemoryAdminStatsTime = now;
@@ -3781,7 +3956,7 @@ async function route(req, env, url, ctx) {
       const suspendedSet = await getSuspendedUsers(env, true);
       const secAdmins = await getSecondaryAdmins(env, true);
       const adminEmails = getAdminEmails(env);
-      const primaryAdm = getPrimaryAdminEmail(env);
+      const primaryAdm = await getResolvedPrimaryAdminEmail(env, true);
       try {
         let rows;
         try {
@@ -3822,8 +3997,9 @@ async function route(req, env, url, ctx) {
         console.error('admin users list err:', e?.message);
         throw new HttpError(503, 'خطا در دریافت فهرست کاربران از دیتابیس.');
       }
-      if (!usersList.length && adminEmails.length) {
-        usersList = adminEmails.map((em, idx) => {
+      const fallbackAdmins = adminEmails.length ? adminEmails : (primaryAdm ? [primaryAdm] : []);
+      if (!usersList.length && fallbackAdmins.length) {
+        usersList = fallbackAdmins.map((em, idx) => {
           const isPrimary = Boolean(primaryAdm && em === primaryAdm);
           return {
             id: isPrimary ? 'admin_root' : `admin_${idx + 1}`,
@@ -3904,7 +4080,7 @@ async function route(req, env, url, ctx) {
 
       const targetIdLower = String(targetUser.id || '').toLowerCase();
       const targetEmailLower = cleanEmail(targetUser.email || '');
-      const primaryAdm = getPrimaryAdminEmail(env);
+      const primaryAdm = await getResolvedPrimaryAdminEmail(env, true);
 
       if (
         (primaryAdm && targetEmailLower === primaryAdm) ||
@@ -3959,15 +4135,16 @@ async function route(req, env, url, ctx) {
       const passHash = await hashPassword(newPass, env);
       const existingAdmin = await env.DB.prepare('SELECT id, name FROM users WHERE email=?').bind(targetEmail).first();
       let adminId = existingAdmin?.id;
+      const primaryAdm = await getResolvedPrimaryAdminEmail(env, true);
       if (!adminId) {
-        if (targetEmail === getPrimaryAdminEmail(env)) {
+        if (targetEmail === primaryAdm) {
           const rootOwner = await env.DB.prepare("SELECT email FROM users WHERE id='admin_root' LIMIT 1").first();
           adminId = (!rootOwner || cleanEmail(rootOwner.email) === targetEmail) ? 'admin_root' : rand(12);
         } else {
           adminId = rand(12);
         }
       }
-      const adminName = existingAdmin?.name || user.name || (targetEmail === getPrimaryAdminEmail(env) ? 'مدیر کل دارایی' : targetEmail.split('@')[0]);
+      const adminName = existingAdmin?.name || user.name || (targetEmail === primaryAdm ? 'مدیر کل دارایی' : targetEmail.split('@')[0]);
       await env.DB.batch([
         env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?) ON CONFLICT(email) DO UPDATE SET password_hash=excluded.password_hash').bind(adminId, targetEmail, adminName, passHash, nowS()),
         env.DB.prepare('DELETE FROM sessions WHERE user_id IN (?, ?)').bind(adminId, user.id || adminId)
@@ -4005,12 +4182,13 @@ async function route(req, env, url, ctx) {
       const exactId = targetUser?.id || rawTarget;
       const canonicalIdLower = String(exactId).toLowerCase();
       const targetEmailLower = cleanEmail(targetUser?.email || '');
-      const primaryAdm = getPrimaryAdminEmail(env);
+      const primaryAdm = await getResolvedPrimaryAdminEmail(env, true);
       const secAdmins = await getSecondaryAdmins(env, true);
       const targetIsDbSecAdmin = Boolean(secAdmins.byId.has(canonicalIdLower) || secAdmins.byId.has(lowerParam) || (targetEmailLower && secAdmins.byEmail.has(targetEmailLower)));
 
       if (
         (canonicalIdLower === 'admin_root' && (!targetEmailLower || targetEmailLower === primaryAdm || isEmailAdmin(env, targetEmailLower))) ||
+        (primaryAdm && (targetEmailLower === primaryAdm || lowerParam === primaryAdm)) ||
         isEmailAdmin(env, lowerParam) ||
         (targetEmailLower && isEmailAdmin(env, targetEmailLower)) ||
         canonicalIdLower === String(user.id || '').toLowerCase()

@@ -145,6 +145,16 @@ export function getConfiguredAdminPassword(env) {
   return null;
 }
 
+export function getAdminSecret(env) {
+  if (!env || typeof env !== 'object') return null;
+  const raw = typeof env.ADMIN_SECRET === 'string' && env.ADMIN_SECRET.trim()
+    ? env.ADMIN_SECRET.trim()
+    : (typeof env.ADMIN_PASSWORD === 'string' ? env.ADMIN_PASSWORD.trim() : '');
+  if (!raw || raw.length < 8) return null;
+  if (isEmailAdmin(env, cleanEmail(raw))) return null;
+  return raw;
+}
+
 // افزایش پله‌پلهٔ iteration پس از بنچمارک واقعی (~2.6ms در 10k و ~5.3ms در 25k؛ مجموع تأیید+ارتقا در ورود ~8ms و ایمن زیر سقف ۱۰ms)
 // گام بعدی پس از پایش متریک پروداکشن قابل افزایش با env.PBKDF2_ITER به 50000 و سپس 100000 است
 export const PBKDF2_DEFAULT = 25000;

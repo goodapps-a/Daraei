@@ -6,6 +6,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   NERKHARA_MAP,
+  BONBAST_MAP,
+  parseBonbastPayload,
   DOMESTIC_META,
   ALL_DOMESTIC_IDS,
   D1_HISTORY_ASSET_IDS,
@@ -29,6 +31,7 @@ import {
   getPrimaryAdminEmail,
   isEmailAdmin as isEnvAdminEmail,
   getConfiguredAdminPassword as getSharedAdminPassword,
+  getAdminSecret,
   hashPassword,
   verifyPassword,
   parsePbkdf2Hash,
@@ -366,8 +369,9 @@ let systemFeeds: SystemFeed[] = [
   { id: 'f_gate', name: 'Gate.io Engine', url: 'https://api.gateio.ws/api/v4/spot/tickers', type: 'crypto', status: 'active', pingMs: 55, reliability: '100%', priority: 3 },
   { id: 'f_binance_ws', name: 'Binance MiniTicker WS', url: 'wss://stream.binance.com:443/ws/!miniTicker@arr', type: 'websocket', status: 'active', pingMs: 24, reliability: '100%', priority: 4 },
   { id: 'f_nerkhara', name: 'NerkhAra Validated Feed', url: 'https://nerkhara.com/api/v1/latest.json', type: 'domestic', status: 'active', pingMs: 34, reliability: '99.9%', priority: 5 },
-  { id: 'f_nerkh', name: 'TGJU / IranMarket Rate', url: 'https://iran-market.github.io/data/latest-toman.json', type: 'domestic', status: 'active', pingMs: 38, reliability: '99.6%', priority: 6 },
-  { id: 'f_wallex', name: 'Wallex USDT/TMN Bridge', url: 'https://api.wallex.ir/v1/markets', type: 'tether', status: 'active', pingMs: 32, reliability: '100%', priority: 7 }
+  { id: 'f_bonbast', name: 'Bonbast Market Rate', url: 'https://www.bonbast.com', type: 'domestic', status: 'active', pingMs: 42, reliability: '99.7%', priority: 6 },
+  { id: 'f_nerkh', name: 'TGJU / IranMarket Rate', url: 'https://iran-market.github.io/data/latest-toman.json', type: 'domestic', status: 'active', pingMs: 38, reliability: '99.6%', priority: 7 },
+  { id: 'f_wallex', name: 'Wallex USDT/TMN Bridge', url: 'https://api.wallex.ir/v1/markets', type: 'tether', status: 'active', pingMs: 32, reliability: '100%', priority: 8 }
 ];
 
 let domesticPrevCloseCache: Record<string, number[]> | null = null;
@@ -485,6 +489,50 @@ function flushIntradayHistoryToDisk(nowSec: number) {
   } catch {}
 }
 
+async function fetchBonbastData(nowSec = Math.floor(Date.now() / 1000)) {
+  try {
+    const pageRes = await fetch('https://www.bonbast.com/', {
+      headers: {
+        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+      },
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!pageRes.ok) return { dict: {}, ts: null };
+    const html = await pageRes.text();
+    const paramMatch = /param\s*:\s*["']([^"']+)["']/.exec(html) || /param\s*=\s*["']([^"']+)["']/.exec(html);
+    const param = paramMatch && paramMatch[1];
+    if (!param) return { dict: {}, ts: null };
+
+    const setCookies = typeof pageRes.headers.getSetCookie === 'function'
+      ? pageRes.headers.getSetCookie()
+      : (pageRes.headers.get('set-cookie') ? [pageRes.headers.get('set-cookie') as string] : []);
+    const cookieHeader = setCookies
+      .map((c) => String(c).split(';')[0].trim())
+      .filter(Boolean)
+      .join('; ');
+
+    const postRes = await fetch('https://www.bonbast.com/json', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        origin: 'https://www.bonbast.com',
+        referer: 'https://www.bonbast.com/',
+        'x-requested-with': 'XMLHttpRequest',
+        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+        ...(cookieHeader ? { cookie: cookieHeader } : {})
+      },
+      body: 'param=' + encodeURIComponent(param),
+      signal: AbortSignal.timeout(5000)
+    });
+    if (!postRes.ok) return { dict: {}, ts: null };
+    const data = await postRes.json();
+    return parseBonbastPayload(data, nowSec);
+  } catch {
+    return { dict: {}, ts: null };
+  }
+}
+
 async function updateAllPrices(force = false) {
   if (isFetching) return cachedPrices;
   isFetching = true;
@@ -526,20 +574,25 @@ async function updateAllPrices(force = false) {
         upstreamStale: false,
         ...extra
       };
-      if (unit === 'IRT') recordDomesticTick(id, now, price);
+      if (unit === 'IRT') recordDomesticTick(id, effectiveT, price);
       freshCount++;
       return true;
     };
 
-    // 1. Independent Tether & Per-Asset Domestic Rates (IranMarket + NerkhAra + Nerkhsanj + PersianToolbox)
+    // 1. Independent Tether & Per-Asset Domestic Rates (NerkhAra -> Bonbast -> IranMarket -> Nerkhsanj -> PersianToolbox)
     const domesticTask = async () => {
-      const [imResult, naResult] = await Promise.allSettled([
-        fetchJSON('https://iran-market.github.io/data/latest-toman.json', 5),
-        fetchJSON('https://nerkhara.com/api/v1/latest.json', 5)
+      const feedActiveMap = new Map(systemFeeds.map((f) => [f.id, f.status === 'active']));
+      const isFeedOn = (id: string) => (feedActiveMap.has(id) ? feedActiveMap.get(id) : true);
+
+      const [imResult, naResult, bbResult] = await Promise.allSettled([
+        isFeedOn('f_nerkh') ? fetchJSON('https://iran-market.github.io/data/latest-toman.json', 5) : Promise.resolve(null),
+        isFeedOn('f_nerkhara') ? fetchJSON('https://nerkhara.com/api/v1/latest.json', 5) : Promise.resolve(null),
+        isFeedOn('f_bonbast') ? fetchBonbastData(now) : Promise.resolve({ dict: {}, ts: null })
       ]);
 
       const imData: any = imResult.status === 'fulfilled' ? imResult.value : null;
       const naData: any = naResult.status === 'fulfilled' ? naResult.value : null;
+      const bbDict: Record<string, any> = (bbResult.status === 'fulfilled' && bbResult.value && bbResult.value.dict) ? bbResult.value.dict : {};
 
       const naDict: Record<string, any> = {};
       if (naData && naData.stale !== true && Array.isArray(naData.items)) {
@@ -661,12 +714,13 @@ async function updateAllPrices(force = false) {
 
       feeds.tether = { ok: usdtResolved, checkedAt: now, source: usdtSourceUsed || feeds.tether?.source || null };
 
-      // B. Per-Asset Domestic Resolution (NerkhAra primary + unified USD/EUR source)
+      // B. Per-Asset Domestic Resolution (NerkhAra -> Bonbast -> IranMarket)
       const prevClosesMap = await getDomesticPrevCloses();
       const resolvedDomesticIds = new Set<string>();
       const sourcesSummary: Record<string, number> = {};
       const nerkharaHasUsdEur = Boolean(naDict.usd && naDict.eur);
-      const iranMarketHasUsdEur = Boolean(imDict.USD && imDict.EUR);
+      const bonbastHasUsdEur = Boolean(bbDict.usd && bbDict.eur);
+      const iranMarketHasUsdEur = Boolean(imDict.USD_IRR_FREE && imDict.EUR_IRR_FREE);
 
       for (const id of ALL_DOMESTIC_IDS) {
         const meta = (DOMESTIC_META as any)[id];
@@ -674,6 +728,7 @@ async function updateAllPrices(force = false) {
         const naKey = (NERKHARA_MAP as any)[id];
         const imItem = imSym ? imDict[imSym] : null;
         const naItem = naKey ? naDict[naKey] : null;
+        const bbItem = (BONBAST_MAP as any)[id] ? bbDict[id] : null;
 
         const buildNerkhara = (item: any) => ({
           src: 'nerkhara',
@@ -687,6 +742,13 @@ async function updateAllPrices(force = false) {
             spreadPct: Number.isFinite(Number(item.spread_pct)) ? Number(item.spread_pct) : undefined
           }
         });
+        const buildBonbast = (item: any) => ({
+          src: 'bonbast',
+          price: Number(item.price),
+          rawChg: null,
+          ts: item.srcTs,
+          extra: { priceType: 'sell' }
+        });
         const buildIranMarket = (item: any) => ({
           src: 'iran_market',
           price: Math.round(Number(item.price)),
@@ -699,15 +761,21 @@ async function updateAllPrices(force = false) {
         if (id === 'usd' || id === 'eur') {
           if (nerkharaHasUsdEur && naItem) {
             chosen = buildNerkhara(naItem);
+          } else if (bonbastHasUsdEur && bbItem) {
+            chosen = buildBonbast(bbItem);
           } else if (iranMarketHasUsdEur && imItem) {
             chosen = buildIranMarket(imItem);
           } else if (naItem) {
             chosen = buildNerkhara(naItem);
+          } else if (bbItem) {
+            chosen = buildBonbast(bbItem);
           } else if (imItem) {
             chosen = buildIranMarket(imItem);
           }
         } else if (naItem) {
           chosen = buildNerkhara(naItem);
+        } else if (bbItem) {
+          chosen = buildBonbast(bbItem);
         } else if (imItem) {
           chosen = buildIranMarket(imItem);
         }
@@ -874,7 +942,11 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.get('/api/auth/config', (_req, res) => {
-  res.json({ ok: true, google: false });
+  res.json({
+    ok: true,
+    google: false,
+    canClaimPrimaryAdmin: Boolean(!getResolvedPrimaryAdminEmail() && getAdminSecret(process.env))
+  });
 });
 
 app.get('/api/prices', async (req, res) => {
@@ -1545,9 +1617,15 @@ let systemUsers: StoredUser[] = [
   { id: 'u_5', name: 'مهدی زرگر', email: 'mehdi.gold@gmail.com', role: 'user', status: 'active', registeredAt: '1403/10/12', holdingsCount: 8, alertsCount: 1, lastLogin: '۱ هفته قبل', passwordHash: '' }
 ];
 
+let claimedPrimaryAdminEmail = '';
+
+function getResolvedPrimaryAdminEmail(): string {
+  return getPrimaryAdminEmail(process.env) || claimedPrimaryAdminEmail || '';
+}
+
 function getAdminRoleMeta(email: string, storedRole?: string) {
   const norm = cleanEmail(email);
-  const primary = getPrimaryAdminEmail(process.env);
+  const primary = getResolvedPrimaryAdminEmail();
   const isEnvAdm = Boolean(norm && isEmailAdmin(norm));
   const isPrimaryAdmin = Boolean(norm && primary && norm === primary);
   const isAdmin = isPrimaryAdmin || isEnvAdm || storedRole === 'admin';
@@ -1565,17 +1643,21 @@ function loadAuthSessionFromDisk() {
     if (fs.existsSync(AUTH_SESSION_FILE)) {
       const raw = JSON.parse(fs.readFileSync(AUTH_SESSION_FILE, 'utf8'));
       if (raw && typeof raw === 'object') {
+        if (typeof raw.claimedPrimaryAdminEmail === 'string' && isEmail(cleanEmail(raw.claimedPrimaryAdminEmail))) {
+          claimedPrimaryAdminEmail = cleanEmail(raw.claimedPrimaryAdminEmail);
+        }
         if (raw.userStore && typeof raw.userStore === 'object') {
           Object.assign(userStore, raw.userStore);
         }
         if (Array.isArray(raw.users)) {
           for (const savedUser of raw.users) {
             if (!savedUser || !savedUser.email) continue;
-            const norm = String(savedUser.email).toLowerCase();
+            const norm = cleanEmail(savedUser.email);
             const existing = systemUsers.find(u => u.email.toLowerCase() === norm);
-            const resolvedRole = (isEmailAdmin(norm) || savedUser.role === 'admin') ? 'admin' : 'user';
-            const isPrim = norm === getPrimaryAdminEmail(process.env);
+            const isPrim = norm === getResolvedPrimaryAdminEmail();
+            const resolvedRole = (isPrim || isEmailAdmin(norm) || savedUser.role === 'admin') ? 'admin' : 'user';
             if (existing) {
+              if (savedUser.name) existing.name = String(savedUser.name).slice(0, 80);
               if (savedUser.passwordHash && String(savedUser.passwordHash).startsWith('pbkdf2$')) {
                 existing.passwordHash = savedUser.passwordHash;
               }
@@ -1618,7 +1700,7 @@ function saveAuthSessionToDisk() {
       lastLogin: u.lastLogin,
       passwordHash: u.passwordHash
     }));
-    fs.writeFileSync(AUTH_SESSION_FILE, JSON.stringify({ userStore, users: safeUsers }, null, 2), { encoding: 'utf8', mode: 0o600 });
+    fs.writeFileSync(AUTH_SESSION_FILE, JSON.stringify({ userStore, users: safeUsers, claimedPrimaryAdminEmail }, null, 2), { encoding: 'utf8', mode: 0o600 });
   } catch {}
 }
 loadAuthSessionFromDisk();
@@ -1766,14 +1848,15 @@ app.post('/api/auth/check-email', (req, res) => {
   if (!checkRateLimit(`check_email_ip:${ip}`, 25, 900) || !checkRateLimit(`check_email:${ip}:${normalizedEmail}`, 12, 900)) {
     return res.status(429).json({ error: 'تعداد درخواست‌ها بیش از حد مجاز است. لطفاً کمی صبر کنید.' });
   }
-  const isAdmin = isEmailAdmin(normalizedEmail);
+  const isEnvAdm = isEmailAdmin(normalizedEmail);
+  const isPrimAdm = normalizedEmail === getResolvedPrimaryAdminEmail();
   const existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
   const storeRec = userStore[normalizedEmail];
-  if (existing || storeRec || isAdmin) {
+  if (existing || storeRec || isEnvAdm || isPrimAdm) {
     return res.json({
       ok: true,
       exists: true,
-      hasPassword: Boolean(existing?.passwordHash || (isAdmin && getSharedAdminPassword(process.env))),
+      hasPassword: Boolean(existing?.passwordHash || (isEnvAdm && getSharedAdminPassword(process.env))),
       hasGoogle: false
     });
   }
@@ -1801,10 +1884,14 @@ app.post('/api/auth/login', async (req, res) => {
     return res.status(401).json({ error: 'ایمیل یا رمز عبور نادرست است.' });
   }
 
-  const isAdmin = isEmailAdmin(normalizedEmail);
   let existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
+  const meta = getAdminRoleMeta(normalizedEmail, existing?.role);
 
-  if (isAdmin) {
+  if (existing && existing.status === 'suspended' && !meta.isPrimaryAdmin && !meta.envPinned) {
+    return res.status(403).json({ error: 'حساب کاربری شما توسط مدیریت مسدود شده است.' });
+  }
+
+  if (meta.envPinned && !claimedPrimaryAdminEmail && isEmailAdmin(normalizedEmail)) {
     if (cleanEmail(passStr) === normalizedEmail) {
       return res.status(401).json({ error: 'استفاده از آدرس ایمیل به‌عنوان رمز عبور مدیر مجاز نیست.' });
     }
@@ -1819,7 +1906,7 @@ app.post('/api/auth/login', async (req, res) => {
       adminAuthenticated = true;
       const newHash = await hashPassword(passStr, process.env);
       if (!existing) {
-        const isPrimary = normalizedEmail === getPrimaryAdminEmail(process.env);
+        const isPrimary = normalizedEmail === getResolvedPrimaryAdminEmail();
         existing = {
           id: isPrimary && !systemUsers.some(u => u.id === 'u_admin') ? 'u_admin' : ('u_adm_' + crypto.randomBytes(6).toString('hex')),
           name: isPrimary ? 'مدیر کل دارایی' : normalizedEmail.split('@')[0],
@@ -1844,9 +1931,6 @@ app.post('/api/auth/login', async (req, res) => {
     if (!existing || !existing.passwordHash || !(await verifyStoredPassword(passStr, existing.passwordHash))) {
       return res.status(401).json({ error: 'ایمیل یا رمز عبور نادرست است.' });
     }
-    if (existing.status === 'suspended') {
-      return res.status(403).json({ error: 'حساب کاربری شما توسط مدیریت مسدود شده است.' });
-    }
     if (shouldUpgradeStoredHash(existing.passwordHash)) {
       existing.passwordHash = await hashPassword(passStr, process.env);
     }
@@ -1861,7 +1945,80 @@ app.post('/api/auth/login', async (req, res) => {
     id: Date.now(),
     time: 'هم‌اکنون',
     type: 'auth',
-    msg: `ورود موفق کاربر: ${sessionUser.email} (${isAdmin ? 'سطح دسترسی: مدیر ارشد' : 'کاربر'})`
+    msg: `ورود موفق کاربر: ${sessionUser.email} (${sessionUser.isAdmin ? 'سطح دسترسی: مدیر ارشد' : 'کاربر'})`
+  });
+  if (systemAuditLogs.length > 40) systemAuditLogs.pop();
+  res.json({ ok: true, user: sessionUser });
+});
+
+app.post('/api/auth/claim-admin', async (req, res) => {
+  const ip = getClientIp(req);
+  if (!checkRateLimit(`claim_admin:${ip}`, 10, 900)) {
+    return res.status(429).json({ error: 'تعداد تلاش‌ها بیش از حد مجاز است. کمی صبر کنید.' });
+  }
+  const configuredSecret = getAdminSecret(process.env);
+  if (!configuredSecret) {
+    return res.status(403).json({ error: 'سیکرت مدیر کل روی سرور تنظیم نشده است.' });
+  }
+  const { secret, email, password, name } = req.body || {};
+  const secretStr = String(secret || '').trim();
+  if (!secretStr || !teq(secretStr, configuredSecret)) {
+    return res.status(401).json({ error: 'سیکرت ادمین کل نامعتبر است.' });
+  }
+  if (getResolvedPrimaryAdminEmail()) {
+    return res.status(409).json({ error: 'مدیر اصلی سیستم قبلاً انتخاب شده است. ادمین‌های بعدی فقط از داخل پنل مدیریت تعریف می‌شوند.' });
+  }
+  const normalizedEmail = cleanEmail(email);
+  if (!isEmail(normalizedEmail) || normalizedEmail.length > 120) {
+    return res.status(400).json({ error: 'ایمیل معتبر نیست.' });
+  }
+  const rawName = String(name || '').trim().slice(0, 40);
+  if (rawName && rawName.length < 2) {
+    return res.status(400).json({ error: 'نام باید حداقل ۲ کاراکتر باشد.' });
+  }
+  const passStr = String(password || '').slice(0, 128);
+  if (!okPass(passStr)) {
+    return res.status(400).json({ error: 'رمز عبور باید حداقل ۸ کاراکتر باشد.' });
+  }
+  if (cleanEmail(passStr) === normalizedEmail) {
+    return res.status(400).json({ error: 'رمز عبور نمی‌تواند برابر با آدرس ایمیل باشد.' });
+  }
+
+  let target = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
+  if (target && target.status === 'suspended') {
+    return res.status(403).json({ error: 'حساب کاربری شما مسدود شده است.' });
+  }
+  const passHash = await hashPassword(passStr, process.env);
+  claimedPrimaryAdminEmail = normalizedEmail;
+  if (target) {
+    target.name = rawName || target.name || 'مدیر کل دارایی';
+    target.role = 'admin';
+    target.status = 'active';
+    target.passwordHash = passHash;
+    target.lastLogin = 'هم‌اکنون';
+  } else {
+    target = {
+      id: !systemUsers.some(u => u.id === 'u_admin') ? 'u_admin' : ('u_adm_' + crypto.randomBytes(6).toString('hex')),
+      name: rawName || 'مدیر کل دارایی',
+      email: normalizedEmail,
+      role: 'admin',
+      status: 'active',
+      registeredAt: 'هم‌اکنون',
+      holdingsCount: 0,
+      alertsCount: 0,
+      lastLogin: 'هم‌اکنون',
+      passwordHash: passHash
+    };
+    systemUsers.unshift(target);
+  }
+  const sessionUser = await createSessionForUser(res, req, target);
+  saveAuthSessionToDisk();
+
+  systemAuditLogs.unshift({
+    id: Date.now(),
+    time: 'هم‌اکنون',
+    type: 'admin',
+    msg: `مدیر اصلی سیستم (${normalizedEmail}) با سیکرت فعال شد.`
   });
   if (systemAuditLogs.length > 40) systemAuditLogs.pop();
   res.json({ ok: true, user: sessionUser });
@@ -1878,6 +2035,12 @@ app.use('/api/admin', async (req, res, next) => {
     return res.status(403).json({ error: 'دسترسی فقط برای مدیر سیستم مجاز است.' });
   }
   next();
+});
+
+const formatFeedResponse = (f: SystemFeed) => ({
+  ...f,
+  active: f.status === 'active',
+  protocol: f.type
 });
 
 app.get('/api/admin/overview', (_req, res) => {
@@ -1907,15 +2070,9 @@ app.get('/api/admin/overview', (_req, res) => {
       totalDomestic,
       lastSyncTime: lastFetchTime ? new Date(lastFetchTime * 1000).toLocaleTimeString('fa-IR') : '—'
     },
-    feeds: [...systemFeeds].sort((a, b) => a.priority - b.priority),
+    feeds: [...systemFeeds].sort((a, b) => a.priority - b.priority).map(formatFeedResponse),
     broadcast: broadcastMessage
   });
-});
-
-const formatFeedResponse = (f: SystemFeed) => ({
-  ...f,
-  active: f.status === 'active',
-  protocol: f.type
 });
 
 app.get('/api/admin/feeds', (req, res) => {
@@ -2518,13 +2675,16 @@ app.delete('/api/me', async (req, res) => {
   if (!u) {
     return res.status(401).json({ error: 'ابتدا وارد حساب کاربری خود شوید.' });
   }
+  if (u.isPrimaryAdmin || u.id === 'u_admin' || cleanEmail(u.email) === getResolvedPrimaryAdminEmail()) {
+    return res.status(403).json({ error: 'حساب مدیر اصلی سیستم قابل حذف نیست.' });
+  }
   if (systemSettings.maintenance && !u.isAdmin && !isEmailAdmin(u.email)) {
     return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
   }
   const email = u.email.toLowerCase();
   delete userStore[email];
   revokeUserSessions(email);
-  const idx = systemUsers.findIndex(usr => usr.email.toLowerCase() === email && !isEmailAdmin(usr.email));
+  const idx = systemUsers.findIndex(usr => usr.email.toLowerCase() === email);
   if (idx !== -1) systemUsers.splice(idx, 1);
   saveAuthSessionToDisk();
   clearSessionCookie(res, req);
@@ -2848,7 +3008,7 @@ function evaluateAllStoredAlerts() {
   let anyChanged = false;
   for (const [email, rec] of Object.entries(userStore)) {
     if (rec?.data?.alerts && evaluateAlertsForRecord(rec.data.alerts, email)) {
-      rec.updatedAt = Math.floor(Date.now() / 1000);
+      rec.updatedAt = Math.max(Date.now() * 1000, (Number(rec.updatedAt) || 0) + 1);
       rec.revision = (Number(rec.revision) || 1) + 1;
       anyChanged = true;
     }
@@ -3071,7 +3231,7 @@ app.post('/api/me/alerts/:id/retry', async (req, res) => {
       }
     }
     evaluateAlertsForRecord(target.data.alerts, email);
-    target.updatedAt = Math.floor(Date.now() / 1000);
+    target.updatedAt = Math.max(Date.now() * 1000, (Number(target.updatedAt) || 0) + 1);
     target.revision = (Number(target.revision) || 1) + 1;
     saveAuthSessionToDisk();
   }
