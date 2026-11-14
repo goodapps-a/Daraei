@@ -8,6 +8,18 @@ const indexHtmlPath = path.join(rootDir, 'src', 'index.html');
 const workerJsPath = path.join(rootDir, 'src', 'worker.js');
 const distDir = path.join(rootDir, 'dist');
 const distWorkerPath = path.join(distDir, 'worker.js');
+const bunLockPath = path.join(rootDir, 'bun.lock');
+
+if (fs.existsSync(bunLockPath)) {
+  const rawBunLock = fs.readFileSync(bunLockPath, 'utf8');
+  const normalizedBunLock = rawBunLock
+    .replace(/"lockfileVersion"\s*:\s*\d+/, '"lockfileVersion": 1')
+    .replace(/\n\s*"configVersion"\s*:\s*\d+\s*,?/g, '');
+  if (normalizedBunLock !== rawBunLock) {
+    fs.writeFileSync(bunLockPath, normalizedBunLock, 'utf8');
+    console.log('Normalized bun.lock to lockfileVersion: 1 for Cloudflare bun@1.2.15 compatibility.');
+  }
+}
 
 if (!fs.existsSync(distDir)) {
   fs.mkdirSync(distDir, { recursive: true });

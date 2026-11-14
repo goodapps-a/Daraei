@@ -1626,14 +1626,13 @@ function getResolvedPrimaryAdminEmail(): string {
 function getAdminRoleMeta(email: string, storedRole?: string) {
   const norm = cleanEmail(email);
   const primary = getResolvedPrimaryAdminEmail();
-  const isEnvAdm = Boolean(norm && isEmailAdmin(norm));
   const isPrimaryAdmin = Boolean(norm && primary && norm === primary);
-  const isAdmin = isPrimaryAdmin || isEnvAdm || storedRole === 'admin';
+  const isAdmin = isPrimaryAdmin || storedRole === 'admin';
   return {
     isAdmin,
     isPrimaryAdmin,
     adminTier: isAdmin ? (isPrimaryAdmin ? 'primary' : 'secondary') : null,
-    envPinned: isPrimaryAdmin || isEnvAdm,
+    envPinned: isPrimaryAdmin,
     role: (isAdmin ? 'admin' : 'user') as 'admin' | 'user'
   };
 }
@@ -1655,28 +1654,28 @@ function loadAuthSessionFromDisk() {
             const norm = cleanEmail(savedUser.email);
             const existing = systemUsers.find(u => u.email.toLowerCase() === norm);
             const isPrim = norm === getResolvedPrimaryAdminEmail();
-            const resolvedRole = (isPrim || isEmailAdmin(norm) || savedUser.role === 'admin') ? 'admin' : 'user';
+            const resolvedRole = (isPrim || savedUser.role === 'admin') ? 'admin' : 'user';
             if (existing) {
               if (savedUser.name) existing.name = String(savedUser.name).slice(0, 80);
               if (savedUser.passwordHash && String(savedUser.passwordHash).startsWith('pbkdf2$')) {
                 existing.passwordHash = savedUser.passwordHash;
               }
-              if (savedUser.status === 'suspended' && !isPrim && !isEmailAdmin(norm)) {
+              if (savedUser.status === 'suspended' && !isPrim) {
                 existing.status = 'suspended';
               }
               existing.role = resolvedRole;
-            } else if (savedUser.passwordHash && String(savedUser.passwordHash).startsWith('pbkdf2$')) {
+            } else if ((savedUser.passwordHash && String(savedUser.passwordHash).startsWith('pbkdf2$')) || resolvedRole === 'admin') {
               systemUsers.push({
                 id: String(savedUser.id || 'u_' + Date.now()),
                 name: String(savedUser.name || norm.split('@')[0]).slice(0, 80),
                 email: norm,
                 role: resolvedRole,
-                status: savedUser.status === 'suspended' && !isPrim && !isEmailAdmin(norm) ? 'suspended' : 'active',
+                status: savedUser.status === 'suspended' && !isPrim ? 'suspended' : 'active',
                 registeredAt: String(savedUser.registeredAt || 'هم‌اکنون'),
                 holdingsCount: Number(savedUser.holdingsCount) || 0,
                 alertsCount: Number(savedUser.alertsCount) || 0,
-                lastLogin: String(savedUser.lastLogin || 'هم‌اکنون'),
-                passwordHash: savedUser.passwordHash
+                lastLogin: String(savedUser.lastLogin || 'انتخاب‌شده در پنل'),
+                passwordHash: savedUser.passwordHash && String(savedUser.passwordHash).startsWith('pbkdf2$') ? savedUser.passwordHash : ''
               });
             }
           }
@@ -1852,7 +1851,8 @@ app.post('/api/auth/check-email', (req, res) => {
   const isPrimAdm = normalizedEmail === getResolvedPrimaryAdminEmail();
   const existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
   const storeRec = userStore[normalizedEmail];
-  if (existing || storeRec || isEnvAdm || isPrimAdm) {
+  const hasActiveAccount = Boolean((existing && existing.passwordHash) || storeRec || isEnvAdm || isPrimAdm);
+  if (hasActiveAccount) {
     return res.json({
       ok: true,
       exists: true,
@@ -1863,7 +1863,7 @@ app.post('/api/auth/check-email', (req, res) => {
   return res.json({
     ok: true,
     exists: false,
-    allowRegister: systemSettings.allowNewRegistrations !== false
+    allowRegister: existing?.role === 'admin' || systemSettings.allowNewRegistrations !== false
   });
 });
 
@@ -2295,36 +2295,65 @@ app.post('/api/admin/logs/clear', (req, res) => {
 app.post('/api/admin/users/add', async (req, res) => {
   const reqAdmin = await resolveReqUser(req);
   const { name, email, password, role } = req.body || {};
-  if (!name || !email) return res.status(400).json({ error: 'نام و ایمیل الزامی است.' });
+  if (!email) return res.status(400).json({ error: 'ایمیل الزامی است.' });
   const normalizedEmail = cleanEmail(email);
   if (!isEmail(normalizedEmail) || normalizedEmail.length > 120) {
     return res.status(400).json({ error: 'ایمیل معتبر نیست.' });
   }
   const requestedAdmin = role === 'admin';
   if (requestedAdmin && !reqAdmin?.isPrimaryAdmin) {
-    return res.status(403).json({ error: 'فقط مدیر اصلی سیستم می‌تواند کاربر با نقش ادمین ایجاد کند.' });
-  }
-  if (systemUsers.some(u => u.email.toLowerCase() === normalizedEmail)) {
-    return res.status(409).json({ error: 'این ایمیل قبلاً ثبت شده است.' });
+    return res.status(403).json({ error: 'فقط مدیر اصلی سیستم می‌تواند ادمین جدید در داشبورد انتخاب کند.' });
   }
   const pass = String(password || '').trim();
-  if (!okPass(pass)) {
+  if (!requestedAdmin && !okPass(pass)) {
     return res.status(400).json({ error: 'رمز عبور باید حداقل ۸ کاراکتر باشد.' });
   }
-  if (cleanEmail(pass) === normalizedEmail) {
+  if (pass && !okPass(pass)) {
+    return res.status(400).json({ error: 'در صورت وارد کردن رمز عبور، طول آن باید حداقل ۸ کاراکتر باشد.' });
+  }
+  if (pass && cleanEmail(pass) === normalizedEmail) {
     return res.status(400).json({ error: 'رمز عبور نمی‌تواند برابر با آدرس ایمیل باشد.' });
   }
+  const existing = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
+  if (existing && !requestedAdmin) {
+    return res.status(409).json({ error: 'این ایمیل قبلاً ثبت شده است.' });
+  }
+  if (existing && requestedAdmin) {
+    if (name && String(name).trim()) {
+      existing.name = String(name).trim().slice(0, 80);
+    }
+    if (pass) {
+      existing.passwordHash = await hashPassword(pass, process.env);
+    }
+    existing.role = 'admin';
+    existing.status = 'active';
+    for (const sess of activeSessions.values()) {
+      if (sess.email === normalizedEmail) {
+        sess.role = 'admin';
+        sess.isAdmin = true;
+      }
+    }
+    saveAuthSessionToDisk();
+    systemAuditLogs.unshift({
+      id: Date.now(),
+      time: 'هم‌اکنون',
+      type: 'admin',
+      msg: `کاربر ${existing.email} توسط مدیر اصلی به ادمین ثانویه ارتقا یافت.`
+    });
+    return res.json({ ok: true, user: sanitizeUserForAdmin(existing) });
+  }
+  const finalName = String(name || '').trim().slice(0, 80) || normalizedEmail.split('@')[0];
   const newUser: StoredUser = {
     id: 'u_' + Date.now(),
-    name: String(name).trim().slice(0, 80),
+    name: finalName,
     email: normalizedEmail,
     role: (requestedAdmin || isEmailAdmin(normalizedEmail)) ? 'admin' : 'user',
     status: 'active',
     registeredAt: 'هم‌اکنون',
     holdingsCount: 0,
     alertsCount: 0,
-    lastLogin: 'تازه ثبت‌نام‌شده',
-    passwordHash: await hashPassword(pass, process.env)
+    lastLogin: requestedAdmin && !pass ? 'انتخاب‌شده در پنل' : 'تازه ثبت‌نام‌شده',
+    passwordHash: pass ? await hashPassword(pass, process.env) : ''
   };
   systemUsers.unshift(newUser);
   saveAuthSessionToDisk();
@@ -2332,7 +2361,9 @@ app.post('/api/admin/users/add', async (req, res) => {
     id: Date.now(),
     time: 'هم‌اکنون',
     type: 'admin',
-    msg: `کاربر جدید با ایمیل ${newUser.email} توسط مدیر ایجاد شد.`
+    msg: requestedAdmin
+      ? `ادمین ثانویه جدید (${newUser.email}) توسط مدیر اصلی در داشبورد انتخاب شد.`
+      : `کاربر جدید با ایمیل ${newUser.email} توسط مدیر ایجاد شد.`
   });
   res.json({ ok: true, user: sanitizeUserForAdmin(newUser) });
 });

@@ -103,44 +103,43 @@ export const isEmail = (e) => typeof e === 'string' && e.length <= 254 && /^[^\s
 export const okPass = (p) => typeof p === 'string' && p.length >= 8 && p.length <= 128;
 export const normCode = (c) => String(c ?? '').replace(/[۰-۹]/g, (d) => '۰۱۲۳۴۵۶۷۸۹'.indexOf(d)).replace(/[٠-٩]/g, (d) => '٠١٢٣٤٥٦٧٨٩'.indexOf(d)).replace(/\D/g, '');
 
-export function getAdminEmails(env) {
-  const rawParts = [];
-  if (env && typeof env.ADMIN_EMAILS === 'string' && env.ADMIN_EMAILS.trim()) {
-    rawParts.push(...env.ADMIN_EMAILS.split(/[\s,;]+/));
+export function getPrimaryAdminEmail(env) {
+  if (!env || typeof env !== 'object') return '';
+  const candidates = [];
+  if (typeof env.ADMIN_EMAIL === 'string' && env.ADMIN_EMAIL.trim()) {
+    candidates.push(...env.ADMIN_EMAIL.split(/[\s,;]+/));
   }
-  if (env && typeof env.ADMIN_EMAIL === 'string' && env.ADMIN_EMAIL.trim()) {
-    rawParts.push(...env.ADMIN_EMAIL.split(/[\s,;]+/));
+  if (typeof env.ADMIN_SECRET === 'string' && env.ADMIN_SECRET.trim()) {
+    const secretAsEmail = cleanEmail(env.ADMIN_SECRET);
+    if (isEmail(secretAsEmail)) candidates.push(secretAsEmail);
   }
-  const out = [];
-  const seen = new Set();
-  for (const part of rawParts) {
+  if (typeof env.ADMIN_EMAILS === 'string' && env.ADMIN_EMAILS.trim()) {
+    candidates.push(...env.ADMIN_EMAILS.split(/[\s,;]+/));
+  }
+  for (const part of candidates) {
     const em = cleanEmail(part);
-    if (em && isEmail(em) && !seen.has(em)) {
-      seen.add(em);
-      out.push(em);
-    }
+    if (em && isEmail(em)) return em;
   }
-  return out;
+  return '';
 }
 
-export function getPrimaryAdminEmail(env) {
-  const legacy = cleanEmail(env && env.ADMIN_EMAIL);
-  if (legacy && isEmail(legacy)) return legacy;
-  return getAdminEmails(env)[0] || '';
+export function getAdminEmails(env) {
+  const primary = getPrimaryAdminEmail(env);
+  return primary ? [primary] : [];
 }
 
 export function isEmailAdmin(env, email) {
   const em = cleanEmail(email);
   if (!em) return false;
-  return getAdminEmails(env).includes(em);
+  const primary = getPrimaryAdminEmail(env);
+  return Boolean(primary && em === primary);
 }
 
 export function getConfiguredAdminPassword(env) {
-  const adminEmails = getAdminEmails(env);
-  if (!adminEmails.length) return null;
-  if (env && typeof env.ADMIN_PASSWORD === 'string') {
+  if (!env || typeof env !== 'object') return null;
+  if (typeof env.ADMIN_PASSWORD === 'string') {
     const p = env.ADMIN_PASSWORD.trim();
-    if (p.length >= 8 && !isEmailAdmin(env, cleanEmail(p))) return p;
+    if (p.length >= 8 && !isEmail(cleanEmail(p))) return p;
   }
   return null;
 }
@@ -151,7 +150,7 @@ export function getAdminSecret(env) {
     ? env.ADMIN_SECRET.trim()
     : (typeof env.ADMIN_PASSWORD === 'string' ? env.ADMIN_PASSWORD.trim() : '');
   if (!raw || raw.length < 8) return null;
-  if (isEmailAdmin(env, cleanEmail(raw))) return null;
+  if (isEmail(cleanEmail(raw))) return null;
   return raw;
 }
 

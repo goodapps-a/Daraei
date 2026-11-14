@@ -997,18 +997,25 @@ test('getStaleThresholdSec and isPriceItemStale distinguish 24/7 crypto/USDT fro
   assert.equal(isPriceItemStale({ price: 85000, unit: 'IRT', kind: 'domestic', sourceTimestamp: monClose }, 'usd', tueNight), false);
 });
 
-test('multi-admin config parser handles ADMIN_EMAILS, legacy ADMIN_EMAIL, whitespace, case, and deduplication', () => {
-  const env1 = { ADMIN_EMAILS: ' Admin1@Example.com , boss@example.com ; admin1@example.com \n not-an-email ' };
-  assert.deepEqual(getAdminEmails(env1), ['admin1@example.com', 'boss@example.com']);
-  assert.equal(getPrimaryAdminEmail(env1), 'admin1@example.com');
-  assert.equal(isEmailAdmin(env1, ' BOSS@EXAMPLE.COM '), true);
-  assert.equal(isEmailAdmin(env1, 'user@example.com'), false);
+test('primary admin email secret parser resolves only the single primary admin from ADMIN_EMAIL or ADMIN_SECRET', () => {
+  const env1 = { ADMIN_EMAIL: ' Primary@Example.com ' };
+  assert.equal(getPrimaryAdminEmail(env1), 'primary@example.com');
+  assert.deepEqual(getAdminEmails(env1), ['primary@example.com']);
+  assert.equal(isEmailAdmin(env1, ' PRIMARY@EXAMPLE.COM '), true);
+  assert.equal(isEmailAdmin(env1, 'second@example.com'), false);
 
-  // Backward compatibility: legacy ADMIN_EMAIL remains primary when both exist
+  // If primary admin email is provided via ADMIN_SECRET, it resolves as the primary admin email
+  const envSecretEmail = { ADMIN_SECRET: 'OwnerSecretEmail@Example.com' };
+  assert.equal(getPrimaryAdminEmail(envSecretEmail), 'ownersecretemail@example.com');
+  assert.deepEqual(getAdminEmails(envSecretEmail), ['ownersecretemail@example.com']);
+  assert.equal(isEmailAdmin(envSecretEmail, 'ownersecretemail@example.com'), true);
+
+  // Even if legacy ADMIN_EMAILS has multiple emails, only the first/primary admin comes from env; secondary admins are strictly DB-managed in the dashboard
   const env2 = { ADMIN_EMAIL: 'Primary@Example.com', ADMIN_EMAILS: 'Secondary@Example.com, primary@example.com' };
-  assert.deepEqual(getAdminEmails(env2), ['secondary@example.com', 'primary@example.com']);
   assert.equal(getPrimaryAdminEmail(env2), 'primary@example.com');
-  assert.equal(isEmailAdmin(env2, 'secondary@example.com'), true);
+  assert.deepEqual(getAdminEmails(env2), ['primary@example.com']);
+  assert.equal(isEmailAdmin(env2, 'primary@example.com'), true);
+  assert.equal(isEmailAdmin(env2, 'secondary@example.com'), false);
 });
 
 test('multi-admin isolation, live admin revocation, /api/admin/password isolation, IDOR & privilege escalation protection', async () => {
@@ -1024,7 +1031,6 @@ test('multi-admin isolation, live admin revocation, /api/admin/password isolatio
   const env = {
     DB,
     ADMIN_EMAIL: admin1,
-    ADMIN_EMAILS: `${admin1}, ${admin2}`,
     ADMIN_PASSWORD: 'InitAdminPassword!1',
     AUTH_SECRET: secret
   };
@@ -1048,16 +1054,29 @@ test('multi-admin isolation, live admin revocation, /api/admin/password isolatio
       customEnv
     );
 
-  // Both admins log in using configured ADMIN_PASSWORD
+  // Primary admin logs in using configured ADMIN_EMAIL + ADMIN_PASSWORD
   const r1 = await callApi('/api/auth/login', { method: 'POST', body: { email: admin1, password: 'InitAdminPassword!1' } });
   const j1 = await r1.json();
   assert.equal(r1.status, 200);
   assert.equal(j1.user.isAdmin, true);
+  assert.equal(j1.user.isPrimaryAdmin, true);
 
-  const r2 = await callApi('/api/auth/login', { method: 'POST', body: { email: admin2, password: 'InitAdminPassword!1' } });
+  // Primary admin selects/adds admin2 from the dashboard (no secret needed for secondary admin)
+  const addAdm2Res = await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: j1.token,
+    body: { email: admin2, name: 'Second Boss', password: 'InitAdmin2Password!1', role: 'admin' }
+  });
+  assert.equal(addAdm2Res.status, 200);
+  const adm2Created = (await addAdm2Res.json()).user;
+  assert.equal(adm2Created.role, 'admin');
+  assert.equal(adm2Created.envPinned, false);
+
+  const r2 = await callApi('/api/auth/login', { method: 'POST', body: { email: admin2, password: 'InitAdmin2Password!1' } });
   const j2 = await r2.json();
   assert.equal(r2.status, 200);
   assert.equal(j2.user.isAdmin, true);
+  assert.equal(j2.user.isPrimaryAdmin, false);
   assert.notEqual(j1.user.id, j2.user.id);
 
   // Primary admin sees inherited admin_root data, while secondary admin MUST NOT inherit admin_root!
@@ -1094,8 +1113,8 @@ test('multi-admin isolation, live admin revocation, /api/admin/password isolatio
   assert.equal(ovBody.ok, true);
   assert.ok(ovBody.stats.totalUsers >= 2);
 
-  // Secondary admin's old password (ADMIN_PASSWORD) MUST NO LONGER bypass their updated D1 password_hash
-  const oldPwLogin2 = await callApi('/api/auth/login', { method: 'POST', body: { email: admin2, password: 'InitAdminPassword!1' } });
+  // Secondary admin's old password MUST NO LONGER work
+  const oldPwLogin2 = await callApi('/api/auth/login', { method: 'POST', body: { email: admin2, password: 'InitAdmin2Password!1' } });
   assert.equal(oldPwLogin2.status, 401);
   const newPwLogin2 = await callApi('/api/auth/login', { method: 'POST', body: { email: admin2, password: 'NewAdmin2Pass!99' } });
   assert.equal(newPwLogin2.status, 200);
@@ -1123,11 +1142,16 @@ test('multi-admin isolation, live admin revocation, /api/admin/password isolatio
   const memberAdminHit = await callApi('/api/admin/users', { token: memberLogin.token });
   assert.equal(memberAdminHit.status, 403);
 
-  // Live admin revocation: removing admin2 from ADMIN_EMAILS immediately blocks their active session/token from /api/admin/* -> 403!
-  const revokedEnv = { ...env, ADMIN_EMAILS: admin1 };
-  const afterRevokeHit = await callApi('/api/admin/overview', { token: freshTok2 }, revokedEnv);
+  // Live admin revocation from dashboard: primary admin revokes admin2 via /api/admin/users/:id/role -> immediately blocks active session from /api/admin/* -> 403!
+  const revokeRes = await callApi(`/api/admin/users/${adm2Created.id}/role`, {
+    method: 'POST',
+    token: j1.token,
+    body: { role: 'user' }
+  });
+  assert.equal(revokeRes.status, 200);
+  const afterRevokeHit = await callApi('/api/admin/overview', { token: freshTok2 });
   assert.equal(afterRevokeHit.status, 403);
-  const afterRevokeMe = await (await callApi('/api/me', { token: freshTok2 }, revokedEnv)).json();
+  const afterRevokeMe = await (await callApi('/api/me', { token: freshTok2 })).json();
   assert.equal(afterRevokeMe.user.isAdmin, false);
   assert.equal(afterRevokeMe.user.role, 'user');
 
@@ -1521,9 +1545,8 @@ test('shared security helpers: sha256Hex, hmacHex, createMemoryRateLimiter, getC
   assert.equal(rl.check('k1', 2, 60, now + 2).allowed, false);
   assert.equal(rl.check('k1', 2, 60, now + 61).allowed, true);
 
-  assert.equal(getConfiguredAdminPassword({ ADMIN_EMAILS: 'admin@example.com', ADMIN_PASSWORD: 'StrongAdminPassword!' }), 'StrongAdminPassword!');
-  assert.equal(getConfiguredAdminPassword({ ADMIN_EMAILS: 'admin@example.com', ADMIN_PASSWORD: 'admin@example.com' }), null);
-  assert.equal(getConfiguredAdminPassword({ ADMIN_PASSWORD: 'StrongAdminPassword!' }), null);
+  assert.equal(getConfiguredAdminPassword({ ADMIN_EMAIL: 'admin@example.com', ADMIN_PASSWORD: 'StrongAdminPassword!' }), 'StrongAdminPassword!');
+  assert.equal(getConfiguredAdminPassword({ ADMIN_EMAIL: 'admin@example.com', ADMIN_PASSWORD: 'admin@example.com' }), null);
 
   assert.equal(getAdminSecret({ ADMIN_SECRET: 'RootSecret!2025' }), 'RootSecret!2025');
   assert.equal(getAdminSecret({ ADMIN_PASSWORD: 'LegacySecret!2025' }), 'LegacySecret!2025');
@@ -1872,5 +1895,137 @@ test('004_schema_reconcile.sql, ensureDatabaseMigrations, and getDatabaseMigrati
   assert.equal(keptRl.count, 0);
   assert.equal(keptRl.reset_at, 0);
 });
+
+test('bun.lock is tracked with lockfileVersion 1 (no configVersion) for Cloudflare bun@1.2.15 --frozen-lockfile compatibility', () => {
+  const gitignore = fs.readFileSync(new URL('./.gitignore', import.meta.url), 'utf8');
+  assert.equal(/\bbun\.lock\b/.test(gitignore), false, 'bun.lock must NOT be in .gitignore so GitHub sync overwrites any old v2 lockfile');
+  const bunLockRaw = fs.readFileSync(new URL('./bun.lock', import.meta.url), 'utf8');
+  assert.match(bunLockRaw, /"lockfileVersion"\s*:\s*1\b/);
+  assert.doesNotMatch(bunLockRaw, /"lockfileVersion"\s*:\s*2\b/);
+  assert.doesNotMatch(bunLockRaw, /"configVersion"/);
+});
+
+test('migration health check detects missing columns across all tables, reports D1 errors without false positives, and uses 1-query Cold Start fast-path', async () => {
+  __resetWorkerStateForTests();
+
+  // 1. Missing column on users table (e.g. password_hash) MUST report healthy: false and list users.password_hash in missingColumns
+  const incompleteDb = new DatabaseSync(':memory:');
+  incompleteDb.exec(fs.readFileSync(new URL('./migrations/004_schema_reconcile.sql', import.meta.url), 'utf8'));
+  incompleteDb.exec(`
+    DROP TABLE users;
+    CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT, created_at INTEGER NOT NULL DEFAULT 0);
+  `);
+  const { DB: incDB } = createSqliteD1Wrapper(incompleteDb);
+  const incStatus = await getDatabaseMigrationStatus({ DB: incDB });
+  assert.equal(incStatus.healthy, false, 'Health check must be false when users table is missing password_hash and google_sub');
+  assert.deepEqual(incStatus.missingTables, []);
+  assert.ok(incStatus.missingColumns.includes('users.password_hash'));
+  assert.ok(incStatus.missingColumns.includes('users.google_sub'));
+
+  // 2. False-positive prevention: if D1 throws an error during ensureDatabaseMigrations, ok MUST be false and schemaMigrationsEnsured MUST remain false
+  __resetWorkerStateForTests();
+  const brokenD1 = {
+    prepare(sql) {
+      return {
+        bind() { return this; },
+        async first() { throw new Error('d1_disk_io_error'); },
+        async all() { throw new Error('d1_disk_io_error'); },
+        async run() { throw new Error('d1_disk_io_error: ' + sql.slice(0, 24)); }
+      };
+    }
+  };
+  const failedRun = await ensureDatabaseMigrations({ DB: brokenD1 });
+  assert.equal(failedRun.ok, false, 'ensureDatabaseMigrations must not report ok: true when D1 queries fail');
+  assert.equal(failedRun.healthy, false);
+  assert.ok(Array.isArray(failedRun.errors) && failedRun.errors.length > 0);
+
+  // 3. Cold Start Fast-Path: after a verified migration, a new Worker Isolate (__resetWorkerStateForTests) executes only 1 PK read and 0 writes
+  __resetWorkerStateForTests();
+  const prodDb = new DatabaseSync(':memory:');
+  const { DB: prodD1, stats } = createSqliteD1Wrapper(prodDb);
+  const initialMig = await ensureDatabaseMigrations({ DB: prodD1 });
+  assert.equal(initialMig.ok, true);
+  assert.equal(initialMig.healthy, true);
+  assert.equal(initialMig.fastPath, false);
+
+  // Simulate new Worker Isolate cold start
+  __resetWorkerStateForTests();
+  stats.reads = 0;
+  stats.writes = 0;
+  const coldStartMig = await ensureDatabaseMigrations({ DB: prodD1 });
+  assert.equal(coldStartMig.ok, true);
+  assert.equal(coldStartMig.healthy, true);
+  assert.equal(coldStartMig.fastPath, true, 'Cold start on already-migrated D1 should use 1-query fastPath');
+  assert.equal(stats.reads, 1, 'Expected exactly 1 PK SELECT on schema_migrations during cold start');
+  assert.equal(stats.writes, 0, 'Expected 0 D1 writes during cold start fast-path');
+});
+
+test('primary admin can select secondary admin by email in dashboard without password or secret, and promote existing user via /api/admin/users/add', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+
+  const env = {
+    DB,
+    ADMIN_EMAIL: 'chief@example.com',
+    ADMIN_PASSWORD: 'ChiefMasterPassword!1',
+    AUTH_SECRET: 'test-auth-secret-key-minimum-32-chars!!'
+  };
+
+  const callApi = (path, { method = 'GET', body, token } = {}) =>
+    worker.fetch(
+      new Request(`https://darayi.example${path}`, {
+        method,
+        headers: {
+          origin: 'https://darayi.example',
+          ...(body ? { 'content-type': 'application/json' } : {}),
+          'x-requested-with': 'XMLHttpRequest',
+          ...(token ? { authorization: `Bearer ${token}` } : {})
+        },
+        ...(body ? { body: JSON.stringify(body) } : {})
+      }),
+      env
+    );
+
+  const chiefLogin = await (await callApi('/api/auth/login', { method: 'POST', body: { email: 'chief@example.com', password: 'ChiefMasterPassword!1' } })).json();
+  assert.equal(chiefLogin.user.isPrimaryAdmin, true);
+
+  // 1. Primary admin selects a secondary admin by email ONLY (no password, no secret)
+  const addEmailOnly = await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: chiefLogin.token,
+    body: { email: 'selected.admin@example.com', role: 'admin' }
+  });
+  assert.equal(addEmailOnly.status, 200);
+  const addEmailBody = await addEmailOnly.json();
+  assert.equal(addEmailBody.user.role, 'admin');
+  assert.equal(addEmailBody.user.adminTier, 'secondary');
+  assert.equal(addEmailBody.user.envPinned, false);
+
+  // When selected.admin@example.com checks email on login screen, exists is false & allowRegister is true so they can set their password via OTP
+  const chkSelected = await (await callApi('/api/auth/check-email', { method: 'POST', body: { email: 'selected.admin@example.com' } })).json();
+  assert.equal(chkSelected.exists, false);
+  assert.equal(chkSelected.allowRegister, true);
+
+  // 2. If an existing regular user's email is submitted in /api/admin/users/add with role: 'admin', they are promoted cleanly instead of 409
+  const addNormal = await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: chiefLogin.token,
+    body: { email: 'existing.user@example.com', name: 'Existing User', password: 'ExistingUserPass!1', role: 'user' }
+  });
+  assert.equal(addNormal.status, 200);
+
+  const promoteViaAdd = await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: chiefLogin.token,
+    body: { email: 'existing.user@example.com', role: 'admin' }
+  });
+  assert.equal(promoteViaAdd.status, 200);
+  const promotedUser = (await promoteViaAdd.json()).user;
+  assert.equal(promotedUser.role, 'admin');
+  assert.equal(promotedUser.adminTier, 'secondary');
+});
+
 
 

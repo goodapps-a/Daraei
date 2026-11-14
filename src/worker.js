@@ -276,20 +276,44 @@ class HttpError extends Error { constructor(status, msg, extra = null) { super(m
 const memRateLimiter = createMemoryRateLimiter(2000);
 let rateLimitSchemaMode = 'standard'; // 'standard' | 'legacy_altered'
 
-async function getTableColumnsSet(env, tableName) {
+const REQUIRED_SCHEMA_COLUMNS = {
+  users: ['id', 'email', 'name', 'google_sub', 'password_hash', 'created_at'],
+  sessions: ['id_hash', 'user_id', 'expires_at', 'created_at'],
+  otp_codes: ['email', 'purpose', 'code_hash', 'payload', 'expires_at', 'attempts', 'created_at'],
+  oauth_states: ['state_hash', 'verifier', 'expires_at'],
+  user_data: ['user_id', 'holdings', 'watch', 'featured', 'settings', 'updated_at'],
+  alerts: ['id', 'user_id', 'asset_id', 'direction', 'price', 'triggered_at', 'attempts', 'created_at'],
+  alert_units: ['alert_id', 'currency'],
+  alert_delivery: ['alert_id', 'lease_until', 'retry_at'],
+  alert_state: ['alert_id', 'version'],
+  kv: ['k', 'v', 'updated_at'],
+  price_history: ['asset_id', 't', 'price'],
+  price_history_v2: ['asset_id', 't', 'price'],
+  api_keys: ['key_hash', 'label', 'active', 'created_at'],
+  rate_limits: ['k', 'count', 'reset_at'],
+  mail_deliveries: ['delivery_id', 'status', 'updated_at'],
+  admin_roles: ['user_id', 'email', 'role', 'granted_by', 'created_at'],
+  schema_migrations: ['version', 'name', 'applied_at', 'status', 'details']
+};
+const CURRENT_SCHEMA_FINGERPRINT = 'v4_17t_9i_64c';
+
+async function getTableColumnsSet(env, tableName, errors = null) {
   if (!env || !env.DB || !/^[a-zA-Z0-9_]+$/.test(tableName)) return new Set();
   try {
     const res = await env.DB.prepare(`PRAGMA table_info(${tableName})`).all();
     return new Set((res?.results || []).map((c) => String(c.name || '').toLowerCase()).filter(Boolean));
-  } catch {
+  } catch (err) {
+    if (Array.isArray(errors)) {
+      errors.push(`pragma_${tableName}: ${String(err?.message || err)}`);
+    }
     return new Set();
   }
 }
 
-async function ensureTableColumns(env, tableName, columnSpecs) {
+async function ensureTableColumns(env, tableName, columnSpecs, errors = null) {
   const added = [];
   if (!env || !env.DB || !Array.isArray(columnSpecs) || !columnSpecs.length) return added;
-  const cols = await getTableColumnsSet(env, tableName);
+  const cols = await getTableColumnsSet(env, tableName, errors);
   for (const [colName, colDef] of columnSpecs) {
     const lower = String(colName).toLowerCase();
     if (cols.size > 0 && cols.has(lower)) continue;
@@ -297,7 +321,14 @@ async function ensureTableColumns(env, tableName, columnSpecs) {
       await env.DB.prepare(`ALTER TABLE ${tableName} ADD COLUMN ${colName} ${colDef}`).run();
       added.push(`${tableName}.${colName}`);
       cols.add(lower);
-    } catch {}
+    } catch (err) {
+      const msg = String(err?.message || err);
+      if (/duplicate column name/i.test(msg)) {
+        cols.add(lower);
+      } else if (Array.isArray(errors)) {
+        errors.push(`alter_${tableName}_${colName}: ${msg}`);
+      }
+    }
   }
   return added;
 }
@@ -571,15 +602,12 @@ async function resolveAdminStatus(env, uid, email, forceFresh = false) {
   if (isPrimaryAdmin) {
     return { isAdmin: true, isPrimaryAdmin: true, adminTier: 'primary', envPinned: true, role: 'admin' };
   }
-  if (em && isEmailAdmin(env, em)) {
-    return { isAdmin: true, isPrimaryAdmin: false, adminTier: 'secondary', envPinned: true, role: 'admin' };
-  }
   const sec = await getSecondaryAdmins(env, forceFresh);
   const isDbSec = Boolean((em && sec.byEmail.has(em)) || (uidLower && sec.byId.has(uidLower)));
   if (isDbSec) {
     return { isAdmin: true, isPrimaryAdmin: false, adminTier: 'secondary', envPinned: false, role: 'admin' };
   }
-  return { isAdmin: false, isPrimaryAdmin: false, adminTier: null, envPinned: false, role: 'user' };
+  return { isAdmin: false, isPrimaryAdmin: false, adminTier: null, envPinned: false, role: 'admin' === 'user' ? 'admin' : 'user' };
 }
 function invalidateAdminRoleCache() {
   inMemorySecondaryAdmins = null;
@@ -898,7 +926,8 @@ async function checkEmail(req, env) {
     console.error('checkEmail D1 error:', err?.message);
     throw new HttpError(503, 'خطا در بررسی وضعیت حساب در دیتابیس.');
   }
-  if (u || isPrimaryOrEnvAdmin) {
+  const hasActiveAccount = Boolean(u && (u.password_hash || u.google_sub));
+  if (hasActiveAccount || isPrimaryOrEnvAdmin) {
     return json({
       ok: true,
       exists: true,
@@ -907,29 +936,32 @@ async function checkEmail(req, env) {
     });
   }
   const st = await getAdminSettingsObj(env);
+  const secAdmins = await getSecondaryAdmins(env);
+  const isPreSelectedSecAdmin = Boolean(secAdmins.byEmail.has(email));
   return json({
     ok: true,
     exists: false,
-    allowRegister: !(st && st.allowNewRegistrations === false)
+    allowRegister: isPreSelectedSecAdmin || !(st && st.allowNewRegistrations === false)
   });
 }
 
 async function registerStart(req, env) {
   getAuthSecret(env);
   if (!env.DB) throw new HttpError(503, 'دیتابیس در دسترس نیست.');
-  const st = await getAdminSettingsObj(env);
-  if (st && st.allowNewRegistrations === false) {
-    throw new HttpError(403, 'ثبت‌نام کاربران جدید موقتاً توسط مدیر غیرفعال شده است.');
-  }
   const b = await readJson(req), email = cleanEmail(b.email), name = String(b.name || '').trim();
   if (name.length < 2 || name.length > 40) throw new HttpError(400, 'نام باید بین ۲ تا ۴۰ حرف باشد.');
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   if (!okPass(b.password)) throw new HttpError(400, 'رمز عبور باید حداقل ۸ کاراکتر باشد.');
   if (cleanEmail(b.password) === email) throw new HttpError(400, 'رمز عبور نمی‌تواند برابر با آدرس ایمیل باشد.');
+  const st = await getAdminSettingsObj(env);
+  const secAdmins = await getSecondaryAdmins(env);
+  if (st && st.allowNewRegistrations === false && !secAdmins.byEmail.has(email)) {
+    throw new HttpError(403, 'ثبت‌نام کاربران جدید موقتاً توسط مدیر غیرفعال شده است.');
+  }
   await limits(req, env, email, 'reg', 3);
   await rateLimit(env, `otp_hour:${email}`, 5, 3600, true);
-  const ex = await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first();
-  if (!ex) {
+  const ex = await env.DB.prepare('SELECT id, password_hash, google_sub FROM users WHERE email=?').bind(email).first();
+  if (!ex || (!ex.password_hash && !ex.google_sub)) {
     try {
       await mailCode(env, email, 'کد تأیید ثبت‌نام', 'برای تکمیل ثبت‌نام در دارایی من این کد را وارد کن.', await issueCode(env, email, 'register', { name, hash: await hashPassword(b.password, env) }));
     } catch (e) { throw mailFailed(e); }
@@ -943,9 +975,16 @@ async function registerVerify(req, env, url) {
   if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
   await limits(req, env, email, 'regv', 10);
   const p = await checkCode(env, email, 'register', b.code);
-  if (await env.DB.prepare('SELECT 1 AS x FROM users WHERE email=?').bind(email).first()) throw new HttpError(409, 'این ایمیل قبلاً ثبت شده است.');
-  const id = rand(12);
-  await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(id, email, p.name, p.hash, nowS()).run();
+  const existingUser = await env.DB.prepare('SELECT id, password_hash, google_sub FROM users WHERE email=?').bind(email).first();
+  if (existingUser && (existingUser.password_hash || existingUser.google_sub)) {
+    throw new HttpError(409, 'این ایمیل قبلاً ثبت شده است.');
+  }
+  const id = existingUser?.id || rand(12);
+  if (existingUser) {
+    await env.DB.prepare('UPDATE users SET name=?, password_hash=? WHERE id=?').bind(p.name, p.hash, id).run();
+  } else {
+    await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(id, email, p.name, p.hash, nowS()).run();
+  }
   const admStatus = await resolveAdminStatus(env, id, email, true);
   const userObj = { id, email, name: p.name || email.split('@')[0], isAdmin: admStatus.isAdmin, isPrimaryAdmin: admStatus.isPrimaryAdmin, adminTier: admStatus.adminTier, role: admStatus.role };
   const sess = await sessionCookie(env, url, id, userObj);
@@ -3238,14 +3277,61 @@ export async function runCron(env) {
 
 export async function ensureDatabaseMigrations(env, opts = {}) {
   if (!env || !env.DB) {
-    return { ok: false, reason: 'no_db', addedColumns: [], appliedMigrations: [] };
+    return { ok: false, healthy: false, reason: 'no_db', errors: ['no_db'], addedColumns: [], appliedMigrations: [] };
   }
   const force = Boolean(opts && opts.force);
   if (!force && schemaMigrationsEnsured) {
-    return { ok: true, cached: true, addedColumns: [], rateLimitSchemaMode, appliedMigrations: ['001_fix', '002_admin_roles', '003_legacy_columns', '004_schema_reconcile'] };
+    return {
+      ok: true,
+      healthy: true,
+      cached: true,
+      fastPath: false,
+      errors: [],
+      addedColumns: [],
+      missingTables: [],
+      missingColumns: [],
+      missingIndexes: [],
+      rateLimitSchemaMode,
+      appliedMigrations: ['001_fix', '002_admin_roles', '003_legacy_columns', '004_schema_reconcile']
+    };
+  }
+
+  // مسیر سریع (Cold Start Fast-Path): در شروع مجدد محیط اجرایی جدید، فقط با ۱ کوئری PK وضعیت مهاجرت تاییدشده را بررسی کن
+  if (!force) {
+    try {
+      const migRow = await env.DB.prepare(
+        "SELECT version, status, details FROM schema_migrations WHERE version = '004_schema_reconcile' LIMIT 1"
+      ).first();
+      if (migRow && migRow.status === 'applied' && migRow.details) {
+        const parsed = JSON.parse(migRow.details);
+        if (parsed && parsed.verified === true && parsed.fingerprint === CURRENT_SCHEMA_FINGERPRINT) {
+          if (parsed.rateLimitSchemaMode === 'legacy_altered' || parsed.rateLimitSchemaMode === 'standard') {
+            rateLimitSchemaMode = parsed.rateLimitSchemaMode;
+          }
+          schemaMigrationsEnsured = true;
+          adminRolesTableEnsured = true;
+          return {
+            ok: true,
+            healthy: true,
+            cached: false,
+            fastPath: true,
+            errors: [],
+            addedColumns: [],
+            missingTables: [],
+            missingColumns: [],
+            missingIndexes: [],
+            rateLimitSchemaMode,
+            appliedMigrations: ['001_fix', '002_admin_roles', '003_legacy_columns', '004_schema_reconcile']
+          };
+        }
+      }
+    } catch {
+      // اگر جدول schema_migrations هنوز وجود ندارد یا نیاز به بررسی کامل است، ادامه بده
+    }
   }
 
   const now = nowS();
+  const errors = [];
   const tableDdls = [
     "CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, name TEXT NOT NULL, applied_at INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'applied', details TEXT NOT NULL DEFAULT '{}')",
     'CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT, google_sub TEXT UNIQUE, password_hash TEXT, created_at INTEGER NOT NULL DEFAULT 0)',
@@ -3267,34 +3353,48 @@ export async function ensureDatabaseMigrations(env, opts = {}) {
   ];
 
   for (const sql of tableDdls) {
-    try { await env.DB.prepare(sql).run(); } catch {}
+    try {
+      await env.DB.prepare(sql).run();
+    } catch (err) {
+      errors.push(`table_ddl: ${String(err?.message || err)}`);
+    }
   }
 
   const columnMatrix = [
     ['users', [['name', 'TEXT'], ['google_sub', 'TEXT'], ['password_hash', 'TEXT'], ['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
     ['sessions', [['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
     ['otp_codes', [['payload', 'TEXT'], ['attempts', 'INTEGER NOT NULL DEFAULT 0'], ['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['oauth_states', [['verifier', "TEXT NOT NULL DEFAULT ''"], ['expires_at', 'INTEGER NOT NULL DEFAULT 0']]],
     ['user_data', [['holdings', "TEXT NOT NULL DEFAULT '[]'"], ['watch', "TEXT NOT NULL DEFAULT '[]'"], ['featured', "TEXT NOT NULL DEFAULT '[]'"], ['settings', "TEXT NOT NULL DEFAULT '{}'"], ['updated_at', 'INTEGER NOT NULL DEFAULT 0']]],
-    ['alerts', [['triggered_at', 'INTEGER'], ['attempts', 'INTEGER NOT NULL DEFAULT 0'], ['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['alerts', [['user_id', "TEXT NOT NULL DEFAULT ''"], ['asset_id', "TEXT NOT NULL DEFAULT ''"], ['direction', "TEXT NOT NULL DEFAULT 'above'"], ['price', 'REAL NOT NULL DEFAULT 0'], ['triggered_at', 'INTEGER'], ['attempts', 'INTEGER NOT NULL DEFAULT 0'], ['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
     ['alert_units', [['currency', "TEXT NOT NULL DEFAULT 'IRT'"]]],
     ['alert_delivery', [['lease_until', 'INTEGER NOT NULL DEFAULT 0'], ['retry_at', 'INTEGER NOT NULL DEFAULT 0']]],
     ['alert_state', [['version', "TEXT NOT NULL DEFAULT 'legacy'"]]],
+    ['kv', [['v', "TEXT NOT NULL DEFAULT ''"], ['updated_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['price_history', [['price', 'REAL NOT NULL DEFAULT 0']]],
+    ['price_history_v2', [['price', 'REAL NOT NULL DEFAULT 0']]],
+    ['api_keys', [['label', 'TEXT'], ['active', 'INTEGER NOT NULL DEFAULT 1'], ['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
     ['rate_limits', [['count', 'INTEGER NOT NULL DEFAULT 0'], ['reset_at', 'INTEGER NOT NULL DEFAULT 0']]],
+    ['mail_deliveries', [['status', "TEXT NOT NULL DEFAULT ''"], ['updated_at', 'INTEGER NOT NULL DEFAULT 0']]],
     ['admin_roles', [['email', "TEXT NOT NULL DEFAULT ''"], ['role', "TEXT NOT NULL DEFAULT 'secondary_admin'"], ['granted_by', "TEXT NOT NULL DEFAULT ''"], ['created_at', 'INTEGER NOT NULL DEFAULT 0']]],
     ['schema_migrations', [['name', "TEXT NOT NULL DEFAULT ''"], ['applied_at', 'INTEGER NOT NULL DEFAULT 0'], ['status', "TEXT NOT NULL DEFAULT 'applied'"], ['details', "TEXT NOT NULL DEFAULT '{}'"]]]
   ];
 
   const addedColumns = [];
   for (const [tbl, specs] of columnMatrix) {
-    const newlyAdded = await ensureTableColumns(env, tbl, specs);
+    const newlyAdded = await ensureTableColumns(env, tbl, specs, errors);
     addedColumns.push(...newlyAdded);
   }
 
   if (addedColumns.includes('users.google_sub')) {
-    try { await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL').run(); } catch {}
+    try {
+      await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users(google_sub) WHERE google_sub IS NOT NULL').run();
+    } catch (err) {
+      errors.push(`idx_users_google_sub: ${String(err?.message || err)}`);
+    }
   }
 
-  const rlCols = await getTableColumnsSet(env, 'rate_limits');
+  const rlCols = await getTableColumnsSet(env, 'rate_limits', errors);
   if (rlCols.has('n') || rlCols.has('win')) {
     rateLimitSchemaMode = 'legacy_altered';
   }
@@ -3311,31 +3411,64 @@ export async function ensureDatabaseMigrations(env, opts = {}) {
     'CREATE INDEX IF NOT EXISTS idx_admin_roles_email ON admin_roles(email)'
   ];
   for (const sql of indexDdls) {
-    try { await env.DB.prepare(sql).run(); } catch {}
+    try {
+      await env.DB.prepare(sql).run();
+    } catch (err) {
+      errors.push(`index_ddl: ${String(err?.message || err)}`);
+    }
   }
 
+  const postStatus = await getDatabaseMigrationStatus(env);
+  if (Array.isArray(postStatus.errors) && postStatus.errors.length) {
+    errors.push(...postStatus.errors);
+  }
+  const isHealthy = errors.length === 0 && Boolean(postStatus.healthy);
+  const migStatusLabel = isHealthy ? 'applied' : 'failed';
+
   const migrationsToRecord = [
-    ['001_fix', 'Base tables, alert auxiliary tables, and core indexes', JSON.stringify({ file: '001_fix.sql' })],
-    ['002_admin_roles', 'Secondary and primary admin RBAC table and email index', JSON.stringify({ file: '002_admin_roles.sql' })],
-    ['003_legacy_columns', 'Non-destructive legacy column additions for rate_limits, sessions, and alerts', JSON.stringify({ file: '003_legacy_columns.sql', addedColumns })],
-    ['004_schema_reconcile', 'Idempotent schema, index, and migration tracking reconciliation', JSON.stringify({ file: '004_schema_reconcile.sql', addedColumns, rateLimitSchemaMode, destructive: false })]
+    ['001_fix', 'Base tables, alert auxiliary tables, and core indexes', JSON.stringify({ file: '001_fix.sql', verified: isHealthy })],
+    ['002_admin_roles', 'Secondary and primary admin RBAC table and email index', JSON.stringify({ file: '002_admin_roles.sql', verified: isHealthy })],
+    ['003_legacy_columns', 'Non-destructive legacy column additions for rate_limits, sessions, and alerts', JSON.stringify({ file: '003_legacy_columns.sql', addedColumns, verified: isHealthy })],
+    ['004_schema_reconcile', 'Idempotent schema, index, and migration tracking reconciliation', JSON.stringify({
+      file: '004_schema_reconcile.sql',
+      fingerprint: CURRENT_SCHEMA_FINGERPRINT,
+      verified: isHealthy,
+      addedColumns,
+      rateLimitSchemaMode,
+      missingTables: postStatus.missingTables,
+      missingColumns: postStatus.missingColumns,
+      missingIndexes: postStatus.missingIndexes,
+      errors,
+      destructive: false
+    })]
   ];
   for (const [ver, name, details] of migrationsToRecord) {
     try {
       await env.DB.prepare(
-        "INSERT INTO schema_migrations(version, name, applied_at, status, details) VALUES(?, ?, ?, 'applied', ?) ON CONFLICT(version) DO UPDATE SET name=excluded.name, status='applied', details=excluded.details, applied_at=CASE WHEN schema_migrations.applied_at > 0 THEN schema_migrations.applied_at ELSE excluded.applied_at END"
-      ).bind(ver, name, now, details).run();
-    } catch {}
+        "INSERT INTO schema_migrations(version, name, applied_at, status, details) VALUES(?, ?, ?, ?, ?) ON CONFLICT(version) DO UPDATE SET name=excluded.name, status=excluded.status, details=excluded.details, applied_at=CASE WHEN schema_migrations.applied_at > 0 THEN schema_migrations.applied_at ELSE excluded.applied_at END"
+      ).bind(ver, name, now, migStatusLabel, details).run();
+    } catch (err) {
+      errors.push(`record_migration_${ver}: ${String(err?.message || err)}`);
+    }
   }
 
-  schemaMigrationsEnsured = true;
-  adminRolesTableEnsured = true;
+  const finalOk = errors.length === 0 && isHealthy;
+  schemaMigrationsEnsured = finalOk;
+  if (finalOk) {
+    adminRolesTableEnsured = true;
+  }
   return {
-    ok: true,
+    ok: finalOk,
+    healthy: finalOk,
     cached: false,
+    fastPath: false,
+    errors,
     addedColumns,
+    missingTables: postStatus.missingTables,
+    missingColumns: postStatus.missingColumns,
+    missingIndexes: postStatus.missingIndexes,
     rateLimitSchemaMode,
-    appliedMigrations: migrationsToRecord.map((m) => m[0])
+    appliedMigrations: finalOk ? migrationsToRecord.map((m) => m[0]) : []
   };
 }
 
@@ -3343,41 +3476,78 @@ export async function getDatabaseMigrationStatus(env) {
   if (!env || !env.DB) {
     throw new HttpError(503, 'دیتابیس در دسترس نیست.');
   }
-  const requiredTables = [
-    'users', 'sessions', 'otp_codes', 'oauth_states', 'user_data', 'alerts',
-    'alert_units', 'alert_delivery', 'alert_state', 'kv', 'price_history',
-    'price_history_v2', 'api_keys', 'rate_limits', 'mail_deliveries', 'admin_roles', 'schema_migrations'
-  ];
+  const requiredTables = Object.keys(REQUIRED_SCHEMA_COLUMNS);
   const requiredIndexes = [
     'idx_ph2_t', 'idx_sessions_user', 'idx_sessions_expires', 'idx_otp_expires',
     'idx_oauth_expires', 'idx_alerts_user', 'idx_alerts_active', 'idx_rate_limits_reset', 'idx_admin_roles_email'
   ];
 
+  const errors = [];
   let masterRows = [];
   try {
     const res = await env.DB.prepare("SELECT type, name, tbl_name FROM sqlite_master WHERE type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' ORDER BY type, name").all();
     masterRows = res?.results || [];
-  } catch {}
+  } catch (err) {
+    errors.push(`sqlite_master: ${String(err?.message || err)}`);
+  }
 
   const existingTables = new Set(masterRows.filter((r) => r.type === 'table').map((r) => r.name));
   const existingIndexes = new Set(masterRows.filter((r) => r.type === 'index').map((r) => r.name));
   const missingTables = requiredTables.filter((t) => !existingTables.has(t));
   const missingIndexes = requiredIndexes.filter((idx) => !existingIndexes.has(idx));
 
-  const rateLimitsColumns = [...(await getTableColumnsSet(env, 'rate_limits'))];
-  const adminRolesColumns = [...(await getTableColumnsSet(env, 'admin_roles'))];
+  const tableColumns = {};
+  const missingColumns = [];
+  for (const tbl of requiredTables) {
+    const reqCols = REQUIRED_SCHEMA_COLUMNS[tbl] || [];
+    if (!existingTables.has(tbl)) {
+      tableColumns[tbl] = [];
+      for (const rc of reqCols) {
+        missingColumns.push(`${tbl}.${rc}`);
+      }
+      continue;
+    }
+    const colsSet = await getTableColumnsSet(env, tbl, errors);
+    tableColumns[tbl] = [...colsSet];
+    for (const rc of reqCols) {
+      if (!colsSet.has(rc.toLowerCase())) {
+        missingColumns.push(`${tbl}.${rc}`);
+      }
+    }
+  }
+
+  const rateLimitsColumns = tableColumns.rate_limits || [];
+  const adminRolesColumns = tableColumns.admin_roles || [];
+  if (rateLimitsColumns.includes('n') || rateLimitsColumns.includes('win')) {
+    rateLimitSchemaMode = 'legacy_altered';
+  }
 
   let migrations = [];
-  try {
-    const mRes = await env.DB.prepare('SELECT version, name, applied_at, status, details FROM schema_migrations ORDER BY version ASC').all();
-    migrations = mRes?.results || [];
-  } catch {}
+  if (existingTables.has('schema_migrations')) {
+    try {
+      const mRes = await env.DB.prepare('SELECT version, name, applied_at, status, details FROM schema_migrations ORDER BY version ASC').all();
+      migrations = mRes?.results || [];
+    } catch (err) {
+      errors.push(`schema_migrations_read: ${String(err?.message || err)}`);
+    }
+  }
+
+  const healthy =
+    errors.length === 0 &&
+    missingTables.length === 0 &&
+    missingColumns.length === 0 &&
+    missingIndexes.length === 0 &&
+    rateLimitsColumns.includes('count') &&
+    rateLimitsColumns.includes('reset_at');
 
   return {
-    ok: true,
-    healthy: missingTables.length === 0 && missingIndexes.length === 0 && rateLimitsColumns.includes('count') && rateLimitsColumns.includes('reset_at'),
+    ok: errors.length === 0,
+    healthy,
+    errors,
     missingTables,
+    missingColumns,
     missingIndexes,
+    tableColumns,
     rateLimitsColumns,
     adminRolesColumns,
     rateLimitSchemaMode,
@@ -3978,7 +4148,7 @@ async function route(req, env, url, ctx) {
     if (p === '/api/admin/overview' && m === 'GET') {
       const now = nowS();
       let totalUsers = 0, activeUsers = 0, trackedHoldings = 0, totalAlerts = 0;
-      if (inMemoryAdminStats && (now - inMemoryAdminStatsTime < 60)) {
+      if (inMemoryAdminStats && inMemoryAdminStats.db === env.DB && (now - inMemoryAdminStatsTime < 60)) {
         ({ totalUsers, activeUsers, trackedHoldings, totalAlerts } = inMemoryAdminStats);
       } else if (env.DB) {
         try {
@@ -3990,25 +4160,36 @@ async function route(req, env, url, ctx) {
               env.DB.prepare('SELECT COUNT(*) AS c FROM alerts'),
               env.DB.prepare("SELECT COALESCE(SUM(CASE WHEN json_valid(holdings) AND json_type(holdings)='array' THEN json_array_length(holdings) ELSE 0 END), 0) AS c FROM user_data")
             ]);
-            totalUsers = Number(batchRes[0]?.results?.[0]?.c || 0);
-            totalAlerts = Number(batchRes[1]?.results?.[0]?.c || 0);
-            trackedHoldings = Number(batchRes[2]?.results?.[0]?.c || 0);
+            if (batchRes?.[0]?.results) {
+              totalUsers = Number(batchRes[0]?.results?.[0]?.c || 0);
+              totalAlerts = Number(batchRes[1]?.results?.[0]?.c || 0);
+              trackedHoldings = Number(batchRes[2]?.results?.[0]?.c || 0);
+            } else {
+              const uRow = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first();
+              const aRow = await env.DB.prepare('SELECT COUNT(*) AS c FROM alerts').first();
+              const hRes = await env.DB.prepare('SELECT holdings FROM user_data').all();
+              totalUsers = Number(uRow?.c || 0);
+              totalAlerts = Number(aRow?.c || 0);
+              for (const r of (hRes?.results || [])) {
+                try { trackedHoldings += JSON.parse(r.holdings || '[]').length; } catch {}
+              }
+            }
           } catch {
-            const [uRes, aRes, hRes] = await env.DB.batch([
-              env.DB.prepare('SELECT COUNT(*) AS c FROM users'),
-              env.DB.prepare('SELECT COUNT(*) AS c FROM alerts'),
-              env.DB.prepare('SELECT holdings FROM user_data')
-            ]);
-            totalUsers = Number(uRes?.results?.[0]?.c || 0);
-            totalAlerts = Number(aRes?.results?.[0]?.c || 0);
+            const uRow = await env.DB.prepare('SELECT COUNT(*) AS c FROM users').first();
+            const aRow = await env.DB.prepare('SELECT COUNT(*) AS c FROM alerts').first();
+            const hRes = await env.DB.prepare('SELECT holdings FROM user_data').all();
+            totalUsers = Number(uRow?.c || 0);
+            totalAlerts = Number(aRow?.c || 0);
             for (const r of (hRes?.results || [])) {
               try { trackedHoldings += JSON.parse(r.holdings || '[]').length; } catch {}
             }
           }
           const primOverview = await getResolvedPrimaryAdminEmail(env);
-          totalUsers = Math.max(totalUsers, getAdminEmails(env).length || (primOverview ? 1 : 0));
+          const secAdminsOverview = await getSecondaryAdmins(env);
+          const minAdminUsers = (primOverview ? 1 : 0) + (secAdminsOverview?.byEmail?.size || 0);
+          totalUsers = Math.max(totalUsers, getAdminEmails(env).length || 0, minAdminUsers);
           activeUsers = Math.max(0, totalUsers - susp.size);
-          inMemoryAdminStats = { totalUsers, activeUsers, trackedHoldings, totalAlerts };
+          inMemoryAdminStats = { totalUsers, activeUsers, trackedHoldings, totalAlerts, db: env.DB };
           inMemoryAdminStatsTime = now;
         } catch (e) {
           if (e instanceof HttpError) throw e;
@@ -4081,7 +4262,8 @@ async function route(req, env, url, ctx) {
       requirePrimaryAdmin(user);
       const runResult = await ensureDatabaseMigrations(env, { force: true });
       const status = await getDatabaseMigrationStatus(env);
-      return json({ ok: true, runResult, status });
+      const overallOk = Boolean(runResult.ok && status.healthy);
+      return json({ ok: overallOk, runResult, status }, overallOk ? 200 : 500);
     }
 
     if (p === '/api/admin/refresh-prices' && m === 'POST') {
@@ -4232,10 +4414,9 @@ async function route(req, env, url, ctx) {
             const emLower = cleanEmail(r.email);
             const idLower = String(r.id || '').toLowerCase();
             const isPrimary = Boolean(primaryAdm && emLower === primaryAdm);
-            const isEnvAdm = isEmailAdmin(env, emLower);
-            const isDbSecAdm = Boolean(secAdmins.byEmail.has(emLower) || secAdmins.byId.has(idLower));
-            const isAdm = isPrimary || isEnvAdm || isDbSecAdm;
-            const isSusp = !isPrimary && !isEnvAdm && (suspendedSet.has(idLower) || suspendedSet.has(emLower));
+            const isDbSecAdm = !isPrimary && Boolean(secAdmins.byEmail.has(emLower) || secAdmins.byId.has(idLower));
+            const isAdm = isPrimary || isDbSecAdm;
+            const isSusp = !isPrimary && (suspendedSet.has(idLower) || suspendedSet.has(emLower));
             return {
               id: r.id,
               email: r.email,
@@ -4243,7 +4424,7 @@ async function route(req, env, url, ctx) {
               role: isAdm ? 'admin' : 'user',
               isPrimaryAdmin: isPrimary,
               adminTier: isAdm ? (isPrimary ? 'primary' : 'secondary') : null,
-              envPinned: isPrimary || isEnvAdm,
+              envPinned: isPrimary,
               status: isSusp ? 'suspended' : 'active',
               holdingsCount: hCount,
               alertsCount: Number(r.alertCount || 0),
@@ -4255,23 +4436,38 @@ async function route(req, env, url, ctx) {
         console.error('admin users list err:', e?.message);
         throw new HttpError(503, 'خطا در دریافت فهرست کاربران از دیتابیس.');
       }
-      const fallbackAdmins = adminEmails.length ? adminEmails : (primaryAdm ? [primaryAdm] : []);
-      if (!usersList.length && fallbackAdmins.length) {
-        usersList = fallbackAdmins.map((em, idx) => {
-          const isPrimary = Boolean(primaryAdm && em === primaryAdm);
-          return {
-            id: isPrimary ? 'admin_root' : `admin_${idx + 1}`,
-            email: em,
-            name: isPrimary ? 'مدیر کل دارایی' : em.split('@')[0],
-            role: 'admin',
-            isPrimaryAdmin: isPrimary,
-            adminTier: isPrimary ? 'primary' : 'secondary',
-            envPinned: true,
-            status: 'active',
-            holdingsCount: 0,
-            alertsCount: 0,
-            lastLogin: 'هم‌اکنون'
-          };
+      const listedEmails = new Set(usersList.map((u) => cleanEmail(u.email)));
+      for (const [secEm, secEntry] of secAdmins.byEmail.entries()) {
+        if (!secEm || listedEmails.has(secEm) || (primaryAdm && secEm === primaryAdm)) continue;
+        listedEmails.add(secEm);
+        const isSusp = suspendedSet.has(secEm) || (secEntry.userId && suspendedSet.has(String(secEntry.userId).toLowerCase()));
+        usersList.push({
+          id: secEntry.userId || `adm_${secEm}`,
+          email: secEm,
+          name: secEm.split('@')[0],
+          role: 'admin',
+          isPrimaryAdmin: false,
+          adminTier: 'secondary',
+          envPinned: false,
+          status: isSusp ? 'suspended' : 'active',
+          holdingsCount: 0,
+          alertsCount: 0,
+          lastLogin: isSusp ? 'مسدود' : 'انتخاب‌شده در پنل'
+        });
+      }
+      if (primaryAdm && !listedEmails.has(primaryAdm)) {
+        usersList.unshift({
+          id: 'admin_root',
+          email: primaryAdm,
+          name: 'مدیر کل دارایی',
+          role: 'admin',
+          isPrimaryAdmin: true,
+          adminTier: 'primary',
+          envPinned: true,
+          status: 'active',
+          holdingsCount: 0,
+          alertsCount: 0,
+          lastLogin: 'هم‌اکنون'
         });
       }
       return json({ ok: true, users: usersList });
@@ -4284,20 +4480,38 @@ async function route(req, env, url, ctx) {
       if (!isEmail(email)) throw new HttpError(400, 'ایمیل معتبر نیست.');
       const requestedAdmin = b.role === 'admin';
       if (requestedAdmin && !user.isPrimaryAdmin) {
-        throw new HttpError(403, 'فقط مدیر اصلی سیستم می‌تواند کاربر با نقش ادمین ایجاد کند.');
+        throw new HttpError(403, 'فقط مدیر اصلی سیستم می‌تواند ادمین جدید در داشبورد انتخاب کند.');
       }
       const pass = String(b.password || '').trim();
-      if (!okPass(pass)) throw new HttpError(400, 'رمز عبور باید حداقل ۸ کاراکتر باشد.');
-      if (cleanEmail(pass) === email) throw new HttpError(400, 'رمز عبور نمی‌تواند برابر با ایمیل باشد.');
-      const existing = await env.DB.prepare('SELECT 1 FROM users WHERE email=?').bind(email).first();
-      if (existing) throw new HttpError(409, 'این ایمیل قبلاً ثبت شده است.');
-      const id = rand(12);
-      const passHash = await hashPassword(pass, env);
-      await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(id, email, name || email.split('@')[0], passHash, nowS()).run();
-      if (requestedAdmin && !isEmailAdmin(env, email)) {
+      if (!requestedAdmin && !okPass(pass)) {
+        throw new HttpError(400, 'رمز عبور باید حداقل ۸ کاراکتر باشد.');
+      }
+      if (pass && !okPass(pass)) {
+        throw new HttpError(400, 'در صورت وارد کردن رمز عبور، طول آن باید حداقل ۸ کاراکتر باشد.');
+      }
+      if (pass && cleanEmail(pass) === email) {
+        throw new HttpError(400, 'رمز عبور نمی‌تواند برابر با ایمیل باشد.');
+      }
+      const existing = await env.DB.prepare('SELECT id, email, name, password_hash FROM users WHERE email=?').bind(email).first();
+      if (existing && !requestedAdmin) {
+        throw new HttpError(409, 'این ایمیل قبلاً ثبت شده است.');
+      }
+      const id = existing?.id || rand(12);
+      const finalName = name || existing?.name || email.split('@')[0];
+      const passHash = pass ? await hashPassword(pass, env) : (existing?.password_hash || null);
+      if (existing) {
+        await env.DB.prepare('UPDATE users SET name=?, password_hash=? WHERE id=?').bind(finalName, passHash, id).run();
+      } else {
+        await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(id, email, finalName, passHash, nowS()).run();
+      }
+      const primaryAdm = await getResolvedPrimaryAdminEmail(env, true);
+      if (requestedAdmin && email !== primaryAdm) {
         await ensureAdminRolesTable(env);
-        await env.DB.prepare("INSERT OR REPLACE INTO admin_roles(user_id,email,role,granted_by,created_at) VALUES(?,?,'secondary_admin',?,?)").bind(id, email, cleanEmail(user.email), nowS()).run();
+        await env.DB.prepare(
+          "INSERT INTO admin_roles(user_id,email,role,granted_by,created_at) VALUES(?,?,'secondary_admin',?,?) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email, role='secondary_admin', granted_by=excluded.granted_by"
+        ).bind(id, email, cleanEmail(user.email), nowS()).run();
         invalidateAdminRoleCache();
+        evictUserSessionCache(id, email);
       }
       inMemoryAdminStats = null;
       inMemoryAdminStatsTime = 0;
@@ -4307,7 +4521,7 @@ async function route(req, env, url, ctx) {
         user: {
           id,
           email,
-          name: name || email.split('@')[0],
+          name: finalName,
           role: admStatus.role,
           isPrimaryAdmin: admStatus.isPrimaryAdmin,
           adminTier: admStatus.adminTier,
@@ -4327,12 +4541,24 @@ async function route(req, env, url, ctx) {
       const nextRole = b.role === 'admin' ? 'admin' : b.role === 'user' ? 'user' : '';
       if (!nextRole) throw new HttpError(400, 'نقش درخواستی نامعتبر است.');
 
+      await ensureAdminRolesTable(env);
       let targetUser = null;
       try {
         targetUser = await env.DB.prepare('SELECT id, email, name FROM users WHERE LOWER(id)=? OR LOWER(email)=? LIMIT 1').bind(lowerParam, lowerParam).first();
       } catch (err) {
         console.error('admin role lookup D1 err:', err?.message);
         throw new HttpError(503, 'خطا در بررسی حساب کاربر در دیتابیس.');
+      }
+      if (!targetUser) {
+        const roleRow = await env.DB.prepare('SELECT user_id, email FROM admin_roles WHERE LOWER(user_id)=? OR LOWER(email)=? LIMIT 1').bind(lowerParam, lowerParam).first();
+        if (roleRow) {
+          targetUser = { id: roleRow.user_id, email: roleRow.email, name: String(roleRow.email || '').split('@')[0] };
+        } else if (nextRole === 'admin' && isEmail(lowerParam)) {
+          const newId = rand(12);
+          const defaultName = lowerParam.split('@')[0];
+          await env.DB.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').bind(newId, lowerParam, defaultName, null, nowS()).run();
+          targetUser = { id: newId, email: lowerParam, name: defaultName };
+        }
       }
       if (!targetUser) throw new HttpError(404, 'کاربر مورد نظر در دیتابیس یافت نشد.');
 
@@ -4347,17 +4573,10 @@ async function route(req, env, url, ctx) {
       ) {
         throw new HttpError(400, 'نقش مدیر اصلی سیستم قابل تغییر نیست.');
       }
-      if (isEmailAdmin(env, targetEmailLower)) {
-        if (nextRole === 'user') {
-          throw new HttpError(400, 'دسترسی این ادمین از طریق تنظیمات محیطی سرور (ADMIN_EMAILS) تعریف شده است و از پنل قابل لغو نیست.');
-        }
-        return json({ ok: true, user: { id: targetUser.id, email: targetEmailLower, name: targetUser.name || targetEmailLower.split('@')[0], role: 'admin', isPrimaryAdmin: false, adminTier: 'secondary', envPinned: true } });
-      }
       if (nextRole === 'admin' && await isUserSuspended(env, targetUser.id, targetEmailLower, true)) {
         throw new HttpError(400, 'امکان ارتقای کاربر مسدود وجود ندارد؛ ابتدا حساب را فعال کنید.');
       }
 
-      await ensureAdminRolesTable(env);
       if (nextRole === 'admin') {
         await env.DB.prepare(
           "INSERT INTO admin_roles(user_id,email,role,granted_by,created_at) VALUES(?,?,'secondary_admin',?,?) ON CONFLICT(user_id) DO UPDATE SET email=excluded.email, role='secondary_admin', granted_by=excluded.granted_by"
