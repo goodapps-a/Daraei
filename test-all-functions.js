@@ -1896,9 +1896,11 @@ test('004_schema_reconcile.sql, ensureDatabaseMigrations, and getDatabaseMigrati
   assert.equal(keptRl.reset_at, 0);
 });
 
-test('bun.lock is tracked with lockfileVersion 1 (no configVersion) for Cloudflare bun@1.2.15 --frozen-lockfile compatibility', () => {
+test('bun.lock is tracked with lockfileVersion 1 (no configVersion) and package.json pins packageManager for Cloudflare compatibility', () => {
   const gitignore = fs.readFileSync(new URL('./.gitignore', import.meta.url), 'utf8');
   assert.equal(/\bbun\.lock\b/.test(gitignore), false, 'bun.lock must NOT be in .gitignore so GitHub sync overwrites any old v2 lockfile');
+  const pkg = JSON.parse(fs.readFileSync(new URL('./package.json', import.meta.url), 'utf8'));
+  assert.equal(pkg.packageManager, 'bun@1.4.4');
   const bunLockRaw = fs.readFileSync(new URL('./bun.lock', import.meta.url), 'utf8');
   assert.match(bunLockRaw, /"lockfileVersion"\s*:\s*1\b/);
   assert.doesNotMatch(bunLockRaw, /"lockfileVersion"\s*:\s*2\b/);
