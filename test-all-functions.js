@@ -25,7 +25,20 @@ import {
   createMemoryRateLimiter
 } from './src/modules/security.js';
 import crypto from 'node:crypto';
-import { D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, getStaleThresholdSec, isPriceItemStale, parseBonbastPayload } from './src/modules/market-core.js';
+import {
+  D1_HISTORY_ASSET_IDS,
+  KV_SNAPSHOT_KEY,
+  CHART_RANGES,
+  getStaleThresholdSec,
+  isPriceItemStale,
+  parseBonbastPayload,
+  normalizeCandleOpenTimeSec,
+  parseBinanceKlineEntry,
+  filterPointsStrictlyInRange,
+  computeRangeChangePct,
+  buildHistoryMetadata,
+  resolveCryptoIconByAssetId
+} from './src/modules/market-core.js';
 import worker, {
   PriceCoordinator,
   getPriceFreshnessS,
@@ -2518,7 +2531,7 @@ test('PriceCoordinator Durable Object coalesces concurrent refreshes onto one up
   }
 });
 
-test('/api/prices uses global & Tiered Workers Cache (~60s) strictly isolated from auth/admin/user endpoints', async () => {
+test('/api/prices uses per-PoP Workers Cache (caches.default, ~60s) with remaining-TTL headers isolated from auth/admin/user endpoints', async () => {
   __resetWorkerStateForTests();
   const mockEdgeStore = new Map();
   const origCaches = globalThis.caches;
@@ -2580,11 +2593,13 @@ test('/api/prices uses global & Tiered Workers Cache (~60s) strictly isolated fr
     assert.match(cdnCc1, /public,\s*max-age=\d+/);
     assert.match(cfCdnCc1, /public,\s*max-age=\d+/);
     assert.equal(res1.headers.get('set-cookie'), null);
-    assert.ok(mockEdgeStore.has('https://edge.darayi.local/api/prices'), 'Expected /api/prices written to canonical Workers Cache');
+    assert.ok(mockEdgeStore.has('https://edge.darayi.local/api/prices'), 'Expected /api/prices written to per-PoP Workers Cache');
 
-    // Second request from another PoP/client hits canonical edge cache cleanly with 0 upstream calls
+    // Second request in same PoP hits caches.default with 0 upstream calls and bounded remaining TTL <= 60s
     const res2 = await worker.fetch(new Request('https://darayi.example/api/prices'), env, ctx);
     assert.equal(res2.status, 200);
+    const maxAgeMatch = (res2.headers.get('cache-control') || '').match(/max-age=(\d+)/);
+    assert.ok(maxAgeMatch && Number(maxAgeMatch[1]) >= 1 && Number(maxAgeMatch[1]) <= 60);
     const body2 = await res2.json();
     assert.equal(body2.items.btc.price, 91000);
     assert.equal(kucoinCalls, 1);
@@ -2673,6 +2688,248 @@ test('Worker isolate memory cache expires after 60s, ignores older KV snapshots,
     globalThis.fetch = origFetch;
   }
 });
+
+test('strict chart range filtering drops out-of-range points and excludes them from percentage change across domestic history', async () => {
+  __resetWorkerStateForTests();
+  const now = Math.floor(Date.now() / 1000);
+  const span3D = CHART_RANGES['3D'];
+
+  // Out-of-range point from 10 days ago with extreme low price (10000) must NOT distort 3D % change
+  const rawPts = [
+    [now - 10 * 86400, 10000],
+    [now - span3D - 60, 20000], // 1 minute before 3D boundary -> must be dropped
+    [now - span3D + 60, 80000], // inside 3D boundary -> first point
+    [now - 3600, 84000],
+    [now + 7200, 999999]        // too far in future -> dropped
+  ];
+  const filtered = filterPointsStrictlyInRange(rawPts, '3D', now, 3600);
+  assert.equal(filtered.length, 2);
+  assert.deepEqual(filtered, [[now - span3D + 60, 80000], [now - 3600, 84000]]);
+  const pct = computeRangeChangePct(filtered);
+  assert.ok(Math.abs(pct - 5) < 1e-6, `Expected +5% from in-range points only, got ${pct}`);
+
+  // Also test /api/history domestic response for gold18 on 3D rejects points older than 3D
+  const kvStore = new Map([[
+    KV_SNAPSHOT_KEY,
+    JSON.stringify({
+      version: 1,
+      updatedAt: now - 120,
+      checkedAt: now - 10,
+      items: {
+        gold18: {
+          price: 6500000,
+          unit: 'IRT',
+          kind: 'domestic',
+          sym: 'Gold18',
+          name: 'طلای ۱۸ عیار',
+          src: 'nerkhara',
+          t: now - 120,
+          sourceTimestamp: now - 120,
+          receivedAt: now - 10
+        }
+      },
+      feeds: {}
+    })
+  ]]);
+  const mockKv = {
+    async get(k, opts) {
+      const raw = kvStore.get(k);
+      return raw && opts?.type === 'json' ? JSON.parse(raw) : raw;
+    },
+    async put(k, v) { kvStore.set(k, v); }
+  };
+
+  const d10 = new Date((now - 10 * 86400) * 1000).toISOString().slice(0, 10);
+  const d2 = new Date((now - 2 * 86400) * 1000).toISOString().slice(0, 10);
+  const d1 = new Date((now - 1 * 86400) * 1000).toISOString().slice(0, 10);
+  const d0 = new Date(now * 1000).toISOString().slice(0, 10);
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const u = typeof input === 'string' ? input : input?.url || '';
+    if (u.includes('iran-market.github.io')) {
+      return new Response(JSON.stringify({
+        meta: { unit: 'toman' },
+        data: [
+          { date: d10, close: 3000000 }, // 10 days ago — outside 3D!
+          { date: d2, close: 6200000 },
+          { date: d1, close: 6400000 },
+          { date: d0, close: 6500000 }
+        ]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  try {
+    const res = await history({ PRICES_KV: mockKv }, new URL('https://darayi.example/api/history?id=gold18&range=3D'));
+    const body = await res.json();
+    assert.ok(body.points.length >= 2);
+    for (const [ptTs, ptVal] of body.points) {
+      assert.ok(ptTs >= now - span3D - 60, `Found point older than 3D span: ${ptTs}`);
+      assert.notEqual(ptVal, 3000000, '10-day-old point must never leak into 3D domestic chart');
+    }
+    assert.ok(body.priceSource);
+    assert.ok(body.lastDataAt > 1500000000);
+    assert.ok(body.resolution);
+    assert.ok(['live', 'archived', 'published'].includes(body.dataStatus));
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('candle timestamps standardize on openTime across Binance and other exchanges', async () => {
+  __resetWorkerStateForTests();
+  const baseSec = Math.floor(Date.now() / 1000) - 3600;
+  const openMs1 = baseSec * 1000;
+  const closeMs1 = openMs1 + 299999; // closeTime is +5m later; must NOT be used!
+  const parsed = parseBinanceKlineEntry([openMs1, '90000', '90500', '89900', '90200', '10', closeMs1]);
+  assert.deepEqual(parsed, [baseSec, 90200]);
+  assert.equal(normalizeCandleOpenTimeSec(String(openMs1)), baseSec);
+  assert.equal(normalizeCandleOpenTimeSec(String(baseSec)), baseSec);
+
+  const mockKv = {
+    async get() { return null; },
+    async put() {}
+  };
+  const openSecA = baseSec - 600;
+  const openSecB = baseSec - 300;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const u = typeof input === 'string' ? input : input?.url || '';
+    if (u.includes('kucoin.com/api/v1/market/candles')) {
+      // Simulate Binance-only fallback test by letting binance answer when others return empty
+      return new Response(JSON.stringify({ code: '200000', data: [] }), { status: 200 });
+    }
+    if (u.includes('okx.com') || u.includes('gateio.ws')) {
+      return new Response('[]', { status: 200 });
+    }
+    if (u.includes('binance.vision/api/v3/klines')) {
+      return new Response(JSON.stringify([
+        [openSecA * 1000, '91000', '91100', '90900', '91050', '5', (openSecA + 299) * 1000],
+        [openSecB * 1000, '91050', '91200', '91000', '91180', '8', (openSecB + 299) * 1000]
+      ]), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  try {
+    const res = await history({ PRICES_KV: mockKv }, new URL('https://darayi.example/api/history?id=eth&range=1D'));
+    const body = await res.json();
+    assert.equal(body.source, 'binance');
+    assert.deepEqual(body.points, [[openSecA, 91050], [openSecB, 91180]]);
+    assert.equal(body.resolution, '5m');
+    assert.equal(body.dataStatus, 'live');
+    assert.equal(body.lastDataAt, openSecB);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('recordD1DomesticHistory preserves real sourceTimestamp for old/unchanged prices without stamping now', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE price_history_v2 (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price INTEGER NOT NULL, PRIMARY KEY (asset_id, t))');
+  const mockD1 = {
+    prepare(sql) {
+      const stmt = db.prepare(sql);
+      return {
+        bind(...args) {
+          return {
+            _stmt: stmt,
+            _args: args,
+            async first() { return stmt.get(...args) ?? null; },
+            async all() { return { results: stmt.all(...args) }; },
+            async run() { return stmt.run(...args); }
+          };
+        }
+      };
+    },
+    async batch(boundList) {
+      return boundList.map((b) => {
+        if (/^\s*SELECT/i.test(b._stmt.sourceSQL || '')) {
+          return { results: b._stmt.all(...b._args) };
+        }
+        b._stmt.run(...b._args);
+        return { success: true };
+      });
+    }
+  };
+
+  const now = Math.floor(Date.now() / 1000);
+  const realUpstreamTs = now - 600; // 10 minutes earlier, still fresh
+  const items = {
+    usd: {
+      price: 89000,
+      unit: 'IRT',
+      kind: 'domestic',
+      t: realUpstreamTs,
+      sourceTimestamp: realUpstreamTs,
+      receivedAt: now
+    }
+  };
+
+  const inserted1 = await recordD1DomesticHistory({ DB: mockD1 }, items, now, true);
+  assert.equal(inserted1, 1);
+  const rows1 = db.prepare('SELECT asset_id, t, price FROM price_history_v2 WHERE asset_id = ?').all('usd');
+  assert.equal(rows1.length, 1);
+  assert.equal(rows1[0].t, realUpstreamTs, 'Must record real sourceTimestamp instead of synthetic now');
+  assert.equal(rows1[0].price, 89000);
+
+  // Calling again later with the SAME unchanged sourceTimestamp & price must NOT stamp a duplicate point with now
+  const laterNow = now + 300;
+  const inserted2 = await recordD1DomesticHistory({ DB: mockD1 }, items, laterNow, true);
+  assert.equal(inserted2, 0);
+  const rows2 = db.prepare('SELECT asset_id, t, price FROM price_history_v2 WHERE asset_id = ?').all('usd');
+  assert.equal(rows2.length, 1);
+  assert.equal(rows2[0].t, realUpstreamTs);
+
+  // Also test buildHistoryMetadata keeps source/lastDataAt/resolution/dataStatus coherent
+  const meta = buildHistoryMetadata({
+    id: 'usd',
+    range: '1D',
+    source: 'd1_intraday',
+    points: [[realUpstreamTs, 89000]],
+    liveItem: { ...items.usd, src: 'nerkhara', priceType: 'published' },
+    nowSec: laterNow,
+    isDomestic: true
+  });
+  assert.equal(meta.priceSource, 'nerkhara');
+  assert.equal(meta.lastDataAt, realUpstreamTs);
+  assert.equal(meta.resolution, '5m');
+  assert.equal(meta.dataStatus, 'published');
+});
+
+test('crypto icon mapping resolves by unique asset id/slug first and blocks wrong colliding-symbol fallbacks', async () => {
+  __resetWorkerStateForTests();
+  const maps = {
+    localIcons: { btc: '/logos/crypto/btc.png' },
+    idMap: { 'cat-coin': 'https://cdn.example/cat-coin.png', 'simon-cat': 'https://cdn.example/simon-cat.png' },
+    nameMap: { catcoin: 'https://cdn.example/cat-coin.png' },
+    symbolMap: { btc: 'https://wrong.example/btc.png', cat: 'https://cdn.example/wrong-cat.png', uniq: 'https://cdn.example/uniq.png' },
+    symbolCounts: { btc: 1, cat: 2, uniq: 1 }
+  };
+
+  // 1. Exact ID match beats symbolMap
+  assert.equal(resolveCryptoIconByAssetId({ id: 'btc', sym: 'BTC' }, maps), '/logos/crypto/btc.png');
+  assert.equal(resolveCryptoIconByAssetId({ id: 'cat-coin', sym: 'CAT', name: 'Cat Coin' }, maps), 'https://cdn.example/cat-coin.png');
+  assert.equal(resolveCryptoIconByAssetId({ id: 'simon-cat', sym: 'CAT', name: 'Simon Cat' }, maps), 'https://cdn.example/simon-cat.png');
+
+  // 2. Unmapped asset sharing colliding symbol CAT must NOT inherit the wrong CAT logo
+  assert.equal(resolveCryptoIconByAssetId({ id: 'unknown-cat', sym: 'CAT', name: 'Unknown Cat' }, maps), '');
+
+  // 3. Unique non-colliding symbol can still resolve via symbolMap when ID/name absent
+  assert.equal(resolveCryptoIconByAssetId({ id: 'unique-asset', sym: 'UNIQ', name: 'Unique Asset' }, maps), 'https://cdn.example/uniq.png');
+
+  // 4. Verify src/index.html client getCryptoIcon & detail source metadata element are wired cleanly
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('function getClientCryptoSymbolCounts()'));
+  assert.ok(html.includes('id="detailSourceMeta"'));
+  assert.ok(html.includes('منبع قیمت'));
+  assert.ok(html.includes('آخرین داده واقعی'));
+  assert.ok(html.includes('دقت نمونه‌برداری'));
+  assert.ok(html.includes('وضعیت داده'));
+});
+
 
 
 

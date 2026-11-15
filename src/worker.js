@@ -21,7 +21,7 @@
  * | hasActiveAlertsCache          | D1 (alerts WHERE triggered_at NULL)| 30m (1800s) | جلوگیری از اسکن جدول هشدارها در صورت نبود هشدار فعال  |
  * ============================================================================
  */
-import { NERKHARA_MAP, BONBAST_MAP, parseBonbastPayload, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale } from './modules/market-core.js';
+import { NERKHARA_MAP, BONBAST_MAP, parseBonbastPayload, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale, normalizeCandleOpenTimeSec, parseBinanceKlineEntry, buildHistoryMetadata, resolveCryptoIconByAssetId } from './modules/market-core.js';
 import { enc, SEC_HEADERS, PROD_CSP, buildHtmlCsp, b64u, b64uDec, teq, sha256, hmacB64u, createMemoryRateLimiter, cleanEmail, isEmail, okPass, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, getConfiguredAdminPassword, getAdminSecret, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
 import { buildLocalCryptoIconsMap } from './modules/local-icons.js';
 export { cleanData, validateTransactions, isSafePublicUrl, hashPassword, verifyPassword, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, parseBonbastPayload, getAdminSecret };
@@ -2229,7 +2229,7 @@ const SOURCES = {
       const type = { '1m': '1min', '5m': '5min', '1h': '1hour', '4h': '4hour', '1d': '1day' }[iv];
       const end = nowS();
       const j = await fetchJSON(`https://api.kucoin.com/api/v1/market/candles?type=${type}&symbol=${encodeURIComponent(pair)}&startAt=${end - sec * lim}&endAt=${end}`, 4);
-      return (j.data || []).map(c => [+c[0], +c[2]]);
+      return (j.data || []).map(c => [normalizeCandleOpenTimeSec(c[0]), +c[2]]);
     }
   },
   okx: {
@@ -2250,7 +2250,7 @@ const SOURCES = {
       const firstLimit = Math.min(lim, 300);
       const j1 = await fetchJSON(`https://www.okx.com/api/v5/market/candles?instId=${encodeURIComponent(pair)}&bar=${bar}&limit=${firstLimit}`, 4);
       const rows1 = Array.isArray(j1?.data) ? j1.data : [];
-      let all = rows1.map(c => [Math.floor(+c[0] / 1000), +c[4]]);
+      let all = rows1.map(c => [normalizeCandleOpenTimeSec(c[0]), +c[4]]);
       // صفحه‌بندی برای بازه‌های بلندمدت (مانند 1Y = 365 روز که از سقف 300 کندل OKX بیشتر است)
       if (lim > 300 && rows1.length >= 200) {
         const oldestMs = rows1[rows1.length - 1]?.[0];
@@ -2259,7 +2259,7 @@ const SOURCES = {
             const remLimit = Math.min(300, lim - rows1.length + 10);
             const j2 = await fetchJSON(`https://www.okx.com/api/v5/market/candles?instId=${encodeURIComponent(pair)}&bar=${bar}&after=${encodeURIComponent(oldestMs)}&limit=${remLimit}`, 4);
             if (Array.isArray(j2?.data) && j2.data.length) {
-              all = all.concat(j2.data.map(c => [Math.floor(+c[0] / 1000), +c[4]]));
+              all = all.concat(j2.data.map(c => [normalizeCandleOpenTimeSec(c[0]), +c[4]]));
             }
           } catch {}
         }
@@ -2285,7 +2285,7 @@ const SOURCES = {
     },
     async klines(pair, iv, lim) {
       const j = await fetchJSON(`https://api.gateio.ws/api/v4/spot/candlesticks?currency_pair=${encodeURIComponent(pair)}&interval=${iv}&limit=${Math.min(lim, 999)}`, 4);
-      return Array.isArray(j) ? j.map(c => [+c[0], +c[2]]) : [];
+      return Array.isArray(j) ? j.map(c => [normalizeCandleOpenTimeSec(c[0]), +c[2]]) : [];
     }
   },
   binance: {
@@ -2301,7 +2301,8 @@ const SOURCES = {
       }));
     },
     async klines(pair, iv, lim) {
-      return (await binance(`/klines?symbol=${encodeURIComponent(pair)}&interval=${iv}&limit=${Math.min(lim, 1000)}`)).map(c => [Math.floor(Math.min(+c[6], Date.now()) / 1000), +c[4]]);
+      const rows = await binance(`/klines?symbol=${encodeURIComponent(pair)}&interval=${iv}&limit=${Math.min(lim, 1000)}`);
+      return Array.isArray(rows) ? rows.map(parseBinanceKlineEntry).filter(Boolean) : [];
     }
   }
 };
@@ -2460,19 +2461,17 @@ export async function recordD1DomesticHistory(env, items, now = nowS(), forceCro
       if (isPriceItemStale(it, id, now)) continue;
       const price = Math.round(Number(it.price));
       const srcTs = Number(it.sourceTimestamp) > 0 ? Math.floor(Number(it.sourceTimestamp)) : 0;
+      const itemT = Number(it.t) > 1500000000 ? Math.floor(Number(it.t)) : 0;
+      // هرگز قیمت قدیمی یا بدون تغییر را با زمان فعلی (now) ثبت نکن؛ زمان معتبر منبع یا t واقعی داده حفظ می‌شود
+      const effectiveTs = srcTs > 0 ? srcTs : (itemT > 0 ? itemT : now);
       const prev = lastD1RecordedMap.get(id);
-      // اگر اولین نقطه ثبت‌شده برای این دارایی است و زمان منبع معتبر و در ۲۴ ساعت اخیر است، زمان منبع را نیز ثبت کن
-      if (!prev && srcTs > (now - 86400) && srcTs < (now - 60)) {
+      const priceChanged = !prev || prev.price !== price;
+      const hasNewerTimestampHeartbeat = Boolean(prev && effectiveTs > prev.t && (effectiveTs - prev.t >= 900) && (now - effectiveTs <= 900));
+      if (priceChanged || hasNewerTimestampHeartbeat) {
         stmts.push(
-          env.DB.prepare('INSERT OR IGNORE INTO price_history_v2 (asset_id, t, price) VALUES (?, ?, ?)').bind(id, srcTs, price)
+          env.DB.prepare('INSERT OR IGNORE INTO price_history_v2 (asset_id, t, price) VALUES (?, ?, ?)').bind(id, effectiveTs, price)
         );
-      }
-      // فقط زمانی در D1 بنویس که قیمت تغییر کرده باشد یا حداقل ۱۵ دقیقه از آخرین نقطه ثبت‌شده گذشته باشد (تا نمودار 1H و 1D پیوسته و دقیق بماند و مصرف D1 زیر ۲٪ سقف رایگان باشد)
-      if (!prev || prev.price !== price || (now - prev.t >= 900)) {
-        stmts.push(
-          env.DB.prepare('INSERT OR IGNORE INTO price_history_v2 (asset_id, t, price) VALUES (?, ?, ?)').bind(id, now, price)
-        );
-        pendingRecorded.push({ id, price, t: now });
+        pendingRecorded.push({ id, price, t: effectiveTs });
       }
     }
 
@@ -2606,13 +2605,16 @@ async function refreshPricesLocal(env, force = false, skipSideEffects = false, c
       const finalChange = Number.isFinite(change)
         ? +Number(change).toFixed(2)
         : (old && old.price === price && Number.isFinite(old.change) ? old.change : null);
-      const effectiveT = validSrcTs || t;
+      // اگر قیمت بدون تغییر مانده و منبع زمان جدیدتری نداده‌است، زمان قبلی داده حفظ می‌شود تا قیمت قدیمی با زمان اکنون ثبت نشود
+      const sameUnchangedPrice = Boolean(!validSrcTs && old && old.price === price && Number(old.t) > 1500000000);
+      const effectiveT = validSrcTs || (sameUnchangedPrice ? Math.floor(Number(old.t)) : t);
+      const preservedSrcTs = validSrcTs || (sameUnchangedPrice && Number(old?.sourceTimestamp) > 1500000000 ? Math.floor(Number(old.sourceTimestamp)) : null);
       items[id] = {
         price,
         change: finalChange,
         t: effectiveT,
-        sourceTimestamp: validSrcTs,
-        receivedAt: t,
+        sourceTimestamp: preservedSrcTs,
+        receivedAt: sameUnchangedPrice && Number(old?.receivedAt) > 1500000000 ? Math.floor(Number(old.receivedAt)) : t,
         checkedAt: t,
         src,
         unit,
@@ -3257,8 +3259,8 @@ export async function refreshPrices(env, force = false, skipSideEffects = false,
   return refreshPricesLocal(env, force, skipSideEffects, ctx);
 }
 
-// پالایش و اعتبارسنجی نقاط نمودار از API صرافی‌ها و آرشیوها بدون حذف نوسانات واقعی بازار و بدون ساخت نقطه فرضی
-function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0, allowLiveAppend = true) {
+// پالایش و اعتبارسنجی نقاط نمودار از API صرافی‌ها و آرشیوها بدون حذف نوسانات واقعی بازار، بدون نقاط خارج از بازه و بدون برچسب زمان مصنوعی
+function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0, allowLiveAppend = true, refTs = 0) {
   const span = RANGES[range];
   if (!span || !Array.isArray(rawPoints) || rawPoints.length < 2) return [];
 
@@ -3299,24 +3301,21 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0, 
   }
   if (filtered.length < 2) return [];
 
-  // برای بازه‌های کوتاه‌مدت (1H و 1D) فقط نقاط داخل بازه واقعی مجازند؛ برای بازه‌های روزانه تلورانس تعطیلات بازار لحاظ می‌شود
   const isIntraday = range === '1H' || range === '1D';
-  const graceWindow = isIntraday
-    ? (range === '1H' ? 4500 : 88200)
-    : (isDomestic ? Math.max(span * 1.5, 6 * 86400) : Math.max(span * 1.25, 7200));
-  const minTs = now - graceWindow;
-  let pts = filtered.filter(p => p[0] >= minTs && p[0] <= now + 3600);
-  if (!isIntraday && pts.length < 2) {
-    pts = filtered.slice(-Math.min(filtered.length, range === '1Y' ? 365 : range === '1M' ? 35 : 48));
-  }
+  // برای طلا و ارز بازه کاملاً سخت‌گیرانه [now - span, now + maxLead] اعمال می‌شود تا هیچ نقطه‌ای خارج از بازه وارد نمودار و درصد تغییر نشود
+  const cryptoBucketLead = isIntraday ? 300 : 86400;
+  const minTs = isDomestic ? (now - span) : (now - span - cryptoBucketLead);
+  const maxTs = now + (isIntraday ? 60 : 3600);
+  const pts = filtered.filter(p => p[0] >= minTs && p[0] <= maxTs);
   if (pts.length < 2) return [];
 
-  // اتصال نقطه فعلی بازار فقط در صورتی که قیمت زنده معتبر باشد و جهش خطای واحد نداشته باشد
-  if (allowLiveAppend && refPrice > 0) {
+  // اتصال نقطه فعلی بازار فقط با زمان واقعی منبع و در محدوده بازه مجاز (هرگز زمان now را به داده قدیمی الصاق نکن)
+  const validRefTs = Number(refTs) > 1500000000 ? Math.floor(Number(refTs)) : 0;
+  if (allowLiveAppend && refPrice > 0 && validRefTs >= minTs && validRefTs <= now + 60) {
     const lastPt = pts[pts.length - 1];
     const diffRatio = Math.abs(lastPt[1] - refPrice) / refPrice;
-    if (diffRatio <= 0.35 && now > lastPt[0]) {
-      pts.push([now, refPrice]);
+    if (diffRatio <= 0.35 && validRefTs > lastPt[0]) {
+      pts.push([validRefTs, refPrice]);
     }
   }
 
@@ -3383,18 +3382,18 @@ function parseArchiveRecTs(rec) {
   return 0;
 }
 
-// استخراج تاریخچه واقعی طلا، سکه و ارز بدون هیچ‌گونه نقطه مصنوعی، خط فرضی یا محاسبه معکوس از درصد تغییر
+// استخراج تاریخچه واقعی طلا، سکه و ارز بدون هیچ‌گونه نقطه مصنوعی، خط فرضی یا نقاط خارج از بازه انتخابی
 async function archiveHistory(id, range, liveItem = null, env = null) {
   const now = nowS();
   const span = RANGES[range] || 86400;
-  const minTs = now - span - 4 * 86400;
+  const minTs = now - span;
   const maxSlice = range === '3D' ? 10 : range === '1W' ? 18 : range === '1M' ? 45 : 400;
   const curPrice = (liveItem && Number(liveItem.price) > 0 && !isPriceItemStale(liveItem, id, now))
     ? Math.round(Number(liveItem.price))
     : 0;
   const curTs = Number(liveItem?.sourceTimestamp) > 0
     ? Math.floor(Number(liveItem.sourceTimestamp))
-    : (Number(liveItem?.receivedAt) > 0 ? Math.floor(Number(liveItem.receivedAt)) : now);
+    : (Number(liveItem?.t) > 1500000000 ? Math.floor(Number(liveItem.t)) : (Number(liveItem?.receivedAt) > 1500000000 ? Math.floor(Number(liveItem.receivedAt)) : 0));
 
   // ۱. برای بازه‌های کوتاه‌مدت (1H و 1D): نقاط واقعی D1 + پر کردن ابتدای ۲۴ ساعت (برای 1D) با نرخ‌های بسته و باز واقعی روزانه در صورت نیاز
   if (range === '1H' || range === '1D') {
@@ -3402,15 +3401,8 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
     const d1Pts = await queryD1DomesticHistory(env, id, windowStart);
     const memPts = (id === 'usdt' && d1Pts.length >= 4) ? [] : (domesticIntradayTicks.get(id) || []).filter(p => p[0] >= windowStart && p[0] <= now + 60);
     const combined = [...d1Pts, ...memPts];
-    if (curPrice > 0) {
-      const srcTs = Number(liveItem?.sourceTimestamp) > 0 ? Math.floor(Number(liveItem.sourceTimestamp)) : 0;
-      const obsTs = Number(liveItem?.receivedAt) > 0 ? Math.floor(Number(liveItem.receivedAt)) : now;
-      if (srcTs >= windowStart && srcTs <= now + 60) {
-        combined.push([srcTs, curPrice]);
-      }
-      if (obsTs >= windowStart && obsTs <= now + 60 && Math.abs(obsTs - srcTs) >= 60) {
-        combined.push([obsTs, curPrice]);
-      }
+    if (curPrice > 0 && curTs >= windowStart && curTs <= now + 60) {
+      combined.push([curTs, curPrice]);
     }
     combined.sort((a, b) => a[0] - b[0]);
     const deduped = [];
@@ -3451,7 +3443,7 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
             if (startTs <= windowStart && (closeVal > 0 || openVal > 0)) {
               prevCloseForWindow = closeVal || openVal;
             }
-            if (openVal > 0 && startTs >= windowStart && startTs < (deduped[0]?.[0] || curTs)) {
+            if (openVal > 0 && startTs >= windowStart && startTs < (deduped[0]?.[0] || (curTs > windowStart ? curTs : now))) {
               anchorPoints.push([startTs, openVal]);
             }
             if (closeVal > 0) {
@@ -3483,7 +3475,7 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
             if (!/^\d{4}-\d{2}-\d{2}$/.test(dStr) || !(v > 0)) continue;
             const ts = Math.floor(Date.parse(`${dStr}T12:00:00Z`) / 1000);
             if (ts <= windowStart + 43200) bestVal = v;
-            if (ts >= windowStart && ts < (deduped[0]?.[0] || curTs)) {
+            if (ts >= windowStart && ts < (deduped[0]?.[0] || (curTs > windowStart ? curTs : now))) {
               anchorPoints.push([ts, v]);
             }
           }
@@ -3496,10 +3488,8 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
 
       if (anchorPoints.length) {
         const merged = [...anchorPoints, ...deduped];
-        if (curPrice > 0 && curTs > (merged.at(-1)?.[0] || 0)) {
+        if (curPrice > 0 && curTs >= windowStart && curTs <= now + 60 && curTs > (merged.at(-1)?.[0] || 0)) {
           merged.push([curTs, curPrice]);
-        } else if (curPrice > 0 && merged.length && now > (merged.at(-1)?.[0] || 0)) {
-          merged.push([now, curPrice]);
         }
         merged.sort((a, b) => a[0] - b[0]);
         const finalOut = [];
@@ -3510,11 +3500,11 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
             finalOut.push(pt);
           }
         }
-        if (finalOut.length >= 2) return finalOut;
+        if (finalOut.length >= 2) return { points: finalOut, source: 'd1_intraday' };
       }
     }
 
-    return deduped.length >= 2 ? deduped : [];
+    return { points: deduped.length >= 2 ? deduped : [], source: 'd1_intraday' };
   }
 
   // ۲. برای بازه‌های چندروزه و بلندمدت (3D, 1W, 1M, 1Y): واکشی هم‌زمان آرشیو iran-market و NerkhAra (اولویت با iran-market)
@@ -3542,8 +3532,10 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
             out.push([baseTs, closeToman]);
           }
         }
-        if (curPrice > 0) out.push([curTs, curPrice]);
-        if (out.length >= 2) return out;
+        if (curPrice > 0 && curTs >= minTs && curTs <= now + 3600 && curTs > (out.at(-1)?.[0] || 0)) {
+          out.push([curTs, curPrice]);
+        }
+        if (out.length >= 2) return { points: out, source: 'iran_market' };
       }
     } catch {}
   }
@@ -3564,8 +3556,10 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
             out.push([ts, val]);
           }
         }
-        if (curPrice > 0) out.push([curTs, curPrice]);
-        if (out.length >= 2) return out;
+        if (curPrice > 0 && curTs >= minTs && curTs <= now + 3600 && curTs > (out.at(-1)?.[0] || 0)) {
+          out.push([curTs, curPrice]);
+        }
+        if (out.length >= 2) return { points: out, source: 'nerkhara' };
       }
     } catch {}
   }
@@ -3598,8 +3592,10 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
                 out.push([ts, Number(v)]);
               }
             }
-            if (curPrice > 0) out.push([curTs, curPrice]);
-            if (out.length >= 2) return out;
+            if (curPrice > 0 && curTs >= minTs && curTs <= now + 3600 && curTs > (out.at(-1)?.[0] || 0)) {
+              out.push([curTs, curPrice]);
+            }
+            if (out.length >= 2) return { points: out, source: 'nerkhsanj' };
           }
         }
       }
@@ -3608,11 +3604,13 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
 
   // فقط در صورتی که هر سه آرشیو روزانه برای بازه 3D یا 1W در دسترس نباشند، به تاریخچه D1 مراجعه کن
   if (range === '3D' || range === '1W') {
-    const d1Fallback = await queryD1DomesticHistory(env, id, now - span);
-    if (curPrice > 0) d1Fallback.push([curTs, curPrice]);
-    if (d1Fallback.length >= 2) return d1Fallback;
+    const d1Fallback = await queryD1DomesticHistory(env, id, minTs);
+    if (curPrice > 0 && curTs >= minTs && curTs <= now + 3600 && curTs > (d1Fallback.at(-1)?.[0] || 0)) {
+      d1Fallback.push([curTs, curPrice]);
+    }
+    if (d1Fallback.length >= 2) return { points: d1Fallback, source: 'd1_intraday' };
   }
-  return [];
+  return { points: [], source: 'archive' };
 }
 
 const historyMemCache = new Map();
@@ -3776,6 +3774,8 @@ export async function history(env, url, ctx = null) {
       return { body: payload, headers };
     };
 
+    const liveRefTs = it ? (Number(it.sourceTimestamp) > 1500000000 ? Math.floor(Number(it.sourceTimestamp)) : (Number(it.t) > 1500000000 ? Math.floor(Number(it.t)) : 0)) : 0;
+
     // ۱. تاریخچه رمزارزها و تتر (مستقیم از کندل‌های واقعی صرافی)
     if (it?.crypto || !isDomesticAsset) {
       if (id === 'usdt') {
@@ -3795,30 +3795,31 @@ export async function history(env, url, ctx = null) {
             const saved = await loadUsdtHistoryCache(env, usdtCacheKey);
             const maxAge = 21600;
             if (saved && Array.isArray(saved.points) && saved.points.length >= 2 && (t - (saved.t || 0) <= maxAge)) {
-              pts = validateHistoryPoints(saved.points, range, t, true, refP, true);
+              pts = validateHistoryPoints(saved.points, range, t, true, refP, true, liveRefTs);
               srcUsed = 'wallex_cache';
             }
           } catch {}
         }
         if (pts.length < 2) {
-          const arch = await archiveHistory('usdt', range, it, env);
-          pts = validateHistoryPoints(arch, range, t, true, refP, range !== '1H' && range !== '1D');
-          srcUsed = (range === '1H' || range === '1D') ? 'd1_intraday' : 'archive';
+          const archRes = await archiveHistory('usdt', range, it, env);
+          pts = validateHistoryPoints(archRes.points, range, t, true, refP, range !== '1H' && range !== '1D', liveRefTs);
+          srcUsed = archRes.source || ((range === '1H' || range === '1D') ? 'd1_intraday' : 'archive');
         }
         if (pts.length >= 2) {
-          if (refP > 0) {
+          if (refP > 0 && liveRefTs > 1500000000 && liveRefTs <= t + 60) {
             const lastPt = pts[pts.length - 1];
             const roundedRef = Math.round(refP);
             if (lastPt && Math.abs(roundedRef - lastPt[1]) / (lastPt[1] || roundedRef) <= 0.15) {
-              if (t > lastPt[0]) {
-                pts = [...pts, [t, roundedRef]];
-              } else {
+              if (liveRefTs > lastPt[0]) {
+                pts = [...pts, [liveRefTs, roundedRef]];
+              } else if (liveRefTs === lastPt[0]) {
                 pts = pts.slice();
                 pts[pts.length - 1] = [lastPt[0], roundedRef];
               }
             }
           }
-          resPayload = buildCachedResult({ id, range, currency: 'IRT', source: srcUsed, points: pts });
+          const meta = buildHistoryMetadata({ id, range, source: srcUsed, points: pts, liveItem: it, nowSec: t, isDomestic: true });
+          resPayload = buildCachedResult({ id, range, currency: 'IRT', ...meta, points: pts });
           return json(resPayload.body, 200, resPayload.headers);
         }
         resPayload = { body: { id, range, currency: 'IRT', points: [], unavailable: true, reason: 'insufficient_real_points' }, headers: {} };
@@ -3837,20 +3838,22 @@ export async function history(env, url, ctx = null) {
           ? it.pair
           : name === 'gate' ? `${base}_USDT` : name === 'binance' ? `${base}USDT` : `${base}-USDT`;
         const rawPts = await src.klines(pair, iv, lim);
-        const points = validateHistoryPoints(rawPts, range, t, false, refP, true);
+        const points = validateHistoryPoints(rawPts, range, t, false, refP, true, liveRefTs);
         if (points.length >= 2) return { name, points };
         throw new Error('insufficient_points');
       };
       if (exchangeOrder.length) {
         try {
           const firstHit = await tryExchangeKlines(exchangeOrder[0]);
-          resPayload = buildCachedResult({ id, range, currency: 'USDT', source: firstHit.name, points: firstHit.points });
+          const meta = buildHistoryMetadata({ id, range, source: firstHit.name, points: firstHit.points, liveItem: it, nowSec: t, isDomestic: false });
+          resPayload = buildCachedResult({ id, range, currency: 'USDT', ...meta, points: firstHit.points });
           return json(resPayload.body, 200, resPayload.headers);
         } catch {}
         if (exchangeOrder.length > 1) {
           try {
             const raceHit = await Promise.any(exchangeOrder.slice(1).map((name) => tryExchangeKlines(name)));
-            resPayload = buildCachedResult({ id, range, currency: 'USDT', source: raceHit.name, points: raceHit.points });
+            const meta = buildHistoryMetadata({ id, range, source: raceHit.name, points: raceHit.points, liveItem: it, nowSec: t, isDomestic: false });
+            resPayload = buildCachedResult({ id, range, currency: 'USDT', ...meta, points: raceHit.points });
             return json(resPayload.body, 200, resPayload.headers);
           } catch {}
         }
@@ -3859,15 +3862,15 @@ export async function history(env, url, ctx = null) {
       return json(resPayload.body, 200, resPayload.headers);
     }
 
-    // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (بدون هیچ نقطه مصنوعی)
-    let rawPoints = [];
+    // ۲. تاریخچه واقعی طلا، سکه و ارزهای داخلی (بدون هیچ نقطه مصنوعی و با فیلتر سخت‌گیرانه بازه)
+    let archRes = { points: [], source: 'archive' };
     try {
-      rawPoints = await archiveHistory(id, range, it, env);
+      archRes = await archiveHistory(id, range, it, env);
     } catch {}
 
     const curPrice = (it && !isPriceItemStale(it, id, t)) ? (it.price || 0) : 0;
     const isIntraday = range === '1H' || range === '1D';
-    const points = validateHistoryPoints(rawPoints, range, t, true, curPrice, !isIntraday);
+    const points = validateHistoryPoints(archRes.points, range, t, true, curPrice, !isIntraday, liveRefTs);
     if (points.length < 2) {
       resPayload = {
         body: {
@@ -3883,11 +3886,13 @@ export async function history(env, url, ctx = null) {
       return json(resPayload.body, 200, resPayload.headers);
     }
 
+    const srcUsed = archRes.source || (isIntraday ? 'd1_intraday' : 'archive');
+    const meta = buildHistoryMetadata({ id, range, source: srcUsed, points, liveItem: it, nowSec: t, isDomestic: true });
     resPayload = buildCachedResult({
       id,
       range,
       currency: it?.unit || 'IRT',
-      source: isIntraday ? 'd1_intraday' : 'archive',
+      ...meta,
       points
     });
     return json(resPayload.body, 200, resPayload.headers);
@@ -4048,7 +4053,7 @@ export async function runCron(env) {
       await kvPut(env, KV_SNAPSHOT_KEY, inMemoryPrices, t);
     }
   }
-  // ۳. به‌روزرسانی Cloudflare Cache API و Tiered Cache با کلید متعارف /api/prices
+  // ۳. به‌روزرسانی کش محلی هر PoP با caches.default (فقط روی Custom Domain مؤثر؛ هماهنگی سراسری از طریق DO + KV انجام می‌شود)
   try {
     if (typeof caches !== 'undefined' && caches.default && inMemoryPrices && Object.keys(inMemoryPrices.items || {}).length) {
       const built = buildPublicPricesResponse(inMemoryPrices, env, nowS());
@@ -4567,7 +4572,7 @@ async function getDynamicCryptoIcons(env) {
   inMemoryDynamicIconsJob = iconsState;
   try {
     const localIcons = buildLocalCryptoIconsMap();
-    const kvKey = 'darayi_dynamic_icons_v4';
+    const kvKey = 'darayi_dynamic_icons_v5';
     try {
       const kv = env && (env.KV || env.PRICES_KV);
       if (kv) {
@@ -4590,6 +4595,13 @@ async function getDynamicCryptoIcons(env) {
     }
 
     const activeKeys = new Set(Object.keys(pricesItems).map(k => k.toLowerCase()));
+    const symbolCounts = {};
+    for (const [k, item] of Object.entries(pricesItems)) {
+      if (!item || !item.crypto) continue;
+      const sym = String(item.sym || item.symbol || k).toLowerCase().trim();
+      if (sym) symbolCounts[sym] = (symbolCounts[sym] || 0) + 1;
+    }
+
     const hasLocalCover = (k) => {
       if (localIcons[k]) return true;
       const stripped = k.replace(/^(1000+|1m)/, '');
@@ -4600,6 +4612,14 @@ async function getDynamicCryptoIcons(env) {
     const missingActiveKeys = [...activeKeys].filter(k => pricesItems[k]?.crypto && !hasLocalCover(k));
     if (Object.keys(localIcons).length >= 1000 && activeKeys.size > 0 && missingActiveKeys.length === 0) {
       const mergedLocal = { ...LEGACY_COINCAP_ICONS, ...CURATED_CRYPTO_ICONS, ...localIcons };
+      for (const [k, item] of Object.entries(pricesItems)) {
+        if (!item || !item.crypto) continue;
+        const resolved = resolveCryptoIconByAssetId(
+          { id: k, sym: item.sym, name: item.name },
+          { localIcons, curatedIcons: CURATED_CRYPTO_ICONS, symbolMap: LEGACY_COINCAP_ICONS, symbolCounts, realXCryptos: REAL_X_CRYPTOS }
+        );
+        if (resolved) mergedLocal[k.toLowerCase()] = resolved;
+      }
       inMemoryDynamicIcons = mergedLocal;
       inMemoryDynamicIconsTime = now;
       iconsState.icons = mergedLocal;
@@ -4607,7 +4627,9 @@ async function getDynamicCryptoIcons(env) {
       return mergedLocal;
     }
 
-    const base = {};
+    const symbolMap = {};
+    const idMap = {};
+    const nameMap = {};
     const [cmcRes, cpRes, cg1Res, cg2Res] = await Promise.allSettled([
       fetchJSON('https://api.coinmarketcap.com/data-api/v3/cryptocurrency/listing?start=1&limit=3500&sortBy=market_cap&sortType=desc&convert=USD', 6),
       fetchJSON('https://api.coinpaprika.com/v1/coins', 6),
@@ -4615,11 +4637,43 @@ async function getDynamicCryptoIcons(env) {
       fetchJSON('https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd&order=market_cap_desc&per_page=250&page=2', 5)
     ]);
 
-    const normName = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    // ۱. CoinMarketCap بر اساس رتبه Market Cap (اول شناسه‌های یکتای slug و name، سپس نماد غیرتکراری)
+    const cmcList = (cmcRes.status === 'fulfilled' && cmcRes.value?.data?.cryptoCurrencyList) || [];
+    const cmcTopCoins = new Set();
+    for (let idx = 0; idx < cmcList.length; idx++) {
+      const c = cmcList[idx];
+      const s = String(c?.symbol || '').toLowerCase().trim();
+      if (!s || !c?.id) continue;
+      const url = `https://s2.coinmarketcap.com/static/img/coins/64x64/${c.id}.png`;
+      if (idx < 3500) cmcTopCoins.add(s);
+      if (!symbolMap[s]) symbolMap[s] = url;
+      const slug = String(c.slug || '').toLowerCase().trim();
+      if (slug && !idMap[slug]) idMap[slug] = url;
+      const nn = normalizeCryptoIconName(c.name);
+      if (nn && !nameMap[nn]) nameMap[nn] = url;
+      const sl = normalizeCryptoIconName(c.slug);
+      if (sl && !nameMap[sl]) nameMap[sl] = url;
+    }
 
-    // 1. CoinPaprika active ranked coins (symbol + normalized name/slug)
-    const cpMap = {};
-    const cpNameMap = {};
+    // ۲. CoinGecko top 500: اولویت نگاشت بر پایه c.id و نام یکتا (بدون بازنویسی کورکورانه نمادهای با ارزش بازار بالاتر)
+    for (const cgRes of [cg1Res, cg2Res]) {
+      if (cgRes.status === 'fulfilled' && Array.isArray(cgRes.value)) {
+        for (const c of cgRes.value) {
+          const s = String(c?.symbol || '').toLowerCase().trim();
+          if (!c?.image) continue;
+          const cgId = String(c.id || '').toLowerCase().trim();
+          if (cgId && !idMap[cgId]) idMap[cgId] = c.image;
+          const nn = normalizeCryptoIconName(c.name);
+          if (nn && !nameMap[nn]) nameMap[nn] = c.image;
+          const idn = normalizeCryptoIconName(c.id);
+          if (idn && !nameMap[idn]) nameMap[idn] = c.image;
+          if (s && !symbolMap[s]) symbolMap[s] = c.image;
+        }
+      }
+    }
+
+    // ۳. CoinPaprika active ranked coins (شناسه یکتا c.id و نام پیش از نماد)
+    const cpSymbolMap = {};
     if (cpRes.status === 'fulfilled' && Array.isArray(cpRes.value)) {
       const sortedCp = cpRes.value
         .filter(c => c && c.is_active !== false && c.id && c.symbol)
@@ -4627,87 +4681,52 @@ async function getDynamicCryptoIcons(env) {
       for (const c of sortedCp) {
         const s = String(c.symbol).toLowerCase().trim();
         const url = `https://static.coinpaprika.com/coin/${c.id}/logo.png`;
-        if (s && !cpMap[s]) cpMap[s] = url;
-        const nn = normName(c.name);
-        if (nn && !cpNameMap[nn]) cpNameMap[nn] = url;
-        const slugPart = normName(String(c.id).split('-').slice(1).join(''));
-        if (slugPart && !cpNameMap[slugPart]) cpNameMap[slugPart] = url;
+        const cpId = String(c.id).toLowerCase().trim();
+        if (cpId && !idMap[cpId]) idMap[cpId] = url;
+        const nn = normalizeCryptoIconName(c.name);
+        if (nn && !nameMap[nn]) nameMap[nn] = url;
+        const slugPart = normalizeCryptoIconName(String(c.id).split('-').slice(1).join(''));
+        if (slugPart && !nameMap[slugPart]) nameMap[slugPart] = url;
+        if (s && !cpSymbolMap[s]) cpSymbolMap[s] = url;
       }
     }
 
-    // 2. CoinMarketCap top 3500 by market cap (official 64x64 CDN)
-    const cmcList = (cmcRes.status === 'fulfilled' && cmcRes.value?.data?.cryptoCurrencyList) || [];
-    const cmcTopCoins = new Set();
-    const cmcNameMap = {};
-    for (let idx = 0; idx < cmcList.length; idx++) {
-      const c = cmcList[idx];
-      const s = String(c?.symbol || '').toLowerCase().trim();
-      if (!s || !c?.id) continue;
-      const url = `https://s2.coinmarketcap.com/static/img/coins/64x64/${c.id}.png`;
-      if (idx < 3500) cmcTopCoins.add(s);
-      if (!base[s]) base[s] = url;
-      const nn = normName(c.name);
-      if (nn && !cmcNameMap[nn]) cmcNameMap[nn] = url;
-      const sl = normName(c.slug);
-      if (sl && !cmcNameMap[sl]) cmcNameMap[sl] = url;
-    }
-
-    // 3. CoinGecko top 500 high-res coin-images
-    const cgSeen = new Set();
-    const cgNameMap = {};
-    for (const cgRes of [cg1Res, cg2Res]) {
-      if (cgRes.status === 'fulfilled' && Array.isArray(cgRes.value)) {
-        for (const c of cgRes.value) {
-          const s = String(c?.symbol || '').toLowerCase().trim();
-          if (s && c?.image && !cgSeen.has(s)) {
-            cgSeen.add(s);
-            base[s] = c.image;
-          }
-          if (c?.image) {
-            const nn = normName(c.name);
-            if (nn && !cgNameMap[nn]) cgNameMap[nn] = c.image;
-            const idn = normName(c.id);
-            if (idn && !cgNameMap[idn]) cgNameMap[idn] = c.image;
-          }
-        }
-      }
-    }
-
-    // 4. Match activeKeys via direct ticker, stripped prefix, name/slug, or tokenized x-stocks
+    const fullSymbolMap = { ...LEGACY_COINCAP_ICONS, ...cpSymbolMap, ...symbolMap };
     const out = {};
     for (const k of cmcTopCoins) {
-      if (base[k]) out[k] = base[k];
+      if (symbolMap[k] && !(symbolCounts[k] > 1)) out[k] = symbolMap[k];
     }
-    const resolveKey = k => {
-      if (base[k]) return base[k];
-      if (cpMap[k]) return cpMap[k];
-      if (cgNameMap[k]) return cgNameMap[k];
-      if (cmcNameMap[k]) return cmcNameMap[k];
-      if (cpNameMap[k]) return cpNameMap[k];
-      return '';
-    };
     for (const k of activeKeys) {
-      const stripped = k.replace(/^(1000+|1m)/, '');
-      let found = resolveKey(k) || (stripped && stripped !== k ? resolveKey(stripped) : '');
-      if (!found && k.startsWith('ok') && k.length > 3) found = resolveKey(k.slice(2));
-      if (!found && !REAL_X_CRYPTOS.has(k)) {
-        const xm = /^x([a-z]{1,6})$/.exec(k);
-        if (xm) found = `https://financialmodelingprep.com/image-stock/${xm[1].toUpperCase()}.png`;
-      }
+      const item = pricesItems[k];
+      const found = resolveCryptoIconByAssetId(
+        { id: k, sym: item?.sym, name: item?.name },
+        {
+          localIcons,
+          curatedIcons: CURATED_CRYPTO_ICONS,
+          idMap,
+          nameMap,
+          symbolMap: fullSymbolMap,
+          symbolCounts,
+          realXCryptos: REAL_X_CRYPTOS
+        }
+      );
       if (found) out[k] = found;
     }
-    for (const [k, u] of Object.entries(base)) {
+    for (const [k, u] of Object.entries(idMap)) {
       if (!out[k]) out[k] = u;
     }
+    for (const [k, u] of Object.entries(symbolMap)) {
+      if (!out[k] && !(symbolCounts[k] > 1)) out[k] = u;
+    }
     let cpAdded = 0;
-    for (const [k, u] of Object.entries(cpMap)) {
-      if (!out[k] && (activeKeys.has(k) || cpAdded < 2500)) {
+    for (const [k, u] of Object.entries(cpSymbolMap)) {
+      if (!out[k] && !(symbolCounts[k] > 1) && (activeKeys.has(k) || cpAdded < 2500)) {
         out[k] = u;
         cpAdded++;
       }
     }
     for (const [k, u] of Object.entries(LEGACY_COINCAP_ICONS)) {
-      if (!out[k]) out[k] = u;
+      if (!out[k] && !(symbolCounts[k] > 1)) out[k] = u;
     }
     Object.assign(out, CURATED_CRYPTO_ICONS, localIcons);
 
@@ -4766,7 +4785,7 @@ async function route(req, env, url, ctx) {
     }, 200, corsHeaders);
   }
 
-  // دریافت متمرکز قیمت‌ها: فقط همین مسیر با Workers Cache سراسری و Tiered Cache (~۶۰ ثانیه) کش می‌شود
+  // دریافت متمرکز قیمت‌ها: هماهنگی سراسری از طریق PriceCoordinator DO + KV؛ کش caches.default فقط یک کش محلی در سطح هر PoP روی دامنه اختصاصی است (نه Tiered Cache و روی workers.dev بی‌اثر)
   if (p === '/api/prices' && m === 'GET') {
     const manual = url.searchParams.get('refresh') === '1';
     if (manual) {
@@ -4790,13 +4809,17 @@ async function route(req, env, url, ctx) {
         if (cachedRes) {
           const snapTs = Number(cachedRes.headers.get('x-darayi-snapshot-at') || cachedRes.headers.get('x-darayi-cached-at') || 0);
           if (snapTs > 0 && (now - snapTs < limit)) {
+            // تنظیم TTL باقی‌مانده واقعی تا مرورگر یا پروکسی هرگز بیش از پنجره ۶۰ ثانیه‌ای قیمت را نگه ندارد
+            const remainingTtl = Math.max(1, Math.min(limit, limit - Math.max(0, now - snapTs)));
+            const h = new Headers(cachedRes.headers);
+            h.set('cache-control', `public, max-age=${remainingTtl}, s-maxage=${remainingTtl}, stale-while-revalidate=15`);
+            h.set('cdn-cache-control', `public, max-age=${remainingTtl}, stale-while-revalidate=15`);
+            h.set('cloudflare-cdn-cache-control', `public, max-age=${remainingTtl}, stale-while-revalidate=15`);
             if (hasCrossOriginHeader) {
-              const h = new Headers(cachedRes.headers);
               h.set('access-control-allow-origin', corsOrig);
               h.set('vary', 'Origin, Accept-Encoding');
-              return new Response(cachedRes.body, { status: cachedRes.status, headers: h });
             }
-            return cachedRes;
+            return new Response(cachedRes.body, { status: cachedRes.status, headers: h });
           }
         }
       } catch (e) {
@@ -4838,7 +4861,7 @@ async function route(req, env, url, ctx) {
     const responseNow = nowS();
     const canonicalBuilt = buildPublicPricesResponse(prices, env, responseNow, {}, { noStore: manual });
     if (canonicalBuilt.cacheable && edgeCache && Object.keys(canonicalBuilt.out.items || {}).length > 0) {
-      // ذخیره نسخه متعارف بدون کوکی و بدون Vary: Origin در Workers Cache تا کش بین کل کاربران مشترک بماند
+      // ذخیره نسخه متعارف در caches.default (کش محلی PoP بدون کوکی و بدون Vary: Origin)
       const cacheSnapshot = manual
         ? buildPublicPricesResponse(prices, env, responseNow).response
         : canonicalBuilt.response.clone();

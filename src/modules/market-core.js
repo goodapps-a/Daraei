@@ -193,3 +193,166 @@ export function isPriceItemStale(item, id, nowSec = Math.floor(Date.now() / 1000
   const threshold = getStaleThresholdSec(normId, isCrypto, nowSec);
   return (nowSec - refTs) > threshold;
 }
+
+export const CHART_RANGES = {
+  '1H': 3600,
+  '1D': 86400,
+  '3D': 259200,
+  '1W': 604800,
+  '1M': 2592000,
+  '1Y': 31536000
+};
+
+export const CHART_KLINE_CONFIG = {
+  '1H': ['1m', 60],
+  '1D': ['5m', 288],
+  '3D': ['1h', 72],
+  '1W': ['4h', 42],
+  '1M': ['1d', 30],
+  '1Y': ['1d', 365]
+};
+
+// نرمال‌سازی یکسان زمان شروع کندل (openTime) بر حسب ثانیه در همه صرافی‌ها (بایننس، کوکوین، اوکی‌ایکس، گیت)
+export function normalizeCandleOpenTimeSec(rawTs) {
+  const n = Number(rawTs);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return n > 1e11 ? Math.floor(n / 1000) : Math.floor(n);
+}
+
+// پارس کندل بایننس بر پایه c[0] (openTime) و c[4] (close) — هرگز از closeTime (c[6]) استفاده نمی‌شود
+export function parseBinanceKlineEntry(candle) {
+  if (!Array.isArray(candle) || candle.length < 5) return null;
+  const openSec = normalizeCandleOpenTimeSec(candle[0]);
+  const closePrice = Number(candle[4]);
+  if (!(openSec > 1500000000) || !(closePrice > 0) || !Number.isFinite(closePrice)) return null;
+  return [openSec, closePrice];
+}
+
+// فیلتر سخت‌گیرانه بازه زمانی نمودارها (به‌ویژه طلا و ارز): هیچ نقطه‌ای خارج از [now - span, now + maxLeadSec] مجاز نیست
+export function filterPointsStrictlyInRange(points, range, nowSec = Math.floor(Date.now() / 1000), maxLeadSec = 3600) {
+  const span = CHART_RANGES[range];
+  if (!span || !Array.isArray(points) || !points.length) return [];
+  const minTs = nowSec - span;
+  const maxTs = nowSec + Math.max(0, Number(maxLeadSec) || 0);
+  return points.filter((p) => Array.isArray(p) && p.length >= 2 && Number(p[0]) >= minTs && Number(p[0]) <= maxTs && Number(p[1]) > 0);
+}
+
+export function computeRangeChangePct(points) {
+  if (!Array.isArray(points) || points.length < 2) return null;
+  const first = Number(points[0]?.[1]);
+  const last = Number(points[points.length - 1]?.[1]);
+  if (!(first > 0) || !Number.isFinite(last) || last <= 0) return null;
+  return ((last - first) / first) * 100;
+}
+
+export function resolveHistoryResolution(range, source, isDomestic) {
+  const src = String(source || '').toLowerCase();
+  if (src === 'wallex' || src === 'wallex_cache') {
+    return { '1H': '1m', '1D': '15m', '3D': '1h', '1W': '1h', '1M': '1d', '1Y': '1d' }[range] || '15m';
+  }
+  if (src === 'd1_intraday') return '5m';
+  if (src === 'archive' || src === 'iran_market' || src === 'nerkhara' || src === 'nerkhsanj') return '1d';
+  if (isDomestic) return (range === '1H' || range === '1D') ? '5m' : '1d';
+  return (CHART_KLINE_CONFIG[range] && CHART_KLINE_CONFIG[range][0]) || '5m';
+}
+
+export function resolveHistoryDataStatus({ range, source, isDomestic, liveItem, nowSec = Math.floor(Date.now() / 1000) }) {
+  const src = String(source || '').toLowerCase();
+  const isIntraday = range === '1H' || range === '1D';
+  if (src === 'archive' || src === 'iran_market' || src === 'nerkhara' || src === 'nerkhsanj' || src === 'wallex_cache') {
+    return 'archived';
+  }
+  if (isDomestic) {
+    if (!isIntraday) return 'archived';
+    const pt = String(liveItem?.priceType || '').toLowerCase();
+    if (!isTehranMarketOpen(nowSec) || pt === 'published' || pt === 'sell' || pt === 'average') {
+      return 'published';
+    }
+    return liveItem && !isPriceItemStale(liveItem, liveItem.id || '', nowSec) ? 'live' : 'published';
+  }
+  return 'live';
+}
+
+export function buildHistoryMetadata({ id, range, source, points, liveItem, nowSec = Math.floor(Date.now() / 1000), isDomestic = false }) {
+  const lastPtTs = Array.isArray(points) && points.length ? Number(points[points.length - 1]?.[0] || 0) : 0;
+  const itemSrcTs = Number(liveItem?.sourceTimestamp || 0);
+  const itemT = Number(liveItem?.t || 0);
+  const candidates = [lastPtTs, itemSrcTs > 0 ? itemSrcTs : itemT].filter((x) => Number.isFinite(x) && x > 1500000000 && x <= nowSec + 43200);
+  const lastDataAt = candidates.length ? Math.max(...candidates) : null;
+  const priceSource = (liveItem && (liveItem.src || liveItem.source)) ? (liveItem.src || liveItem.source) : (source || null);
+  const resolution = resolveHistoryResolution(range, source, isDomestic);
+  const dataStatus = resolveHistoryDataStatus({ range, source, isDomestic, liveItem, nowSec });
+  return {
+    source: source || null,
+    priceSource,
+    lastDataAt,
+    resolution,
+    dataStatus
+  };
+}
+
+export function normalizeCryptoIconName(val) {
+  return String(val || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+// نگاشت لوگوی رمزارز بر اساس شناسه یکتای دارایی (ID -> Slug/Name -> Symbol غیرتکراری)
+export function resolveCryptoIconByAssetId(asset, maps = {}) {
+  if (!asset) return '';
+  const id = String(asset.id || '').toLowerCase().trim();
+  const sym = String(asset.symbol || asset.sym || '').toLowerCase().trim();
+  const nameNorm = normalizeCryptoIconName(asset.name || asset.en || '');
+  const {
+    localIcons = {},
+    curatedIcons = {},
+    idMap = {},
+    nameMap = {},
+    symbolMap = {},
+    symbolCounts = {},
+    realXCryptos = new Set()
+  } = maps;
+
+  // ۱. تطبیق دقیق با شناسه یکتای دارایی (ID) در فایل‌های محلی و نگاشت‌های صریح
+  if (id) {
+    if (localIcons[id]) return localIcons[id];
+    if (curatedIcons[id]) return curatedIcons[id];
+    if (idMap[id]) return idMap[id];
+  }
+
+  // ۲. تطبیق با نام یکتا / slug دارایی پیش از Symbol
+  if (nameNorm) {
+    if (idMap[nameNorm]) return idMap[nameNorm];
+    if (nameMap[nameNorm]) return nameMap[nameNorm];
+  }
+  if (id) {
+    const idNorm = normalizeCryptoIconName(id);
+    if (idNorm && nameMap[idNorm]) return nameMap[idNorm];
+  }
+
+  // ۳. پیشوندهای ضریب‌دار (1000PEPE, 1MBABYDOGE) یا جفت‌ارزهای بایننس/اوکی‌ایکس در صورتی که نماد مقصد تکراری نباشد
+  const stripped = id ? id.replace(/^(1000+|1m)/, '') : '';
+  const alt = (stripped && stripped !== id) ? stripped : (id.startsWith('ok') && id.length > 3 ? id.slice(2) : '');
+  const isSymAmbiguous = Boolean(sym && Number(symbolCounts[sym] || 0) > 1);
+
+  if (alt && !isSymAmbiguous) {
+    if (localIcons[alt]) return localIcons[alt];
+    if (curatedIcons[alt]) return curatedIcons[alt];
+    if (idMap[alt]) return idMap[alt];
+    if (symbolMap[alt]) return symbolMap[alt];
+  }
+
+  // ۴. استفاده از Symbol فقط زمانی که نماد بین دارایی‌های فعال تکراری نباشد (جلوگیری از لوگوی اشتباه برای نمادهای همنام)
+  if (sym && !isSymAmbiguous) {
+    if (localIcons[sym] && (!id || sym === id || !id.includes('-'))) return localIcons[sym];
+    if (curatedIcons[sym] && (!id || sym === id || !id.includes('-'))) return curatedIcons[sym];
+    if (symbolMap[sym]) return symbolMap[sym];
+  }
+
+  // ۵. توکن‌های سهام x-stock واقعی نه رمزارزهای واقعی با حرف x
+  if (id && !realXCryptos.has(id) && !isSymAmbiguous) {
+    const xm = /^x([a-z]{1,6})$/.exec(id);
+    if (xm) return `https://financialmodelingprep.com/image-stock/${xm[1].toUpperCase()}.png`;
+  }
+
+  return '';
+}
+

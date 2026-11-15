@@ -84,6 +84,14 @@ body.is-reordering{-webkit-user-select:none;user-select:none;overscroll-behavior
 .market-card .source{font-size:10px}
 .bottom-nav button{font-size:10px}
 .table-note{font-size:10px}
+.detail-source-meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 10px;margin-top:8px;padding:8px 10px;border-radius:12px;border:1px solid var(--line);background:var(--paper);font-size:10px;line-height:1.45}
+@media(min-width:650px){.detail-source-meta{grid-template-columns:repeat(4,minmax(0,1fr));gap:8px 10px}}
+.detail-meta-item{min-width:0}
+.detail-meta-item small{display:block;font-size:9px;color:var(--muted);margin-bottom:1px}
+.detail-meta-item b{display:block;font-size:10.5px;font-weight:800;color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.detail-meta-status-live{color:var(--green)!important}
+.detail-meta-status-published{color:#b45309!important}
+.detail-meta-status-archived{color:var(--muted)!important}
 .modal-backdrop{overscroll-behavior:contain;padding-bottom:calc(16px + env(safe-area-inset-bottom))}
 .modal{overscroll-behavior:contain}
 
@@ -2116,6 +2124,18 @@ body:has(.modal-backdrop.open) .bottom-nav {
   }
   #detailNote {
     display: none !important;
+  }
+  .detail-source-meta {
+    margin-top: 5px !important;
+    padding: 5px 8px !important;
+    gap: 4px 8px !important;
+    border-radius: 10px !important;
+  }
+  .detail-meta-item small {
+    font-size: 8px !important;
+  }
+  .detail-meta-item b {
+    font-size: 9.5px !important;
   }
   .detail-range-tabs {
     margin: 5px 0 0 !important;
@@ -4267,6 +4287,10 @@ const API_SOURCE_LABELS = {
   okx: 'OKX',
   gate: 'Gate.io',
   coingecko: 'CoinGecko',
+  wallex_cache: 'Wallex (آرشیو)',
+  d1_intraday: 'ثبت لحظه‌ای سرور',
+  memory_intraday: 'ثبت لحظه‌ای سرور',
+  archive: 'آرشیو روزانه',
   cache: 'Cache',
   live: 'Live'
 };
@@ -5549,46 +5573,87 @@ try {
 } catch {}
 window.cryptoIcons = cryptoIcons;
 
-function getCryptoIcon(symOrId) {
-  if (!symOrId) return '';
-  const key = String(symOrId).toLowerCase().trim();
-  const stripped = key.replace(/^(1000+|1m)/, '');
-  const alt = (stripped && stripped !== key) ? stripped : (key.startsWith('ok') && key.length > 3 ? key.slice(2) : '');
-  if (LOCAL_CRYPTO_ICONS[key]) return LOCAL_CRYPTO_ICONS[key];
-  if (alt && LOCAL_CRYPTO_ICONS[alt]) return LOCAL_CRYPTO_ICONS[alt];
-  if (ARZ_DIGITAL_ICONS[key]) return ARZ_DIGITAL_ICONS[key];
-  if (alt && ARZ_DIGITAL_ICONS[alt]) return ARZ_DIGITAL_ICONS[alt];
-  if (window.cryptoIcons && window.cryptoIcons[key]) return window.cryptoIcons[key];
-  if (alt && window.cryptoIcons && window.cryptoIcons[alt]) return window.cryptoIcons[alt];
-  if (!REAL_X_CRYPTOS_CLIENT.has(key)) {
-    const xm = /^x([a-z]{1,6})$/.exec(key);
+function normalizeClientCryptoIconName(val) {
+  return String(val || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+function getClientCryptoSymbolCounts() {
+  const counts = {};
+  if (!Array.isArray(assets)) return counts;
+  for (const a of assets) {
+    if (!a || a.cat !== 'crypto') continue;
+    const sym = String(a.symbol || a.id || '').toLowerCase().trim();
+    if (sym) counts[sym] = (counts[sym] || 0) + 1;
+  }
+  return counts;
+}
+function getCryptoIcon(assetOrId) {
+  if (!assetOrId) return '';
+  const isObj = typeof assetOrId === 'object';
+  const id = String(isObj ? (assetOrId.id || '') : assetOrId).toLowerCase().trim();
+  const sym = String(isObj ? (assetOrId.symbol || assetOrId.sym || '') : '').toLowerCase().trim();
+  const nameNorm = normalizeClientCryptoIconName(isObj ? (assetOrId.en || assetOrId.name || '') : '');
+  const idNorm = normalizeClientCryptoIconName(id);
+  const symbolCounts = getClientCryptoSymbolCounts();
+  const effectiveSym = sym || id;
+  const isSymAmbiguous = Boolean(effectiveSym && symbolCounts[effectiveSym] > 1);
+
+  // ۱. اولویت قطعی با شناسه یکتای دارایی (asset.id)
+  if (id) {
+    if (LOCAL_CRYPTO_ICONS[id]) return LOCAL_CRYPTO_ICONS[id];
+    if (ARZ_DIGITAL_ICONS[id]) return ARZ_DIGITAL_ICONS[id];
+    if (window.cryptoIcons && window.cryptoIcons[id]) return window.cryptoIcons[id];
+  }
+
+  // ۲. تطبیق با نام یکتا / slug پیش از تیکر Symbol
+  if (nameNorm && window.cryptoIcons && window.cryptoIcons[nameNorm]) return window.cryptoIcons[nameNorm];
+  if (idNorm && window.cryptoIcons && window.cryptoIcons[idNorm]) return window.cryptoIcons[idNorm];
+
+  // ۳. پیشوندهای ضریب‌دار فقط در صورت عدم تداخل نماد
+  const refKey = id || sym;
+  const stripped = refKey.replace(/^(1000+|1m)/, '');
+  const alt = (stripped && stripped !== refKey) ? stripped : (refKey.startsWith('ok') && refKey.length > 3 ? refKey.slice(2) : '');
+  if (alt && !isSymAmbiguous) {
+    if (LOCAL_CRYPTO_ICONS[alt]) return LOCAL_CRYPTO_ICONS[alt];
+    if (ARZ_DIGITAL_ICONS[alt]) return ARZ_DIGITAL_ICONS[alt];
+    if (window.cryptoIcons && window.cryptoIcons[alt]) return window.cryptoIcons[alt];
+  }
+
+  // ۴. استفاده از Symbol فقط وقتی نماد یکتا و غیرتکراری است
+  if (sym && !isSymAmbiguous) {
+    if (LOCAL_CRYPTO_ICONS[sym]) return LOCAL_CRYPTO_ICONS[sym];
+    if (ARZ_DIGITAL_ICONS[sym]) return ARZ_DIGITAL_ICONS[sym];
+    if (window.cryptoIcons && window.cryptoIcons[sym]) return window.cryptoIcons[sym];
+  }
+
+  if (id && !REAL_X_CRYPTOS_CLIENT.has(id) && !isSymAmbiguous) {
+    const xm = /^x([a-z]{1,6})$/.exec(id);
     if (xm) return `https://financialmodelingprep.com/image-stock/${encodeURIComponent(xm[1].toUpperCase())}.png`;
   }
-  const base = alt || key;
-  return `https://bin.bnbstatic.com/static/assets/logos/${encodeURIComponent(base.toUpperCase())}.png`;
+  return '';
 }
 
-function cryptoCoinBadge(sym, name) {
+function cryptoCoinBadge(sym, name, id = '') {
+  const idClean = String(id || sym || '').toLowerCase().trim();
   const symClean = String(sym || '').toLowerCase().trim();
   const text = escapeHtml((sym || name || '?').slice(0, 3).toUpperCase());
   const [c1, c2] = getBadgeColors(text);
   const fs = text.length > 2 ? '9.5px' : '11px';
-  return `<span class="asset-icon asset-icon-badge" data-icon-sym="${escapeHtml(symClean)}" data-fb="${text}" data-c1="${safeColor(c1,'#3b82f6')}" data-c2="${safeColor(c2,'#1d4ed8')}" style="background:linear-gradient(135deg, ${c1}, ${c2});color:#ffffff;font-size:${fs};font-weight:900">${text}</span>`;
+  return `<span class="asset-icon asset-icon-badge" data-icon-id="${escapeHtml(idClean)}" data-icon-sym="${escapeHtml(symClean)}" data-fb="${text}" data-c1="${safeColor(c1,'#3b82f6')}" data-c2="${safeColor(c2,'#1d4ed8')}" style="background:linear-gradient(135deg, ${c1}, ${c2});color:#ffffff;font-size:${fs};font-weight:900">${text}</span>`;
 }
 
 function hydrateLateCryptoIcons() {
-  document.querySelectorAll('.asset-icon-badge[data-icon-sym]').forEach((el) => {
+  document.querySelectorAll('.asset-icon-badge[data-icon-sym], .asset-icon-badge[data-icon-id]').forEach((el) => {
+    const rawId = String(el.dataset.iconId || el.dataset.iconSym || '').toLowerCase().trim();
     const rawSym = String(el.dataset.iconSym || '').toLowerCase().trim();
-    const stripped = rawSym.replace(/^(1000+|1m)/, '');
-    const sym = (stripped && stripped !== rawSym) ? stripped : (rawSym.startsWith('ok') && rawSym.length > 3 ? rawSym.slice(2) : rawSym);
-    const url = safeImgUrl(window.cryptoIcons?.[rawSym] || window.cryptoIcons?.[sym]);
+    const matchedAsset = (typeof asset === 'function' && rawId) ? asset(rawId) : null;
+    const url = safeImgUrl(getCryptoIcon(matchedAsset && matchedAsset.id ? matchedAsset : { id: rawId, symbol: rawSym }));
     if (!url) return;
     const fb = el.dataset.fb || el.textContent || '?';
     const c1 = safeColor(el.dataset.c1, '#3b82f6');
     const c2 = safeColor(el.dataset.c2, '#1d4ed8');
     el.className = 'asset-icon asset-icon-crypto';
     el.removeAttribute('style');
-    el.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(fb)}" class="crypto-logo-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-sym="${escapeHtml(rawSym)}" data-fb="${escapeHtml(fb)}" data-c1="${c1}" data-c2="${c2}">`;
+    el.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(fb)}" class="crypto-logo-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-sym="${escapeHtml(rawSym || rawId)}" data-fb="${escapeHtml(fb)}" data-c1="${c1}" data-c2="${c2}">`;
   });
 }
 
@@ -5598,11 +5663,9 @@ async function loadCryptoIconsOnce(forceCheck = false) {
   if (localCount >= 1000 && !forceCheck) {
     const hasUncovered = Array.isArray(assets) && assets.some((a) => {
       if (!a || a.cat !== 'crypto') return false;
-      const key = String(a.symbol || a.id || '').toLowerCase().trim();
-      const stripped = key.replace(/^(1000+|1m)/, '');
-      const alt = (stripped && stripped !== key) ? stripped : (key.startsWith('ok') && key.length > 3 ? key.slice(2) : '');
-      if (!REAL_X_CRYPTOS_CLIENT.has(key) && /^x[a-z]{1,6}$/.test(key)) return false;
-      return !(window.cryptoIcons?.[key] || (alt && window.cryptoIcons?.[alt]));
+      const idKey = String(a.id || '').toLowerCase().trim();
+      if (!REAL_X_CRYPTOS_CLIENT.has(idKey) && /^x[a-z]{1,6}$/.test(idKey)) return false;
+      return !getCryptoIcon(a);
     });
     if (!hasUncovered) return;
   }
@@ -5804,9 +5867,9 @@ function assetIcon(a) {
     }
   }
 
-  // 3. Cryptocurrencies official logos with robust fallback
+  // 3. Cryptocurrencies official logos resolved by unique asset ID
   if (a.cat === 'crypto') {
-    const iconUrl = safeImgUrl(getCryptoIcon(sym) || getCryptoIcon(id));
+    const iconUrl = safeImgUrl(getCryptoIcon(a));
     const badgeText = (a.symbol || sym || a.name || '?').slice(0, 3).toUpperCase();
     const [c1, c2] = getBadgeColors(badgeText);
     if (iconUrl) {
@@ -5815,7 +5878,7 @@ function assetIcon(a) {
   }
 
   // 4. Default badge for any other item
-  return cryptoCoinBadge(a.symbol || sym || a.id, a.name);
+  return cryptoCoinBadge(a.symbol || sym || a.id, a.name, id);
 }
 function ticker(a){
   const t = assetTitles(a);
@@ -6900,7 +6963,7 @@ function applyPrices(items){let n=0,added=0,sig=0;const now=Math.floor(Date.now(
         change:nextChange,
         currency:i.currency||'IRT',
         updatedAt:itemTs,
-        sourceTimestamp:i.sourceTimestamp||itemTs,
+        sourceTimestamp:Number(i.sourceTimestamp)>0?Number(i.sourceTimestamp):null,
         receivedAt:i.receivedAt||now,
         checkedAt:i.checkedAt||now,
         priceType:i.priceType||'quoted',
@@ -6926,8 +6989,9 @@ function savePriceCache(items){
         const chg = (Number.isFinite(i.change) && i.change !== 0)
           ? i.change
           : (Array.isArray(prevArr) && prevArr[0] === i.price && Number.isFinite(prevArr[1]) && prevArr[1] !== 0 ? prevArr[1] : i.change);
-        const ts = i.sourceTimestamp || i.updatedAt || i.receivedAt || Math.floor(Date.now() / 1000);
-        o[id] = [i.price, chg, ts, i.currency, i.kind, i.name, i.symbol, i.cat, i.volume, i.pair, i.priceType || 'quoted', i.source || 'cache'];
+        const hasRealSrcTs = Number(i.sourceTimestamp) > 0;
+        const ts = hasRealSrcTs ? Number(i.sourceTimestamp) : (i.updatedAt || i.receivedAt || Math.floor(Date.now() / 1000));
+        o[id] = [i.price, chg, ts, i.currency, i.kind, i.name, i.symbol, i.cat, i.volume, i.pair, i.priceType || 'quoted', i.source || 'cache', hasRealSrcTs ? 1 : 0];
       }
     }
     localStorage.setItem(PRICE_CACHE, JSON.stringify(o));
@@ -6945,7 +7009,7 @@ function loadPriceCache(){
           price:v[0],
           change:v[1],
           updatedAt:v[2],
-          sourceTimestamp:v[2],
+          sourceTimestamp:v[12] === 0 ? null : v[2],
           currency:v[3],
           kind:v[4],
           name:v[5],
@@ -7037,13 +7101,9 @@ function paintLivePrices(){
 let chartReq=0;const RANGE_LABEL={'1H':'۱ ساعت اخیر','1D':'۲۴ ساعت اخیر','3D':'۳ روز اخیر','1W':'۱ هفته اخیر','1M':'۱ ماه اخیر','1Y':'۱ سال اخیر'};
 const CLIENT_RANGES={'1H':3600,'1D':86400,'3D':259200,'1W':604800,'1M':2592000,'1Y':31536000};
 function validateDomesticArchivePoints(deduped, range, now, span, refPrice) {
-  const refNow = Math.max(now, deduped.at(-1)?.[0] || now);
-  const grace = (range === '1H' ? 4500 : range === '1D' ? 88200 : Math.max(span * 1.5, 5 * 86400));
-  const minTs = refNow - grace;
-  let pts = deduped.filter(p => p[0] >= minTs && p[0] <= refNow + 3600);
-  if (pts.length < 2 && range !== '1H' && range !== '1D') {
-    pts = deduped.slice(-Math.min(deduped.length, range === '1Y' ? 365 : 48));
-  }
+  const minTs = now - span;
+  const maxTs = now + (range === '1H' || range === '1D' ? 60 : 3600);
+  const pts = deduped.filter(p => p[0] >= minTs && p[0] <= maxTs);
   return pts.length >= 2 ? pts : [];
 }
 function validateClientHistory(rawPoints, range, a) {
@@ -7093,14 +7153,58 @@ function validateClientHistory(rawPoints, range, a) {
     return validateDomesticArchivePoints(filtered, range, now, span, refPrice);
   }
 
-  const refNow = Math.max(now, filtered.at(-1)?.[0] || now);
-  const grace = range === '1H' ? 4500 : range === '1D' ? 88200 : Math.max(span * 1.25, 7200);
-  const minTs = refNow - grace;
-  let pts = filtered.filter(p => p[0] >= minTs && p[0] <= refNow + 3600);
-  if (pts.length < 2) {
-    pts = filtered.slice(-Math.min(filtered.length, range === '1Y' ? 365 : range === '1M' ? 35 : 48));
-  }
+  const isIntraday = range === '1H' || range === '1D';
+  const cryptoBucketLead = isIntraday ? 300 : 86400;
+  const minTs = now - span - cryptoBucketLead;
+  const maxTs = now + (isIntraday ? 60 : 3600);
+  const pts = filtered.filter(p => p[0] >= minTs && p[0] <= maxTs);
   return pts.length >= 2 ? pts : [];
+}
+const RESOLUTION_LABELS = {
+  '1m': '۱ دقیقه‌ای',
+  '5m': '۵ دقیقه‌ای',
+  '15m': '۱۵ دقیقه‌ای',
+  '1h': '۱ ساعته',
+  '4h': '۴ ساعته',
+  '1d': 'روزانه'
+};
+const DATA_STATUS_LABELS = {
+  live: 'زنده',
+  archived: 'آرشیوی',
+  published: 'آخرین قیمت منتشرشده'
+};
+function formatChartResolutionLabel(res, range, isDomestic) {
+  const k = String(res || '').toLowerCase();
+  if (RESOLUTION_LABELS[k]) return RESOLUTION_LABELS[k];
+  if (isDomestic) return (range === '1H' || range === '1D') ? '۵ دقیقه‌ای' : 'روزانه';
+  return { '1H': '۱ دقیقه‌ای', '1D': '۵ دقیقه‌ای', '3D': '۱ ساعته', '1W': '۴ ساعته', '1M': 'روزانه', '1Y': 'روزانه' }[range] || '۵ دقیقه‌ای';
+}
+function renderDetailSourceMeta(a, range, pts, meta = null) {
+  const box = $('#detailSourceMeta');
+  if (!box) return;
+  const isDomestic = Boolean(a && a.cat !== 'crypto' && a.id !== 'usdt');
+  const srcRaw = meta?.priceSource || a?.source || meta?.source || '';
+  const srcText = srcRaw ? formatApiSourceName(srcRaw) : 'نامشخص';
+  const lastPtTs = Array.isArray(pts) && pts.length ? Number(pts[pts.length - 1]?.[0] || 0) : 0;
+  const itemTs = Number(a?.sourceTimestamp || 0) || Number(a?.updatedAt || 0);
+  const lastAt = Math.max(Number(meta?.lastDataAt || 0), lastPtTs, itemTs);
+  const timeText = lastAt > 1500000000 ? formatRelativeDate(lastAt) : '—';
+  const resText = formatChartResolutionLabel(meta?.resolution, range, isDomestic);
+  let statusKey = String(meta?.dataStatus || '').toLowerCase();
+  if (!DATA_STATUS_LABELS[statusKey]) {
+    if (isDomestic) {
+      statusKey = (range === '1H' || range === '1D') ? (isClientTehranMarketOpen() && !isStale(a) ? 'live' : 'published') : 'archived';
+    } else {
+      statusKey = a?.stale ? 'published' : 'live';
+    }
+  }
+  const statusText = DATA_STATUS_LABELS[statusKey] || 'زنده';
+  const statusClass = statusKey === 'live' ? 'detail-meta-status-live' : (statusKey === 'published' ? 'detail-meta-status-published' : 'detail-meta-status-archived');
+  box.innerHTML =
+    `<div class="detail-meta-item"><small>منبع قیمت</small><b>${escapeHtml(srcText)}</b></div>` +
+    `<div class="detail-meta-item"><small>آخرین داده واقعی</small><b>${escapeHtml(timeText)}</b></div>` +
+    `<div class="detail-meta-item"><small>دقت نمونه‌برداری</small><b>${escapeHtml(resText)}</b></div>` +
+    `<div class="detail-meta-item"><small>وضعیت داده</small><b class="${statusClass}">${escapeHtml(statusText)}</b></div>`;
 }
 let detailChartInFlight = 0;
 async function loadChart(a, r, allowFallback = false) {
@@ -7111,12 +7215,13 @@ async function loadChart(a, r, allowFallback = false) {
   if (cachedHit && cachedHit.points?.length >= 2 && Date.now() - cachedHit.at < cachedTtlMs) {
     const validCached = validateClientHistory(cachedHit.points, r, a);
     if (validCached.length >= 2) {
-      detailState = { id: a.id, range: r, points: validCached };
+      detailState = { id: a.id, range: r, points: validCached, meta: cachedHit.meta || null };
       drawDetail();
       return;
     }
   }
   box.innerHTML = '<span class="muted">در حال دریافت و راستی‌آزمایی تاریخچه…</span>';
+  renderDetailSourceMeta(a, r, [], null);
   detailChartInFlight++;
   try {
     let pts = await getHistory(a.id, r);
@@ -7126,7 +7231,8 @@ async function loadChart(a, r, allowFallback = false) {
       $$('#detailRanges button').forEach(x => x.classList.toggle('active', x.dataset.detailRange === '1W'));
     }
     if (req !== chartReq || !$('#detailChart')) return;
-    detailState = { id: a.id, range: r, points: pts };
+    const hitAfter = histories.get(a.id + ':' + r);
+    detailState = { id: a.id, range: r, points: pts, meta: hitAfter?.meta || null };
     drawDetail();
   } finally {
     detailChartInFlight = Math.max(0, detailChartInFlight - 1);
@@ -7160,6 +7266,7 @@ function drawDetail(){
     if($('#detailRangeStart'))$('#detailRangeStart').textContent='—';
     const end=$('.detail-chart-caption')?.lastElementChild;
     if(end)end.textContent='—';
+    renderDetailSourceMeta(a,range,pts,detailState.meta||null);
     if(hdrChange){
       hdrChange.textContent=Number.isFinite(a.change)?((a.change>=0?'↗ +':'↘ ')+pct.format(Math.abs(a.change))+'٪ (۲۴ ساعته)'):'—';
       hdrChange.className='change '+((a.change||0)>=0?'up':'down');
@@ -7181,6 +7288,7 @@ function drawDetail(){
   if(cap)cap.style.direction='ltr';
   const end=cap?.lastElementChild;
   if(end)end.textContent=formatAxisTime(pts.at(-1)[0],range,isDomestic);
+  renderDetailSourceMeta(a,range,pts,detailState.meta||null);
   if(range==='1D'){
     renderSparkFromPoints(a.id,detailState.points,'1D');
   }
@@ -7200,7 +7308,14 @@ async function getHistory(id,range='1D'){
     const raw=Array.isArray(j.points)?j.points:[];
     const points=validateClientHistory(raw,range,asset(id));
     if(points.length>=2){
-      histories.set(key,{at:Date.now(),points});
+      const meta={
+        source:j.source||null,
+        priceSource:j.priceSource||j.source||null,
+        lastDataAt:Number(j.lastDataAt)>0?Number(j.lastDataAt):null,
+        resolution:j.resolution||null,
+        dataStatus:j.dataStatus||null
+      };
+      histories.set(key,{at:Date.now(),points,meta});
       const curA=asset(id);
       if(curA&&!(curA.price>0)){
         const lastPt=points.at(-1),firstPt=points[0];
@@ -7224,15 +7339,17 @@ function withCurrent(points, a, range = '1D') {
   if (!Array.isArray(points) || points.length < 2) return [];
   const valid = validateClientHistory(points, range, a);
   if (valid.length < 2) return [];
-  if (!a || !(a.price > 0) || !a.updatedAt) return valid;
-  const now = Math.floor(a.updatedAt);
+  const span = CLIENT_RANGES[range] || 86400;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const refTs = a ? Math.floor(Number(a.sourceTimestamp || a.updatedAt || 0)) : 0;
+  if (!a || !(a.price > 0) || !(refTs > 1500000000) || refTs < nowSec - span || refTs > nowSec + 300) return valid;
   const last = valid.at(-1);
   if (Math.abs(a.price - last[1]) / last[1] > 0.35) return valid;
-  if (now > last[0]) {
-    return [...valid, [now, a.price]];
-  } else if (now === last[0]) {
+  if (refTs > last[0]) {
+    return [...valid, [refTs, a.price]];
+  } else if (refTs === last[0]) {
     const copy = valid.slice();
-    copy[copy.length - 1] = [now, a.price];
+    copy[copy.length - 1] = [refTs, a.price];
     return copy;
   }
   return valid;
@@ -7294,7 +7411,7 @@ function assetIconUrl(a) {
   if (id === 'eur' || sym === 'eur' || id === 'euro' || a.cat === 'gold' || id.includes('gold') || id.includes('coin')) return '';
   const flagUrl = getCountryFlag(id) || getCountryFlag(sym);
   if (flagUrl) return flagUrl;
-  if (a.cat === 'crypto') return getCryptoIcon(sym) || getCryptoIcon(id);
+  if (a.cat === 'crypto') return getCryptoIcon(a);
   return '';
 }
 function enqueuePreloadIcon(url) {
@@ -9684,6 +9801,7 @@ function detail(id) {
       </div>
       <div class="detail-chart" id="detailChart"></div>
       <div class="detail-chart-caption"><span id="detailRangeStart">—</span><span>—</span></div>
+      <div class="detail-source-meta" id="detailSourceMeta"></div>
       <div class="table-note" id="detailNote">در حال بارگذاری و راستی‌آزمایی نمودار…</div>
       <div class="detail-range-tabs" id="detailRanges">
         ${has1H ? `<button data-detail-range="1H">۱ ساعته</button>` : ''}
