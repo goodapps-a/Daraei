@@ -368,7 +368,7 @@ let systemFeeds: SystemFeed[] = [
   { id: 'f_kucoin', name: 'KuCoin Tickers API', url: 'https://api.kucoin.com/api/v1/market/allTickers', type: 'crypto', status: 'active', pingMs: 48, reliability: '100%', priority: 1 },
   { id: 'f_okx', name: 'OKX Market Feed', url: 'https://www.okx.com/api/v5/market/tickers', type: 'crypto', status: 'active', pingMs: 62, reliability: '99.8%', priority: 2 },
   { id: 'f_gate', name: 'Gate.io Engine', url: 'https://api.gateio.ws/api/v4/spot/tickers', type: 'crypto', status: 'active', pingMs: 55, reliability: '100%', priority: 3 },
-  { id: 'f_binance_ws', name: 'Binance MiniTicker WS', url: 'wss://stream.binance.com:443/ws/!miniTicker@arr', type: 'websocket', status: 'active', pingMs: 24, reliability: '100%', priority: 4 },
+  { id: 'f_binance_rest', name: 'Binance Public REST API', url: 'https://data-api.binance.vision/api/v3/ticker/24hr', type: 'crypto', status: 'active', pingMs: 44, reliability: '99.9%', priority: 4 },
   { id: 'f_nerkhara', name: 'NerkhAra Validated Feed', url: 'https://nerkhara.com/api/v1/latest.json', type: 'domestic', status: 'active', pingMs: 34, reliability: '99.9%', priority: 5 },
   { id: 'f_bonbast', name: 'Bonbast Market Rate', url: 'https://www.bonbast.com', type: 'domestic', status: 'active', pingMs: 42, reliability: '99.7%', priority: 6 },
   { id: 'f_nerkh', name: 'TGJU / IranMarket Rate', url: 'https://iran-market.github.io/data/latest-toman.json', type: 'domestic', status: 'active', pingMs: 38, reliability: '99.6%', priority: 7 },
@@ -904,11 +904,13 @@ async function updateAllPrices(force = false) {
     cachedPrices = {
       version: KV_SNAPSHOT_VERSION,
       updatedAt: freshCount > 0 ? now : cachedPrices.updatedAt || 0,
-      checkedAt: now,
+      checkedAt: freshCount > 0 ? now : cachedPrices.checkedAt || 0,
       items,
       feeds
     };
-    lastFetchTime = now;
+    if (freshCount > 0) {
+      lastFetchTime = now;
+    }
 
     if (freshCount > 0) {
       try {
@@ -927,10 +929,12 @@ async function updateAllPrices(force = false) {
   return cachedPrices;
 }
 
-// Background scheduler (15-second interval)
+const PREVIEW_PRICE_FRESHNESS_S = Math.min(90, Math.max(15, Number(process.env.INLINE_REFRESH_S || 60)));
+
+// Background scheduler (~60s interval)
 setInterval(() => {
   updateAllPrices();
-}, 15000);
+}, PREVIEW_PRICE_FRESHNESS_S * 1000);
 
 // Initial immediate fetch
 updateAllPrices(true);
@@ -955,14 +959,10 @@ app.get('/api/prices', async (req, res) => {
   if (manual && !checkRateLimit('refresh:' + getClientIp(req), 6, 60)) {
     return res.status(429).json({ error: 'تعداد درخواست‌های به‌روزرسانی بیش از حد مجاز است. کمی صبر کنید.' });
   }
-  const age = Math.floor(Date.now() / 1000) - lastFetchTime;
+  const ageNow = Math.floor(Date.now() / 1000) - (cachedPrices.checkedAt || lastFetchTime || 0);
 
-  if (manual || age > 15 || !Object.keys(cachedPrices.items || {}).length) {
-    if (manual || !Object.keys(cachedPrices.items || {}).length) {
-      await updateAllPrices(true);
-    } else {
-      updateAllPrices();
-    }
+  if (manual || ageNow >= PREVIEW_PRICE_FRESHNESS_S || !Object.keys(cachedPrices.items || {}).length) {
+    await updateAllPrices(manual || !Object.keys(cachedPrices.items || {}).length);
   }
 
   const t = Math.floor(Date.now() / 1000);
@@ -998,7 +998,19 @@ app.get('/api/prices', async (req, res) => {
     };
   }
 
-  res.setHeader('Cache-Control', 'public, max-age=5, stale-while-revalidate=15');
+  const snapAge = Math.max(0, t - checkedAt);
+  const remainingTtl = snapAge < PREVIEW_PRICE_FRESHNESS_S
+    ? Math.max(5, Math.min(PREVIEW_PRICE_FRESHNESS_S, PREVIEW_PRICE_FRESHNESS_S - snapAge))
+    : 10;
+  if (manual || !Object.keys(items).length) {
+    res.setHeader('Cache-Control', 'no-store, no-cache, private, must-revalidate');
+    res.setHeader('CDN-Cache-Control', 'no-store');
+  } else {
+    res.setHeader('Cache-Control', `public, max-age=${remainingTtl}, s-maxage=${remainingTtl}, stale-while-revalidate=15`);
+    res.setHeader('CDN-Cache-Control', `public, max-age=${remainingTtl}, stale-while-revalidate=15`);
+    res.setHeader('Cloudflare-CDN-Cache-Control', `public, max-age=${remainingTtl}, stale-while-revalidate=15`);
+    res.setHeader('Vary', 'Accept-Encoding');
+  }
   res.json({
     version: KV_SNAPSHOT_VERSION,
     updatedAt: cachedPrices.updatedAt,

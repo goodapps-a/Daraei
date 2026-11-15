@@ -4261,8 +4261,8 @@ const API_SOURCE_LABELS = {
   nobitex: 'Nobitex',
   tetherland: 'TetherLand',
   bitpin: 'Bitpin',
-  binance_ws: 'Binance WS',
-  binance: 'Binance',
+  binance: 'Binance REST',
+  kucoin: 'KuCoin',
   kucoin: 'KuCoin',
   okx: 'OKX',
   gate: 'Gate.io',
@@ -5155,7 +5155,7 @@ function updateTrust(){
   if ($('#storageStatus')) $('#storageStatus').textContent = state.user?.remote ? (syncConflict ? 'همگام‌سازی منتظر انتخاب نسخه از سوی شماست.' : needsAfterLoginRetry ? 'در حال تلاش مجدد برای دریافت اطلاعات حساب...' : syncDirty ? 'تغییرات این دستگاه هنوز همگام نشده‌اند.' : 'معاملات با حساب همگام می‌شوند.') : 'اطلاعات فقط روی همین مرورگر ذخیره می‌شود.';
   if (window.feedStatus && $('#syncStatus')) {
     const f = window.feedStatus;
-    $('#syncStatus').textContent = 'رمزارز: ' + (lastWs && Date.now() - lastWs < 15000 ? 'اتصال لحظه‌ای' : f.crypto?.ok ? 'دریافت دوره‌ای' : 'دریافت ناموفق') + ' · داخلی: ' + (f.domestic?.ok ? 'آخرین قیمت منتشرشده' : 'دریافت ناموفق');
+    $('#syncStatus').textContent = 'رمزارز: ' + (f.crypto?.ok ? 'همگام با سرور' : 'دریافت ناموفق') + ' · داخلی: ' + (f.domestic?.ok ? 'آخرین قیمت منتشرشده' : 'دریافت ناموفق');
   }
 
   // به‌روزرسانی وضعیت اتصال در کنار «دارایی من» و نوار بالای بازار
@@ -6966,12 +6966,10 @@ let lastPriceFetchTime = 0, lastSparkClearTime = Date.now(), hasFreshPricesLoade
 function isConnectionFreshForSmartRefresh() {
   if (navigator.onLine === false || !hasFreshPricesLoaded || serverConnected === false) return false;
   const now = Date.now();
-  const recentHttp = lastServerReceiveTime > 0 && (now - lastServerReceiveTime < 60000);
-  const wsStreaming = Boolean(ws && ws.readyState === WebSocket.OPEN && lastWs > 0 && (now - lastWs < 15000) && lastServerReceiveTime > 0 && (now - lastServerReceiveTime < 300000));
-  return recentHttp || wsStreaming;
+  return lastServerReceiveTime > 0 && (now - lastServerReceiveTime < 10000);
 }
-async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();lastServerReceiveTime=Date.now();consecutivePriceFails=0;serverConnected=true;const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(!hasFreshPricesLoaded||Date.now()-lastSparkClearTime>120000){sparkSeen.clear();if(!hasFreshPricesLoaded){sparkSvgCache.clear();sparkSvgMeta.clear();}else{const nowMs=Date.now();for(const [sid,meta] of sparkSvgMeta){if(nowMs-(meta?.at||0)>120000){sparkSvgCache.delete(sid);sparkSvgMeta.delete(sid);}}}lastSparkClearTime=Date.now();}hasFreshPricesLoaded=true;if(added)loadCryptoIconsOnce(false);}
-state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};evaluateAlerts();if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();if($('#portfolio')?.classList.contains('active'))renderPortfolio();}lastPriceSig=sig;snapshot();updateTrust();if(!splashPending&&!statusIntroTriggered)triggerServerStatusIntro();hydrateSparks();if(manual)toast(n?'قیمت‌ها از سرور دریافت شدند.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){consecutivePriceFails++;const wsAlive=Boolean(lastWs&&Date.now()-lastWs<25000);const recentHttp=Boolean(lastServerReceiveTime>0&&Date.now()-lastServerReceiveTime<45000);if(navigator.onLine===false){serverConnected=false;}else if(serverConnected===true){if(consecutivePriceFails>=3&&!wsAlive&&!recentHttp){serverConnected=false;}else if(consecutivePriceFails===1&&!manual){setTimeout(()=>{if(!document.hidden)loadPrices(false);},2500);}}else{if(wsAlive){serverConnected=true;if(!lastServerReceiveTime)lastServerReceiveTime=Date.now();}else if(consecutivePriceFails>=2||manual){serverConnected=false;}else{setTimeout(()=>{if(!document.hidden)loadPrices(false);},2000);}}if($('#syncStatus'))$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();if(!splashPending&&!statusIntroTriggered&&serverConnected!==null)triggerServerStatusIntro();hydrateSparks();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
+async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:manual?'no-store':'default',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();lastServerReceiveTime=Date.now();consecutivePriceFails=0;serverConnected=true;const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(!hasFreshPricesLoaded||Date.now()-lastSparkClearTime>120000){sparkSeen.clear();if(!hasFreshPricesLoaded){sparkSvgCache.clear();sparkSvgMeta.clear();}else{const nowMs=Date.now();for(const [sid,meta] of sparkSvgMeta){if(nowMs-(meta?.at||0)>120000){sparkSvgCache.delete(sid);sparkSvgMeta.delete(sid);}}}lastSparkClearTime=Date.now();}hasFreshPricesLoaded=true;if(added)loadCryptoIconsOnce(false);}
+state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};evaluateAlerts();if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();if($('#portfolio')?.classList.contains('active'))renderPortfolio();}lastPriceSig=sig;snapshot();updateTrust();if(!splashPending&&!statusIntroTriggered)triggerServerStatusIntro();hydrateSparks();if(manual)toast(n?'قیمت‌ها از سرور دریافت شدند.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){consecutivePriceFails++;const recentHttp=Boolean(lastServerReceiveTime>0&&Date.now()-lastServerReceiveTime<45000);if(navigator.onLine===false){serverConnected=false;}else if(serverConnected===true){if(consecutivePriceFails>=3&&!recentHttp){serverConnected=false;}else if(consecutivePriceFails===1&&!manual){setTimeout(()=>{if(!document.hidden)loadPrices(false);},2500);}}else{if(consecutivePriceFails>=2||manual){serverConnected=false;}else{setTimeout(()=>{if(!document.hidden)loadPrices(false);},2000);}}if($('#syncStatus'))$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();if(!splashPending&&!statusIntroTriggered&&serverConnected!==null)triggerServerStatusIntro();hydrateSparks();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
 let syncCryptoActive = false;
 async function syncCrypto(){
   const buttons=[$('#syncNow'),$('#refreshBtn')].filter(Boolean);
@@ -6997,9 +6995,7 @@ async function syncCrypto(){
   try{
     if (isConnectionFreshForSmartRefresh()) {
       await spinWait;
-      lastServerReceiveTime = Date.now();
       serverConnected = true;
-      state.lastSync = new Date().toISOString();
       softRender();
       updateTrust();
     } else {
@@ -7008,99 +7004,6 @@ async function syncCrypto(){
   }finally{
     syncCryptoActive = false;
     buttons.forEach(b=>b.disabled=false);
-  }
-}
-let ws=null,wsTimer=0,wsAttempt=0,lastWs=0,wsPaint=0,wsOpenedAt=0;
-const WS_SILENCE_MS = 20000;
-const NON_CRYPTO_SYMS=new Set(['USD','EUR','GBP','TRY','CAD','AED','CNY','AUD','CHF','SAR','QAR','KWD','OMR','IQD','AFN','RUB','INR','JPY','BRL','AEUR','USDT','USDC','FDUSD','DAI']);
-function connectPrices(){
-  if (document.hidden) return;
-  if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-  clearTimeout(wsTimer);
-  const urls = [
-    'wss://stream.binance.com:443/ws/!miniTicker@arr',
-    'wss://data-stream.binance.vision/ws/!miniTicker@arr'
-  ];
-  try {
-    ws = new WebSocket(urls[wsAttempt % urls.length]);
-    wsOpenedAt = Date.now();
-  } catch {
-    ws = null;
-    return;
-  }
-  ws.onopen = () => {
-    wsOpenedAt = Date.now();
-  };
-  ws.onmessage = e => {
-    try {
-      const arr = JSON.parse(e.data);
-      if (!Array.isArray(arr)) return;
-      const now = Math.floor(Date.now() / 1000);
-      let hit = 0;
-      for (const t of arr) {
-        const s = t?.s;
-        if (!s || !s.endsWith('USDT')) continue;
-        const base = s.slice(0, -4).toUpperCase();
-        if (NON_CRYPTO_SYMS.has(base)) continue;
-        const id = base.toLowerCase();
-        const a = assets.find(x => x.id === id && x.cat === 'crypto');
-        const c = +t.c, o = +t.o;
-        if (a && c > 0) {
-          const evtSec = Number(t.E) > 1e12 ? Math.floor(Number(t.E) / 1000) : (Number(t.E) > 1e9 ? Math.floor(Number(t.E)) : now);
-          a.price = c;
-          if (o > 0) a.change = (c / o - 1) * 100;
-          a.currency = 'USDT';
-          a.sourceTimestamp = evtSec;
-          a.receivedAt = now;
-          a.updatedAt = evtSec;
-          a.stale = false;
-          a.priceType = 'last';
-          a.source = 'binance_ws';
-          hit++;
-        }
-      }
-      if (hit) {
-        lastWs = Date.now();
-        wsAttempt = 0;
-        if (navigator.onLine !== false && serverConnected === false) {
-          serverConnected = true;
-          consecutivePriceFails = 0;
-          if (!lastServerReceiveTime) lastServerReceiveTime = Date.now();
-        }
-        if (!wsPaint) {
-          wsPaint = requestAnimationFrame(() => {
-            wsPaint = 0;
-            paintLivePrices();
-            evaluateAlerts();
-          });
-        }
-      }
-    } catch {}
-  };
-  ws.onclose = () => {
-    ws = null;
-    clearTimeout(wsTimer);
-    if (!document.hidden) {
-      const backoff = Math.min(30000, 1500 * Math.pow(2, Math.min(wsAttempt++, 5)));
-      wsTimer = setTimeout(connectPrices, backoff);
-    }
-  };
-  ws.onerror = () => {
-    try { ws.close(); } catch {}
-  };
-}
-function checkWsHealth() {
-  if (document.hidden) return;
-  if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
-    connectPrices();
-    return;
-  }
-  const refTime = lastWs || wsOpenedAt;
-  if (refTime > 0 && Date.now() - refTime > WS_SILENCE_MS) {
-    try { ws.close(); } catch {}
-    ws = null;
-    connectPrices();
-    loadPrices(false);
   }
 }
 let lastDetailLiveSig = '';
@@ -8161,7 +8064,7 @@ async function renderAdmin() {
             <tr><td><strong>KuCoin Tickers API</strong></td><td><span class="role-badge user">crypto</span></td><td style="direction:ltr;text-align:right">48 ms</td><td>100%</td><td><span class="status-pill active">آنلاین و فعال</span></td></tr>
             <tr><td><strong>OKX Market Feed</strong></td><td><span class="role-badge user">crypto</span></td><td style="direction:ltr;text-align:right">62 ms</td><td>99.8%</td><td><span class="status-pill active">آنلاین و فعال</span></td></tr>
             <tr><td><strong>Gate.io Engine</strong></td><td><span class="role-badge user">crypto</span></td><td style="direction:ltr;text-align:right">55 ms</td><td>100%</td><td><span class="status-pill active">آنلاین و فعال</span></td></tr>
-            <tr><td><strong>Binance MiniTicker WS</strong></td><td><span class="role-badge user">websocket</span></td><td style="direction:ltr;text-align:right">24 ms</td><td>100%</td><td><span class="status-pill active">آنلاین و فعال</span></td></tr>
+            <tr><td><strong>Binance Public REST API</strong></td><td><span class="role-badge user">crypto</span></td><td style="direction:ltr;text-align:right">44 ms</td><td>99.9%</td><td><span class="status-pill active">آنلاین و فعال</span></td></tr>
             <tr><td><strong>TGJU / Nerkhsanj Rate</strong></td><td><span class="role-badge user">domestic</span></td><td style="direction:ltr;text-align:right">38 ms</td><td>99.4%</td><td><span class="status-pill active">آنلاین و فعال</span></td></tr>
             <tr><td><strong>Nobitex Domestic Bridge</strong></td><td><span class="role-badge user">tether</span></td><td style="direction:ltr;text-align:right">32 ms</td><td>100%</td><td><span class="status-pill active">آنلاین و فعال</span></td></tr>
           </tbody>
@@ -8185,14 +8088,14 @@ async function renderAdmin() {
         <div class="admin-card-item">
           <div class="admin-card-item-header">
             <div>
-              <strong style="font-size:13px;color:var(--ink);display:block">Binance MiniTicker WS</strong>
-              <span class="role-badge user" style="margin-top:2px">websocket</span>
+              <strong style="font-size:13px;color:var(--ink);display:block">Binance Public REST API</strong>
+              <span class="role-badge user" style="margin-top:2px">crypto</span>
             </div>
             <span class="status-pill active">آنلاین</span>
           </div>
           <div class="admin-card-item-footer" style="padding-top:6px">
-            <span class="muted" style="font-size:11px">تأخیر: <strong style="direction:ltr;color:var(--ink)">24 ms</strong></span>
-            <span class="muted" style="font-size:11px">پایداری: <strong style="color:var(--ink)">100%</strong></span>
+            <span class="muted" style="font-size:11px">تأخیر: <strong style="direction:ltr;color:var(--ink)">44 ms</strong></span>
+            <span class="muted" style="font-size:11px">پایداری: <strong style="color:var(--ink)">99.9%</strong></span>
           </div>
         </div>
         <div class="admin-card-item">
@@ -8489,7 +8392,7 @@ async function renderAdmin() {
               <div>
                 <label style="font-size:11px;font-weight:800;color:var(--muted);display:block;margin-bottom:6px">قالب‌های آماده جهت افزودن سریع با ۱ کلیک:</label>
                 <div style="display:flex;gap:5px;flex-wrap:wrap" id="feedPresetButtons">
-                  <button type="button" class="btn btn-soft" data-f-name="Binance MiniTicker WS" data-f-url="wss://stream.binance.com:443/ws/!miniTicker@arr" data-f-proto="websocket" style="font-size:10px;padding:3px 8px;height:26px">Binance WS</button>
+                  <button type="button" class="btn btn-soft" data-f-name="Binance Public REST API" data-f-url="https://data-api.binance.vision/api/v3/ticker/24hr" data-f-proto="crypto" style="font-size:10px;padding:3px 8px;height:26px">Binance REST</button>
                   <button type="button" class="btn btn-soft" data-f-name="CoinGecko Market API" data-f-url="https://api.coingecko.com/api/v3/coins/markets?vs_currency=usd" data-f-proto="crypto" style="font-size:10px;padding:3px 8px;height:26px">CoinGecko REST</button>
                   <button type="button" class="btn btn-soft" data-f-name="OKX Spot Tickers" data-f-url="https://www.okx.com/api/v5/market/tickers?instType=SPOT" data-f-proto="crypto" style="font-size:10px;padding:3px 8px;height:26px">OKX Tickers</button>
                   <button type="button" class="btn btn-soft" data-f-name="Gate.io Market API" data-f-url="https://api.gateio.ws/api/v4/spot/tickers" data-f-proto="crypto" style="font-size:10px;padding:3px 8px;height:26px">Gate.io API</button>
@@ -8512,7 +8415,6 @@ async function renderAdmin() {
                   <option value="crypto">رمزارز خارجی (Crypto REST API)</option>
                   <option value="domestic">نرخ داخلی و طلا (Domestic IRT)</option>
                   <option value="rest">سایر وب‌سرویس‌ها (Custom REST)</option>
-                  <option value="websocket">سوکت زنده (WebSocket Stream)</option>
                 </select>
               </div>
               <div class="form-actions" style="margin-top:8px">
@@ -9955,14 +9857,13 @@ window.onSplashDone = function() {
     setTimeout(() => { if (!statusIntroTriggered) triggerServerStatusIntro(); }, 180);
   }
 };
-// اجرای هم‌زمان و کاملاً مستقل وب‌سوکت رمزارزها و واکشی قیمت‌های داخلی در میلی‌ثانیه اول
-connectPrices();
+// دریافت متمرکز تمام قیمت‌ها (رمزارز و نرخ داخلی) فقط از مسیر /api/prices
 loadPrices();
 setTimeout(() => { if (!splashPending && !statusIntroTriggered) triggerServerStatusIntro(); }, 900);
 
 
 
-checkSession();api('/api/auth/config').then(j=>{window.authConfig=j}).catch(()=>{});setInterval(()=>{if(document.hidden)return;checkWsHealth();loadPrices();},15000);setInterval(()=>{if(document.hidden)return;pollRemote();},45000);setInterval(()=>{if(!document.hidden){updateTrust();snapshot();}},30000);addEventListener('online',()=>{updateTrust();if(needsAfterLoginRetry){afterLogin();}else{pushRemote();}loadPrices();connectPrices();});addEventListener('offline',()=>{serverConnected=false;updateTrust();});document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(wsTimer);}else{checkWsHealth();if(Date.now()-lastPriceFetchTime>=10000)loadPrices();if(needsAfterLoginRetry){afterLogin();}else if(Date.now()-lastPollAt>=15000){pollRemote();}}});
+checkSession();api('/api/auth/config').then(j=>{window.authConfig=j}).catch(()=>{});setInterval(()=>{if(document.hidden)return;loadPrices();},30000);setInterval(()=>{if(document.hidden)return;pollRemote();},45000);setInterval(()=>{if(!document.hidden){updateTrust();snapshot();}},30000);addEventListener('online',()=>{updateTrust();if(needsAfterLoginRetry){afterLogin();}else{pushRemote();}loadPrices();});addEventListener('offline',()=>{serverConnected=false;updateTrust();});document.addEventListener('visibilitychange',()=>{if(!document.hidden){if(Date.now()-lastPriceFetchTime>=20000)loadPrices();if(needsAfterLoginRetry){afterLogin();}else if(Date.now()-lastPollAt>=15000){pollRemote();}}});
 (function setupBackButtonGuard(){
   const armOnce = () => {
     ensureBackGuard();

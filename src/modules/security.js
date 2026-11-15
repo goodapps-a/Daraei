@@ -11,7 +11,7 @@ export const SEC_HEADERS = {
   'strict-transport-security': 'max-age=31536000; includeSubDomains'
 };
 
-export const PROD_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; worker-src 'self' blob:; connect-src 'self' wss://stream.binance.com:443 wss://data-stream.binance.vision; frame-ancestors 'self'; base-uri 'self'; form-action 'self'";
+export const PROD_CSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors 'self'; base-uri 'self'; form-action 'self'";
 
 export function extractInlineScriptBodies(html) {
   const bodies = [];
@@ -37,7 +37,7 @@ export function buildHtmlCsp(allowPreviewFrame = false, scriptHashes = []) {
   const scriptSrc = hashes.length
     ? `'self' ${hashes.map((h) => `'${h}'`).join(' ')}`
     : "'self' 'unsafe-inline'";
-  return `default-src 'self'; script-src ${scriptSrc}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; worker-src 'self' blob:; connect-src 'self' wss://stream.binance.com:443 wss://data-stream.binance.vision; frame-ancestors ${frameAncestors}; base-uri 'self'; form-action 'self'`;
+  return `default-src 'self'; script-src ${scriptSrc}; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' data: https://fonts.gstatic.com; img-src 'self' data: blob: https:; worker-src 'self' blob:; connect-src 'self'; frame-ancestors ${frameAncestors}; base-uri 'self'; form-action 'self'`;
 }
 
 export const b64u = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');

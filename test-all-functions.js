@@ -19,6 +19,7 @@ import {
   getAdminSecret,
   extractInlineScriptBodies,
   buildHtmlCsp,
+  PROD_CSP,
   sha256Hex,
   hmacHex,
   createMemoryRateLimiter
@@ -26,6 +27,8 @@ import {
 import crypto from 'node:crypto';
 import { D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, getStaleThresholdSec, isPriceItemStale, parseBonbastPayload } from './src/modules/market-core.js';
 import worker, {
+  PriceCoordinator,
+  getPriceFreshnessS,
   loadData,
   saveData,
   transferUserAssetsSafely,
@@ -1520,7 +1523,10 @@ test('src/index.html has 6 inline scripts covered by hash-based CSP, narrow conn
 
   const connectSrcMatch = /connect-src\s+([^;]+)/.exec(csp);
   assert.ok(connectSrcMatch);
-  assert.equal(connectSrcMatch[1].trim(), "'self' wss://stream.binance.com:443 wss://data-stream.binance.vision");
+  assert.equal(connectSrcMatch[1].trim(), "'self'");
+  assert.match(PROD_CSP, /connect-src\s+'self';/);
+  assert.equal(/new\s+WebSocket\s*\(/.test(html), false, 'src/index.html must not open direct browser WebSockets');
+  assert.equal(/stream\.binance\.com|data-stream\.binance\.vision/.test(html), false, 'src/index.html must not reference Binance WebSocket endpoints');
 
   // Exactly one escapeHtml definition (using ??'')
   const escapeMatches = html.match(/function\s+escapeHtml\s*\(/g) || [];
@@ -2431,6 +2437,243 @@ test('local bundled crypto logos & flags skip external icon CDN calls when cover
   assert.ok(html.includes('function renderSparkFromPoints(id, rawPts, usedRange'), 'Expected unified sparkline renderer');
   assert.ok(html.includes("if(range==='1D'){\n    renderSparkFromPoints(a.id,detailState.points,'1D');"), 'Expected modal 1D drawDetail to sync card sparkline');
 });
+
+test('PriceCoordinator Durable Object coalesces concurrent refreshes onto one upstream fetch and respects 60s freshness', async () => {
+  __resetWorkerStateForTests();
+  const wrangler = fs.readFileSync(new URL('./wrangler.toml', import.meta.url), 'utf8');
+  assert.match(wrangler, /class_name\s*=\s*"PriceCoordinator"/);
+  assert.match(wrangler, /new_sqlite_classes\s*=\s*\["PriceCoordinator"\]/);
+  assert.match(wrangler, /INLINE_REFRESH_S\s*=\s*"60"/);
+  assert.match(wrangler, /crons\s*=\s*\["\*\/5 \* \* \* \*",\s*"17 3 \* \* \*"\]/);
+
+  const doStorage = new Map();
+  const state = {
+    storage: {
+      async get(k) { return doStorage.get(k); },
+      async put(k, v) { doStorage.set(k, structuredClone(v)); },
+      async delete(k) { doStorage.delete(k); }
+    },
+    waitUntil() {}
+  };
+  let coordInstance = null;
+  const env = {
+    INLINE_REFRESH_S: '60',
+    PRICE_COORDINATOR: {
+      idFromName(name) { return name; },
+      get() {
+        if (!coordInstance) coordInstance = new PriceCoordinator(state, env);
+        return { fetch: (input, init) => coordInstance.fetch(new Request(input, init)) };
+      }
+    }
+  };
+
+  let domesticFetches = 0;
+  let kucoinFetches = 0;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const u = typeof input === 'string' ? input : input?.url || '';
+    if (u === 'https://nerkhara.com/api/v1/latest.json') {
+      domesticFetches++;
+      await new Promise((r) => setTimeout(r, 30));
+      const iso = new Date().toISOString();
+      return new Response(JSON.stringify({
+        stale: false,
+        generated_utc: iso,
+        items: [{ id: 'usd', price: 89500, unit: 'IRT', updated_utc: iso }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u === 'https://api.kucoin.com/api/v1/market/allTickers') {
+      kucoinFetches++;
+      await new Promise((r) => setTimeout(r, 30));
+      const ticker = [];
+      for (let i = 0; i < 16; i++) {
+        const sym = i === 0 ? 'BTC-USDT' : `COIN${i}-USDT`;
+        ticker.push({ symbol: sym, last: String(90000 + i), changeRate: '0.01', volValue: '500000' });
+      }
+      return new Response(JSON.stringify({ data: { time: Date.now(), ticker } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  try {
+    const [a, b, c] = await Promise.all([
+      refreshPrices(env, false, true),
+      refreshPrices(env, false, true),
+      refreshPrices(env, false, true)
+    ]);
+    assert.equal(domesticFetches, 1, 'Expected DO to trigger only one domestic fetch across concurrent refreshes');
+    assert.equal(kucoinFetches, 1, 'Expected DO to trigger only one crypto fetch across concurrent refreshes');
+    assert.equal(a.items.usd.price, 89500);
+    assert.equal(b.items.btc.price, 90000);
+    assert.equal(c.items.btc.price, 90000);
+
+    // Subsequent non-forced refresh within 60s must reuse DO snapshot without external fetches
+    const cachedFollowup = await refreshPrices(env, false, true);
+    assert.equal(cachedFollowup.cached, true);
+    assert.equal(domesticFetches, 1);
+    assert.equal(kucoinFetches, 1);
+    assert.ok(doStorage.has(KV_SNAPSHOT_KEY), 'Expected DO SQLite storage to persist price snapshot');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('/api/prices uses global & Tiered Workers Cache (~60s) strictly isolated from auth/admin/user endpoints', async () => {
+  __resetWorkerStateForTests();
+  const mockEdgeStore = new Map();
+  const origCaches = globalThis.caches;
+  const origFetch = globalThis.fetch;
+
+  const mockDefaultCache = {
+    async match(key) {
+      const url = typeof key === 'string' ? key : key?.url;
+      const entry = mockEdgeStore.get(url);
+      return entry ? entry.clone() : undefined;
+    },
+    async put(key, response) {
+      const url = typeof key === 'string' ? key : key?.url;
+      mockEdgeStore.set(url, response.clone());
+    },
+    async delete(key) {
+      const url = typeof key === 'string' ? key : key?.url;
+      return mockEdgeStore.delete(url);
+    }
+  };
+  Object.defineProperty(globalThis, 'caches', { configurable: true, writable: true, value: { default: mockDefaultCache } });
+
+  const env = { INLINE_REFRESH_S: '60' };
+  let kucoinCalls = 0;
+  globalThis.fetch = async (input) => {
+    const u = typeof input === 'string' ? input : input?.url || '';
+    if (u === 'https://nerkhara.com/api/v1/latest.json') {
+      const iso = new Date().toISOString();
+      return new Response(JSON.stringify({
+        stale: false,
+        generated_utc: iso,
+        items: [{ id: 'usd', price: 88200, unit: 'IRT', updated_utc: iso }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u === 'https://api.kucoin.com/api/v1/market/allTickers') {
+      kucoinCalls++;
+      const ticker = [];
+      for (let i = 0; i < 16; i++) {
+        const sym = i === 0 ? 'BTC-USDT' : `TK${i}-USDT`;
+        ticker.push({ symbol: sym, last: String(91000 + i), changeRate: '0.02', volValue: '800000' });
+      }
+      return new Response(JSON.stringify({ data: { time: Date.now(), ticker } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  const pendingWaitUntils = [];
+  const ctx = { waitUntil(p) { pendingWaitUntils.push(Promise.resolve(p)); } };
+
+  try {
+    assert.equal(getPriceFreshnessS(env), 60);
+    const res1 = await worker.fetch(new Request('https://darayi.example/api/prices'), env, ctx);
+    await Promise.all(pendingWaitUntils.splice(0));
+    assert.equal(res1.status, 200);
+    const cc1 = res1.headers.get('cache-control') || '';
+    const cdnCc1 = res1.headers.get('cdn-cache-control') || '';
+    const cfCdnCc1 = res1.headers.get('cloudflare-cdn-cache-control') || '';
+    assert.match(cc1, /public,\s*max-age=\d+,\s*s-maxage=\d+/);
+    assert.match(cdnCc1, /public,\s*max-age=\d+/);
+    assert.match(cfCdnCc1, /public,\s*max-age=\d+/);
+    assert.equal(res1.headers.get('set-cookie'), null);
+    assert.ok(mockEdgeStore.has('https://edge.darayi.local/api/prices'), 'Expected /api/prices written to canonical Workers Cache');
+
+    // Second request from another PoP/client hits canonical edge cache cleanly with 0 upstream calls
+    const res2 = await worker.fetch(new Request('https://darayi.example/api/prices'), env, ctx);
+    assert.equal(res2.status, 200);
+    const body2 = await res2.json();
+    assert.equal(body2.items.btc.price, 91000);
+    assert.equal(kucoinCalls, 1);
+
+    // Auth / user / admin endpoints must NEVER enter global cache and must return strict private no-store headers
+    const authRes = await worker.fetch(new Request('https://darayi.example/api/auth/config'), env, ctx);
+    assert.match(authRes.headers.get('cache-control') || '', /no-store/);
+    assert.match(authRes.headers.get('cache-control') || '', /private/);
+    assert.equal(authRes.headers.get('cdn-cache-control'), 'no-store');
+    assert.equal(authRes.headers.get('cloudflare-cdn-cache-control'), 'no-store');
+
+    const meRes = await worker.fetch(new Request('https://darayi.example/api/me/data'), env, ctx);
+    assert.equal(meRes.status, 401);
+    assert.match(meRes.headers.get('cache-control') || '', /private/);
+    assert.match(meRes.headers.get('cache-control') || '', /no-store/);
+    assert.equal(meRes.headers.get('cdn-cache-control'), 'no-store');
+
+    const adminRes = await worker.fetch(new Request('https://darayi.example/api/admin/overview'), env, ctx);
+    assert.equal(adminRes.status, 401);
+    assert.match(adminRes.headers.get('cache-control') || '', /no-store/);
+    assert.equal(adminRes.headers.get('cdn-cache-control'), 'no-store');
+
+    assert.equal(mockEdgeStore.size, 1, 'Expected ONLY /api/prices in global edge cache');
+  } finally {
+    globalThis.fetch = origFetch;
+    Object.defineProperty(globalThis, 'caches', { configurable: true, writable: true, value: origCaches });
+  }
+});
+
+test('Worker isolate memory cache expires after 60s, ignores older KV snapshots, and preserves values on upstream failure', async () => {
+  __resetWorkerStateForTests();
+  const now = Math.floor(Date.now() / 1000);
+  const oldKvSnap = {
+    version: 1,
+    updatedAt: now - 400,
+    checkedAt: now - 400,
+    items: {
+      usd: { price: 80000, unit: 'IRT', sym: 'USD', name: 'دلار', kind: 'domestic', t: now - 400 }
+    },
+    feeds: {}
+  };
+  let kvPuts = 0;
+  const mockKv = {
+    async get() { return structuredClone(oldKvSnap); },
+    async put() { kvPuts++; }
+  };
+
+  // Seed a newer snapshot via upstream refresh at t = now
+  let failAll = false;
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    if (failAll) return new Response('{}', { status: 503 });
+    const u = typeof input === 'string' ? input : input?.url || '';
+    if (u === 'https://nerkhara.com/api/v1/latest.json') {
+      const iso = new Date(now * 1000).toISOString();
+      return new Response(JSON.stringify({
+        stale: false,
+        generated_utc: iso,
+        items: [{ id: 'usd', price: 87000, unit: 'IRT', updated_utc: iso }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 503 });
+  };
+
+  try {
+    const res1 = await refreshPrices({ PRICES_KV: mockKv, INLINE_REFRESH_S: '60' }, true, true);
+    assert.equal(res1.items.usd.price, 87000);
+
+    // Even forcing getPrices against an older KV snapshot must NOT overwrite the fresher in-memory price (87000)
+    const afterForceKvRead = await getPrices({ PRICES_KV: mockKv, INLINE_REFRESH_S: '60' }, { force: true });
+    assert.equal(afterForceKvRead.items.usd.price, 87000, 'Older KV snapshot must never clobber fresher snapshot');
+
+    // KV backup writes remain throttled (>=280s) for Cloudflare Free Plan 1000 writes/day limit
+    await writePricesKvSnapshot({ PRICES_KV: mockKv }, afterForceKvRead, false);
+    await writePricesKvSnapshot({ PRICES_KV: mockKv }, { ...afterForceKvRead, items: { usd: { price: 87100, unit: 'IRT' } } }, false);
+    assert.equal(kvPuts, 1, 'Expected KV backup write throttle to suppress rapid non-forced KV writes');
+
+    // If all upstreams fail now, existing price (87000) is preserved AND checkedAt does NOT falsely jump ahead
+    failAll = true;
+    const prevChecked = afterForceKvRead.checkedAt;
+    const failedOutcome = await refreshPrices({ PRICES_KV: mockKv, INLINE_REFRESH_S: '60' }, true, true);
+    assert.equal(failedOutcome.updated.length, 0);
+    assert.equal(failedOutcome.items.usd.price, 87000);
+    assert.equal(failedOutcome.snapshot.checkedAt, prevChecked, 'Total upstream failure must preserve previous checkedAt');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 
 
 

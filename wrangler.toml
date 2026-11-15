@@ -25,6 +25,15 @@ GOOGLE_CLIENT_ID = "927651692028-q4rp0ir4lcgg94pc9r76rcu6t0veoele.apps.googleuse
 INLINE_REFRESH_S = "60"
 PRICE_HISTORY_DAYS = "7"
 
+# هماهنگ‌کننده مرکزی و واحد دریافت قیمت (فقط برای هماهنگی Refresh و Snapshot؛ رایگان با SQLite DO)
+[[durable_objects.bindings]]
+name = "PRICE_COORDINATOR"
+class_name = "PriceCoordinator"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PriceCoordinator"]
+
 # اتصال Cloudflare KV برای ذخیره Snapshot آخرین قیمت‌های معتبر بازار (کلید prices:snapshot:v1)
 [[kv_namespaces]]
 binding = "PRICES_KV"

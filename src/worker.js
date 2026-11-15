@@ -6,7 +6,7 @@
  * ============================================================================
  * | متغیر حافظه                   | منبع حقیقت (D1 / KV / Cache)      | TTL حافظه   | توضیح و رفتار در محیط چند-Isolate                     |
  * |-------------------------------|-----------------------------------|-------------|-------------------------------------------------------|
- * | inMemoryPrices                | KV (PRICES_KV) / D1 kv / CacheAPI | ~45s        | کش لحظه‌ای قیمت‌ها؛ همگام‌سازی با Cron و Cache API     |
+ * | inMemoryPrices                | DO Coordinator / KV / Cache API   | ~60s        | کش لحظه‌ای Isolate؛ انقضای ۶۰ ثانیه‌ای و جلوگیری از بازنویسی با داده قدیمی|
  * | inMemoryDynamicIcons          | KV (crypto_icons_v4)              | 12h (43200s)| نقشهٔ آیکون رمزارزها؛ خواندن تنبل با قفل Job همزمان    |
  * | inMemoryBroadcast             | D1 (kv: 'broadcast')              | 1h (3600s)  | پیام عمومی بالای برنامه                               |
  * | inMemoryAdminStats            | D1 (users / alerts / user_data)   | 60s         | آمار کلی پنل مدیریت                                   |
@@ -171,8 +171,13 @@ const CURATED_CRYPTO_ICONS = {
 
 export const CRYPTO_ICONS = { ...LEGACY_COINCAP_ICONS, ...CURATED_CRYPTO_ICONS };
 
+const DEFAULT_PRICE_FRESHNESS_S = 60;
+const PRICES_EDGE_CACHE_KEY = 'https://edge.darayi.local/api/prices';
 let inMemoryPrices = null;
 let inMemoryPricesTime = 0;
+let inMemoryPricesLoadedAt = 0;
+let inMemoryCoordinatorReadAt = 0;
+let inMemoryRefreshFailureAt = 0;
 let inMemoryDynamicIcons = null;
 let inMemoryDynamicIconsTime = 0;
 let inMemoryDynamicIconsJob = null;
@@ -186,6 +191,7 @@ let inMemoryAdminSettings = null;
 let inMemoryAdminSettingsTime = 0;
 let lastCronCleanupTime = 0;
 let inMemoryKvLoaded = false;
+let inMemoryKvLoadedAt = 0;
 let lastKvWriteTime = 0;
 let domesticPrevCloseCache = null;
 let domesticPrevCloseTime = 0;
@@ -1973,19 +1979,133 @@ export async function writePricesKvSnapshot(env, data, forceWrite = false) {
   }
 }
 
-export const getPrices = async (env) => {
-  if (inMemoryPrices && inMemoryPrices.items && Object.keys(inMemoryPrices.items).length > 0) {
+export function getPriceFreshnessS(env) {
+  return Math.min(90, Math.max(15, Number((env && env.INLINE_REFRESH_S) || DEFAULT_PRICE_FRESHNESS_S)));
+}
+
+function hasPriceCoordinator(env) {
+  return Boolean(
+    env &&
+    env.PRICE_COORDINATOR &&
+    typeof env.PRICE_COORDINATOR.idFromName === 'function' &&
+    typeof env.PRICE_COORDINATOR.get === 'function'
+  );
+}
+
+function getPriceCoordinatorStub(env) {
+  const id = env.PRICE_COORDINATOR.idFromName('global-price-coordinator-v1');
+  return env.PRICE_COORDINATOR.get(id);
+}
+
+function syncIsolateSnapshot(snap) {
+  if (!snap || typeof snap !== 'object' || !snap.items || !Object.keys(snap.items).length) {
     return inMemoryPrices;
   }
-  if (!inMemoryKvLoaded) {
+  const curChecked = Number(inMemoryPrices?.checkedAt || inMemoryPrices?.updatedAt || 0);
+  const nextChecked = Number(snap.checkedAt || snap.updatedAt || 0);
+  if (inMemoryPrices && inMemoryPrices.items && Object.keys(inMemoryPrices.items).length > 0 && nextChecked < curChecked) {
+    return inMemoryPrices;
+  }
+  hydrateLastHistoryFromSnapshot(snap);
+  inMemoryPrices = {
+    version: snap.version || KV_SNAPSHOT_VERSION,
+    updatedAt: Number(snap.updatedAt) || 0,
+    checkedAt: nextChecked,
+    items: snap.items,
+    feeds: snap.feeds || {},
+    lastHistory: serializeLastHistoryMap(snap.lastHistory)
+  };
+  inMemoryPricesTime = nextChecked;
+  inMemoryPricesLoadedAt = nowS();
+  if (snap.lastHistory) {
+    lastKvSnapshotSig = computeSnapshotSignature(snap.items, snap.lastHistory);
+  }
+  return inMemoryPrices;
+}
+
+function buildPublicPricesResponse(pricesObj, env, now = nowS(), extraHeaders = {}, options = {}) {
+  const out = publicPrices(pricesObj || { updatedAt: 0, checkedAt: 0, items: {}, feeds: {} });
+  const itemCount = Object.keys(out.items || {}).length;
+  const limit = getPriceFreshnessS(env);
+  const snapCheckedAt = Number(out.checkedAt || out.updatedAt || 0);
+  const snapAge = snapCheckedAt > 0 ? Math.max(0, now - snapCheckedAt) : limit;
+  const isFreshEnough = itemCount > 0 && snapCheckedAt > 0 && snapAge < limit;
+  const remainingTtl = isFreshEnough ? Math.max(5, Math.min(limit, limit - snapAge)) : 10;
+  const forceNoStore = Boolean(options && options.noStore);
+
+  if (forceNoStore || itemCount === 0) {
+    return {
+      out,
+      cacheable: false,
+      snapshotAt: snapCheckedAt,
+      response: json(out, 200, {
+        ...extraHeaders,
+        'cache-control': 'no-store, no-cache, private, must-revalidate',
+        'cdn-cache-control': 'no-store',
+        'cloudflare-cdn-cache-control': 'no-store',
+        'pragma': 'no-cache',
+        'x-darayi-cached-at': String(now),
+        'x-darayi-snapshot-at': String(snapCheckedAt)
+      })
+    };
+  }
+
+  const cacheControl = `public, max-age=${remainingTtl}, s-maxage=${remainingTtl}, stale-while-revalidate=15`;
+  const cdnCacheControl = `public, max-age=${remainingTtl}, stale-while-revalidate=15`;
+  return {
+    out,
+    cacheable: isFreshEnough,
+    snapshotAt: snapCheckedAt,
+    response: json(out, 200, {
+      ...extraHeaders,
+      'cache-control': cacheControl,
+      'cdn-cache-control': cdnCacheControl,
+      'cloudflare-cdn-cache-control': cdnCacheControl,
+      'vary': extraHeaders.vary || 'Accept-Encoding',
+      'x-darayi-cached-at': String(now),
+      'x-darayi-snapshot-at': String(snapCheckedAt)
+    })
+  };
+}
+
+export const getPrices = async (env, opts = {}) => {
+  const t = nowS();
+  const freshnessS = getPriceFreshnessS(env);
+  const force = Boolean(opts && opts.force);
+  const hasCur = Boolean(inMemoryPrices && inMemoryPrices.items && Object.keys(inMemoryPrices.items).length > 0);
+  const curChecked = Number(inMemoryPrices?.checkedAt || inMemoryPrices?.updatedAt || 0);
+
+  if (!force && hasCur && curChecked > 0 && (t - curChecked < freshnessS)) {
+    return inMemoryPrices;
+  }
+
+  if (!opts.skipCoordinator && hasPriceCoordinator(env) && (force || (t - inMemoryCoordinatorReadAt >= 5))) {
+    inMemoryCoordinatorReadAt = t;
+    try {
+      const stub = getPriceCoordinatorStub(env);
+      const coordRes = await stub.fetch('https://price-coordinator.internal/snapshot', { method: 'GET' });
+      if (coordRes && coordRes.ok) {
+        const body = await coordRes.json();
+        if (body && body.snapshot && body.snapshot.items && Object.keys(body.snapshot.items).length > 0) {
+          syncIsolateSnapshot(body.snapshot);
+          const syncedChecked = Number(inMemoryPrices?.checkedAt || inMemoryPrices?.updatedAt || 0);
+          if (!force && syncedChecked > 0 && (t - syncedChecked < freshnessS)) {
+            return inMemoryPrices;
+          }
+        }
+      }
+    } catch {}
+  }
+
+  const kvRefreshNeeded = !inMemoryKvLoaded || force || (t - inMemoryKvLoadedAt >= freshnessS);
+  if (!opts.skipKvRead && kvRefreshNeeded) {
     inMemoryKvLoaded = true;
+    inMemoryKvLoadedAt = t;
     if (hasPricesKv(env)) {
       const snap = await readPricesKvSnapshot(env);
       if (snap) {
-        inMemoryPrices = snap;
-        inMemoryPricesTime = snap.checkedAt || snap.updatedAt || 0;
+        syncIsolateSnapshot(snap);
         lastKvSnapshotSig = computeSnapshotSignature(snap.items, snap.lastHistory);
-        return inMemoryPrices;
       }
     } else if (env && env.DB) {
       try {
@@ -1993,15 +2113,14 @@ export const getPrices = async (env) => {
         if (row && row.v) {
           const parsed = JSON.parse(row.v);
           if (parsed && parsed.items && Object.keys(parsed.items).length > 0) {
-            hydrateLastHistoryFromSnapshot(parsed);
-            inMemoryPrices = parsed;
-            inMemoryPricesTime = parsed.checkedAt || parsed.updatedAt || row.updated_at || 0;
-            return inMemoryPrices;
+            if (!parsed.checkedAt) parsed.checkedAt = parsed.updatedAt || row.updated_at || 0;
+            syncIsolateSnapshot(parsed);
           }
         }
       } catch {}
     }
   }
+
   return inMemoryPrices || { version: KV_SNAPSHOT_VERSION, updatedAt: 0, checkedAt: 0, items: {}, feeds: {} };
 };
 
@@ -2434,7 +2553,7 @@ async function fetchBonbastData(nowSec = nowS()) {
   }
 }
 
-export async function refreshPrices(env, force = false, skipSideEffects = false, ctx = null) {
+async function refreshPricesLocal(env, force = false, skipSideEffects = false, ctx = null, seedSnapshot = null) {
   if (isInFlightStateActive(inFlightRefreshJob)) {
     const activeState = inFlightRefreshJob;
     const settled = await waitForCoordinationState(() => activeState, IN_FLIGHT_WAIT_MS);
@@ -2442,11 +2561,12 @@ export async function refreshPrices(env, force = false, skipSideEffects = false,
       return {
         items: { ...(settled.result.items || {}) },
         updated: [...(settled.result.updated || [])],
+        snapshot: settled.result.snapshot || inMemoryPrices,
         coalesced: true
       };
     }
     if (inMemoryPrices?.items && Object.keys(inMemoryPrices.items).length) {
-      return { items: { ...inMemoryPrices.items }, updated: [], busy: true };
+      return { items: { ...inMemoryPrices.items }, updated: [], snapshot: inMemoryPrices, busy: true };
     }
   }
   if (inFlightRefreshJob && !isInFlightStateActive(inFlightRefreshJob)) {
@@ -2457,13 +2577,21 @@ export async function refreshPrices(env, force = false, skipSideEffects = false,
   const jobState = { startedAt: Date.now(), done: false, result: null };
   inFlightRefreshJob = jobState;
   try {
-    const current = await getPrices(env);
+    const current = (seedSnapshot && seedSnapshot.items && Object.keys(seedSnapshot.items).length)
+      ? syncIsolateSnapshot(seedSnapshot)
+      : await getPrices(env, { skipCoordinator: true });
     const hasCryptoNow = Object.values(current.items || {}).some(i => i.crypto && i.unit === 'USDT');
     if (!force && hasCryptoNow && (t - inMemoryRefreshLock < 14)) {
-      const busyOutcome = { items: current.items || {}, updated: [], busy: true };
+      const busyOutcome = { items: current.items || {}, updated: [], snapshot: current, busy: true };
       jobState.result = busyOutcome;
       jobState.done = true;
       return busyOutcome;
+    }
+    if (!force && hasCryptoNow && inMemoryRefreshFailureAt > 0 && (t - inMemoryRefreshFailureAt < 15)) {
+      const failCooldownOutcome = { items: current.items || {}, updated: [], snapshot: current, failureCooldown: true };
+      jobState.result = failCooldownOutcome;
+      jobState.done = true;
+      return failCooldownOutcome;
     }
     inMemoryRefreshLock = t;
     const prev = current;
@@ -2844,18 +2972,27 @@ export async function refreshPrices(env, force = false, skipSideEffects = false,
 
     await Promise.allSettled([domestic(), cryptoFeed()]);
 
-      const data = {
-        version: KV_SNAPSHOT_VERSION,
-        items,
-        feeds,
-        updatedAt: fresh.size ? t : prev.updatedAt || 0,
-        checkedAt: t,
-        lastHistory: serializeLastHistoryMap(prev.lastHistory)
-      };
-      inMemoryPrices = data;
-      inMemoryPricesTime = t;
+    const hasFreshUpdates = fresh.size > 0;
+    if (hasFreshUpdates) {
+      inMemoryRefreshFailureAt = 0;
+    } else {
+      inMemoryRefreshFailureAt = t;
+    }
 
-    if (!skipSideEffects && fresh.size > 0) {
+    const data = {
+      version: KV_SNAPSHOT_VERSION,
+      items,
+      feeds,
+      updatedAt: hasFreshUpdates ? t : (prev.updatedAt || 0),
+      // تنها زمانی که دادهٔ معتبر تازه دریافت شد checkedAt به‌روز می‌شود تا دادهٔ ناموفق ۶۰ ثانیه کش نشود
+      checkedAt: hasFreshUpdates ? t : (prev.checkedAt || 0),
+      lastHistory: serializeLastHistoryMap(prev.lastHistory)
+    };
+    inMemoryPrices = data;
+    inMemoryPricesTime = data.checkedAt || t;
+    inMemoryPricesLoadedAt = t;
+
+    if (!skipSideEffects && hasFreshUpdates) {
       // ذخیره کنترل‌شده تاریخچه کوتاه‌مدت دارایی‌های داخلی در D1 و سپس Snapshot در KV با آخرین وضعیت تاریخچه
       const sideEffectWork = (async () => {
         if (env && env.DB) {
@@ -2871,13 +3008,14 @@ export async function refreshPrices(env, force = false, skipSideEffects = false,
       }
     }
 
-    const outcome = { items, updated: [...fresh] };
+    const outcome = { items, updated: [...fresh], snapshot: data };
     jobState.result = outcome;
     jobState.done = true;
     return outcome;
   } catch (err) {
-    console.error('refreshPrices failed:', err?.message);
-    const errOutcome = { items: inMemoryPrices?.items || {}, updated: [], error: err?.message };
+    console.error('refreshPricesLocal failed:', err?.message);
+    inMemoryRefreshFailureAt = nowS();
+    const errOutcome = { items: inMemoryPrices?.items || {}, updated: [], snapshot: inMemoryPrices || null, error: err?.message };
     jobState.result = errOutcome;
     jobState.done = true;
     return errOutcome;
@@ -2887,6 +3025,236 @@ export async function refreshPrices(env, force = false, skipSideEffects = false,
       inFlightRefreshJob = null;
     }
   }
+}
+
+export class PriceCoordinator {
+  constructor(state, env) {
+    this.ctx = state;
+    this.env = env;
+    this.snapshot = null;
+    this.loaded = false;
+    this.inFlightState = null;
+    this.lastFailureAt = 0;
+  }
+
+  async _ensureLoaded() {
+    if (this.loaded && this.snapshot && this.snapshot.items && Object.keys(this.snapshot.items).length > 0) {
+      return this.snapshot;
+    }
+    this.loaded = true;
+    try {
+      if (this.ctx && this.ctx.storage) {
+        const stored = await this.ctx.storage.get(KV_SNAPSHOT_KEY);
+        if (stored && stored.items && Object.keys(stored.items).length > 0) {
+          this.snapshot = stored;
+          syncIsolateSnapshot(stored);
+          return this.snapshot;
+        }
+      }
+    } catch (e) {
+      console.error('PriceCoordinator storage read error:', e?.message);
+    }
+    try {
+      if (hasPricesKv(this.env)) {
+        const kvSnap = await readPricesKvSnapshot(this.env);
+        if (kvSnap && kvSnap.items && Object.keys(kvSnap.items).length > 0) {
+          this.snapshot = kvSnap;
+          syncIsolateSnapshot(kvSnap);
+          return this.snapshot;
+        }
+      } else if (this.env && this.env.DB) {
+        const row = await kvGet(this.env, KV_SNAPSHOT_KEY);
+        if (row && row.v) {
+          const parsed = JSON.parse(row.v);
+          if (parsed && parsed.items && Object.keys(parsed.items).length > 0) {
+            this.snapshot = parsed;
+            syncIsolateSnapshot(parsed);
+            return this.snapshot;
+          }
+        }
+      }
+    } catch {}
+    return this.snapshot;
+  }
+
+  async _persistSnapshot(nextSnap) {
+    if (!nextSnap || !nextSnap.items || !Object.keys(nextSnap.items).length) return;
+    this.snapshot = nextSnap;
+    try {
+      if (this.ctx && this.ctx.storage) {
+        await this.ctx.storage.put(KV_SNAPSHOT_KEY, nextSnap);
+      }
+    } catch (e) {
+      console.error('PriceCoordinator storage put error:', e?.message);
+    }
+  }
+
+  async fetch(req) {
+    const url = new URL(req.url);
+    const now = nowS();
+
+    if (url.pathname === '/clear' && req.method === 'POST') {
+      this.snapshot = null;
+      this.loaded = false;
+      this.lastFailureAt = 0;
+      try {
+        if (this.ctx && this.ctx.storage) {
+          await this.ctx.storage.delete(KV_SNAPSHOT_KEY);
+        }
+      } catch {}
+      return json({ ok: true });
+    }
+
+    await this._ensureLoaded();
+
+    if (url.pathname === '/snapshot' && req.method === 'GET') {
+      return json({
+        ok: true,
+        snapshot: this.snapshot || { version: KV_SNAPSHOT_VERSION, updatedAt: 0, checkedAt: 0, items: {}, feeds: {} }
+      });
+    }
+
+    if (url.pathname === '/refresh' && req.method === 'POST') {
+      let body = {};
+      try { body = await req.json(); } catch {}
+      const force = Boolean(body && body.force);
+      const skipSideEffects = Boolean(body && body.skipSideEffects);
+      const fromCron = Boolean(body && body.fromCron);
+      const freshnessS = getPriceFreshnessS(this.env);
+      const itemsObj = this.snapshot?.items || {};
+      const empty = !Object.keys(itemsObj).length;
+      const hasCrypto = Object.values(itemsObj).some(i => i.crypto && i.unit === 'USDT');
+      const checkedAt = Number(this.snapshot?.checkedAt || 0);
+      const age = checkedAt > 0 ? Math.max(0, now - checkedAt) : freshnessS;
+
+      if (!force && !empty && hasCrypto && age < freshnessS) {
+        return json({
+          ok: true,
+          cached: true,
+          updated: [],
+          snapshot: this.snapshot,
+          items: itemsObj
+        });
+      }
+
+      if (force && !fromCron && !empty && hasCrypto && age < 10) {
+        return json({
+          ok: true,
+          cached: true,
+          cooldown: true,
+          updated: [],
+          snapshot: this.snapshot,
+          items: itemsObj
+        });
+      }
+
+      if (!force && !empty && this.lastFailureAt > 0 && (now - this.lastFailureAt < 15)) {
+        return json({
+          ok: true,
+          cached: true,
+          failureCooldown: true,
+          updated: [],
+          snapshot: this.snapshot,
+          items: itemsObj
+        });
+      }
+
+      if (isInFlightStateActive(this.inFlightState)) {
+        const active = this.inFlightState;
+        const settled = await waitForCoordinationState(() => active, IN_FLIGHT_WAIT_MS);
+        if (settled?.done && settled.result) {
+          return json({
+            ok: true,
+            coalesced: true,
+            updated: settled.result.updated || [],
+            snapshot: settled.result.snapshot || this.snapshot,
+            items: settled.result.items || this.snapshot?.items || {}
+          });
+        }
+        return json({
+          ok: true,
+          busy: true,
+          updated: [],
+          snapshot: this.snapshot,
+          items: this.snapshot?.items || {}
+        });
+      }
+
+      const jobState = { startedAt: Date.now(), done: false, result: null };
+      this.inFlightState = jobState;
+      try {
+        const result = await refreshPricesLocal(this.env, force, skipSideEffects, this.ctx, this.snapshot);
+        if (result && result.snapshot && Array.isArray(result.updated) && result.updated.length > 0) {
+          this.lastFailureAt = 0;
+          await this._persistSnapshot(result.snapshot);
+        } else if (!result?.updated?.length) {
+          this.lastFailureAt = nowS();
+        }
+        const out = {
+          ok: true,
+          updated: result?.updated || [],
+          snapshot: this.snapshot || result?.snapshot || { version: KV_SNAPSHOT_VERSION, updatedAt: 0, checkedAt: 0, items: {}, feeds: {} },
+          items: this.snapshot?.items || result?.items || {}
+        };
+        jobState.result = out;
+        jobState.done = true;
+        return json(out);
+      } catch (err) {
+        this.lastFailureAt = nowS();
+        const errOut = {
+          ok: false,
+          error: err?.message,
+          updated: [],
+          snapshot: this.snapshot || { version: KV_SNAPSHOT_VERSION, updatedAt: 0, checkedAt: 0, items: {}, feeds: {} },
+          items: this.snapshot?.items || {}
+        };
+        jobState.result = errOut;
+        jobState.done = true;
+        return json(errOut, 200);
+      } finally {
+        jobState.done = true;
+        if (this.inFlightState === jobState) {
+          this.inFlightState = null;
+        }
+      }
+    }
+
+    return json({ error: 'Not found' }, 404);
+  }
+}
+
+export async function refreshPrices(env, force = false, skipSideEffects = false, ctx = null, opts = {}) {
+  if (hasPriceCoordinator(env)) {
+    try {
+      const stub = getPriceCoordinatorStub(env);
+      const res = await stub.fetch('https://price-coordinator.internal/refresh', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          force: Boolean(force),
+          skipSideEffects: Boolean(skipSideEffects),
+          fromCron: Boolean(opts && opts.fromCron)
+        })
+      });
+      if (res && res.ok) {
+        const data = await res.json();
+        if (data && data.snapshot && data.snapshot.items && Object.keys(data.snapshot.items).length > 0) {
+          syncIsolateSnapshot(data.snapshot);
+        }
+        return {
+          items: data?.items || data?.snapshot?.items || inMemoryPrices?.items || {},
+          updated: Array.isArray(data?.updated) ? data.updated : [],
+          snapshot: data?.snapshot || inMemoryPrices || null,
+          coordinated: true,
+          cached: Boolean(data?.cached),
+          coalesced: Boolean(data?.coalesced)
+        };
+      }
+    } catch (err) {
+      console.error('PriceCoordinator refresh fallback:', err?.message);
+    }
+  }
+  return refreshPricesLocal(env, force, skipSideEffects, ctx);
 }
 
 // پالایش و اعتبارسنجی نقاط نمودار از API صرافی‌ها و آرشیوها بدون حذف نوسانات واقعی بازار و بدون ساخت نقطه فرضی
@@ -3662,14 +4030,17 @@ export async function runCron(env) {
       await ensureDatabaseMigrations(env);
     } catch {}
   }
-  // اجرای refreshPrices با skipSideEffects=true تا ثبت تاریخچه، نوشتن KV و بررسی هشدارها دوبار در یک سیکل کران اجرا نشوند
-  const { items } = await refreshPrices(env, true, true);
+  // اجرای refreshPrices از طریق هماهنگ‌کننده مرکزی با skipSideEffects=true تا تاریخچه، KV و هشدارها دقیقاً طبق برنامه ۵ دقیقه‌ای اجرا شوند
+  const refreshed = await refreshPrices(env, true, true, null, { fromCron: true });
+  const items = refreshed?.items || {};
+  const snap = refreshed?.snapshot || inMemoryPrices;
+  if (snap) syncIsolateSnapshot(snap);
   // ۱. ثبت نقاط واقعی قیمت دارایی‌های داخلی و تتر در جدول price_history_v2 دیتابیس D1 (قبل از نوشتن KV تا lastHistory به‌روز باشد)
-  if (env && env.DB && items) {
+  if (env && env.DB && items && Object.keys(items).length) {
     await recordD1DomesticHistory(env, items, t, true);
   }
-  // ۲. ذخیره Snapshot در Cloudflare KV در صورت فعال بودن اتصال PRICES_KV (یا fallback کنترل‌شده در تک‌ردیف جدول kv دیتابیس D1 برای جلوگیری از Cold Start)
-  if (inMemoryPrices) {
+  // ۲. ذخیره Snapshot در Cloudflare KV در صورت فعال بودن اتصال PRICES_KV (حداکثر ۲۸۸ نوشتن در روز؛ ایمن در پلن رایگان)
+  if (inMemoryPrices && Object.keys(inMemoryPrices.items || {}).length) {
     if (hasPricesKv(env)) {
       await writePricesKvSnapshot(env, inMemoryPrices, true);
     } else if (env && env.DB) {
@@ -3677,15 +4048,13 @@ export async function runCron(env) {
       await kvPut(env, KV_SNAPSHOT_KEY, inMemoryPrices, t);
     }
   }
-  // ۳. به‌روزرسانی Cloudflare Cache API برای پاسخ فوری به کاربران
+  // ۳. به‌روزرسانی Cloudflare Cache API و Tiered Cache با کلید متعارف /api/prices
   try {
-    if (typeof caches !== 'undefined' && caches.default && inMemoryPrices) {
-      const out = publicPrices(inMemoryPrices);
-      const res = json(out, 200, {
-        'cache-control': 'public, max-age=20',
-        'x-darayi-cached-at': String(t)
-      });
-      await caches.default.put('https://edge.darayi.local/api/prices', res);
+    if (typeof caches !== 'undefined' && caches.default && inMemoryPrices && Object.keys(inMemoryPrices.items || {}).length) {
+      const built = buildPublicPricesResponse(inMemoryPrices, env, nowS());
+      if (built.cacheable) {
+        await caches.default.put(PRICES_EDGE_CACHE_KEY, built.response);
+      }
     }
   } catch {}
   const sent = await checkAlerts(env, items);
@@ -4025,7 +4394,11 @@ export async function refreshMeta(env) {
 export function __resetWorkerStateForTests() {
   inMemoryPrices = null;
   inMemoryPricesTime = 0;
+  inMemoryPricesLoadedAt = 0;
+  inMemoryCoordinatorReadAt = 0;
+  inMemoryRefreshFailureAt = 0;
   inMemoryKvLoaded = false;
+  inMemoryKvLoadedAt = 0;
   lastKvWriteTime = 0;
   lastKvSnapshotSig = '';
   inMemoryRefreshLock = 0;
@@ -4073,7 +4446,7 @@ const DEFAULT_SYSTEM_FEEDS = [
   { id: 'f_kucoin', name: 'KuCoin Tickers API', url: 'https://api.kucoin.com/api/v1/market/allTickers', type: 'crypto', status: 'active', pingMs: 48, reliability: '100%', priority: 1 },
   { id: 'f_okx', name: 'OKX Market Feed', url: 'https://www.okx.com/api/v5/market/tickers?instType=SPOT', type: 'crypto', status: 'active', pingMs: 62, reliability: '99.8%', priority: 2 },
   { id: 'f_gate', name: 'Gate.io Engine', url: 'https://api.gateio.ws/api/v4/spot/tickers', type: 'crypto', status: 'active', pingMs: 55, reliability: '100%', priority: 3 },
-  { id: 'f_binance_ws', name: 'Binance MiniTicker WS', url: 'wss://stream.binance.com:443/ws/!miniTicker@arr', type: 'websocket', status: 'active', pingMs: 24, reliability: '100%', priority: 4 },
+  { id: 'f_binance_rest', name: 'Binance Public REST API', url: 'https://data-api.binance.vision/api/v3/ticker/24hr', type: 'crypto', status: 'active', pingMs: 44, reliability: '99.9%', priority: 4 },
   { id: 'f_nerkhara', name: 'NerkhAra Validated Feed', url: 'https://nerkhara.com/api/v1/latest.json', type: 'domestic', status: 'active', pingMs: 34, reliability: '99.9%', priority: 5 },
   { id: 'f_bonbast', name: 'Bonbast Market Rate', url: 'https://www.bonbast.com', type: 'domestic', status: 'active', pingMs: 42, reliability: '99.7%', priority: 6 },
   { id: 'f_nerkh', name: 'TGJU / IranMarket Rate', url: 'https://iran-market.github.io/data/latest-toman.json', type: 'domestic', status: 'active', pingMs: 38, reliability: '99.6%', priority: 7 },
@@ -4090,8 +4463,9 @@ async function getSystemFeeds(env) {
       if (row && row.v) {
         const parsed = JSON.parse(row.v);
         if (Array.isArray(parsed) && parsed.length) {
-          const seenIds = new Set(parsed.map((f) => f && f.id).filter(Boolean));
-          const merged = [...parsed];
+          const filtered = parsed.filter((f) => f && f.id !== 'f_binance_ws');
+          const seenIds = new Set(filtered.map((f) => f && f.id).filter(Boolean));
+          const merged = [...filtered];
           for (const def of DEFAULT_SYSTEM_FEEDS) {
             if (!seenIds.has(def.id)) merged.push({ ...def });
           }
@@ -4392,7 +4766,7 @@ async function route(req, env, url, ctx) {
     }, 200, corsHeaders);
   }
 
-  // دریافت لحظه‌ای قیمت‌ها: کش کوتاه‌مدت کنترل‌شده (۲۰ ثانیه) + بازیابی از KV Snapshot در Cold Start
+  // دریافت متمرکز قیمت‌ها: فقط همین مسیر با Workers Cache سراسری و Tiered Cache (~۶۰ ثانیه) کش می‌شود
   if (p === '/api/prices' && m === 'GET') {
     const manual = url.searchParams.get('refresh') === '1';
     if (manual) {
@@ -4401,8 +4775,9 @@ async function route(req, env, url, ctx) {
       await rateLimit(env, 'prices_get:' + clientIp(req), 120, 60);
     }
     const now = nowS();
+    const limit = getPriceFreshnessS(env);
+    const hasCrossOriginHeader = Boolean(corsOrig && corsOrig !== url.origin);
     let edgeCache = null;
-    const canonicalKey = 'https://edge.darayi.local/api/prices';
     try {
       if (typeof caches !== 'undefined' && caches.default) {
         edgeCache = caches.default;
@@ -4411,11 +4786,16 @@ async function route(req, env, url, ctx) {
 
     if (!manual && edgeCache) {
       try {
-        const cachedRes = await edgeCache.match(canonicalKey);
+        const cachedRes = await edgeCache.match(PRICES_EDGE_CACHE_KEY);
         if (cachedRes) {
-          const cachedAt = Number(cachedRes.headers.get('x-darayi-cached-at') || 0);
-          // اعتبارسنجی صریح عمر کش (حداکثر ۲۰ ثانیه) تا قیمت کهنه نمایش داده نشود
-          if (cachedAt > 0 && (now - cachedAt <= 20)) {
+          const snapTs = Number(cachedRes.headers.get('x-darayi-snapshot-at') || cachedRes.headers.get('x-darayi-cached-at') || 0);
+          if (snapTs > 0 && (now - snapTs < limit)) {
+            if (hasCrossOriginHeader) {
+              const h = new Headers(cachedRes.headers);
+              h.set('access-control-allow-origin', corsOrig);
+              h.set('vary', 'Origin, Accept-Encoding');
+              return new Response(cachedRes.body, { status: cachedRes.status, headers: h });
+            }
             return cachedRes;
           }
         }
@@ -4425,45 +4805,56 @@ async function route(req, env, url, ctx) {
     }
 
     let prices = { updatedAt: 0, checkedAt: 0, items: {}, feeds: {} };
-    try { prices = await getPrices(env); } catch (e) { console.error('getPrices error:', e?.message); }
+    if (!manual) {
+      try { prices = await getPrices(env); } catch (e) { console.error('getPrices error:', e?.message); }
+    }
 
-    const age = now - (prices.checkedAt || 0);
-    const limit = manual ? 5 : Math.min(60, Math.max(15, Number(env.INLINE_REFRESH_S || 45)));
+    const age = prices.checkedAt > 0 ? Math.max(0, now - prices.checkedAt) : limit;
     const empty = !Object.keys(prices.items || {}).length;
     const hasCrypto = Object.values(prices.items || {}).some(i => i.crypto && i.unit === 'USDT');
 
-    if (empty || !hasCrypto || age >= limit) {
+    if (manual || empty || !hasCrypto || age >= limit) {
+      let refreshOutcome = null;
       const job = (async () => {
         try {
-          await refreshPrices(env, manual || !hasCrypto, false, ctx);
+          refreshOutcome = await refreshPrices(env, manual || !hasCrypto, false, ctx);
         } catch (e) {
           console.error('refresh failed', e?.message);
           inMemoryLastError = String(e?.message).slice(0, 160);
           inMemoryLastErrorTime = nowS();
         }
       })();
-      if (ctx && ctx.waitUntil) {
-        ctx.waitUntil(job);
+      if (ctx && typeof ctx.waitUntil === 'function') {
+        try { ctx.waitUntil(job); } catch {}
       }
-      if (manual || empty || !hasCrypto) {
-        await Promise.race([job, new Promise(r => setTimeout(r, 8500))]);
-        try { prices = await getPrices(env); } catch {}
+      await Promise.race([job, new Promise(r => setTimeout(r, 9000))]);
+      if (refreshOutcome?.snapshot?.items && Object.keys(refreshOutcome.snapshot.items).length) {
+        prices = syncIsolateSnapshot(refreshOutcome.snapshot) || refreshOutcome.snapshot;
+      } else {
+        try { prices = await getPrices(env, { skipCoordinator: true, skipKvRead: true }); } catch {}
       }
     }
-    const out = publicPrices(prices);
-    const createdTs = nowS();
-    const headers = {
-      ...corsHeaders,
-      'cache-control': manual ? 'no-store, no-cache, must-revalidate' : 'public, max-age=20',
-      'x-darayi-cached-at': String(createdTs)
-    };
-    const res = json(out, 200, headers);
-    if (!manual && edgeCache && ctx && ctx.waitUntil && Object.keys(out.items || {}).length > 0) {
-      try {
-        ctx.waitUntil(edgeCache.put(canonicalKey, res.clone()));
-      } catch {}
+
+    const responseNow = nowS();
+    const canonicalBuilt = buildPublicPricesResponse(prices, env, responseNow, {}, { noStore: manual });
+    if (canonicalBuilt.cacheable && edgeCache && Object.keys(canonicalBuilt.out.items || {}).length > 0) {
+      // ذخیره نسخه متعارف بدون کوکی و بدون Vary: Origin در Workers Cache تا کش بین کل کاربران مشترک بماند
+      const cacheSnapshot = manual
+        ? buildPublicPricesResponse(prices, env, responseNow).response
+        : canonicalBuilt.response.clone();
+      if (ctx && typeof ctx.waitUntil === 'function') {
+        try { ctx.waitUntil(edgeCache.put(PRICES_EDGE_CACHE_KEY, cacheSnapshot)); } catch {}
+      } else {
+        try { await edgeCache.put(PRICES_EDGE_CACHE_KEY, cacheSnapshot); } catch {}
+      }
     }
-    return res;
+    if (hasCrossOriginHeader) {
+      const h = new Headers(canonicalBuilt.response.headers);
+      h.set('access-control-allow-origin', corsOrig);
+      h.set('vary', 'Origin, Accept-Encoding');
+      return new Response(canonicalBuilt.response.body, { status: canonicalBuilt.response.status, headers: h });
+    }
+    return canonicalBuilt.response;
   }
 
   if (p === '/api/crypto-icons' && m === 'GET') {
@@ -4749,7 +5140,23 @@ async function route(req, env, url, ctx) {
     if (p === '/api/admin/clear-cache' && m === 'POST') {
       inMemoryPrices = null;
       inMemoryPricesTime = 0;
+      inMemoryPricesLoadedAt = 0;
+      inMemoryCoordinatorReadAt = 0;
+      inMemoryRefreshFailureAt = 0;
+      inMemoryKvLoaded = false;
+      inMemoryKvLoadedAt = 0;
       historyMemCache.clear();
+      try {
+        if (typeof caches !== 'undefined' && caches.default) {
+          await caches.default.delete(PRICES_EDGE_CACHE_KEY);
+        }
+      } catch {}
+      if (hasPriceCoordinator(env)) {
+        try {
+          const stub = getPriceCoordinatorStub(env);
+          await stub.fetch('https://price-coordinator.internal/clear', { method: 'POST' });
+        } catch {}
+      }
       if (env.DB) {
         try {
           await env.DB.prepare("DELETE FROM kv WHERE k IN ('prices','prices_checked')").run();
@@ -5347,6 +5754,18 @@ function staticResponse(path) {
   return icon ? new Response(b64bytes(icon), { headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=604800, immutable' } }) : null;
 }
 
+const SENSITIVE_PRIVATE_PREFIXES = ['/api/auth/', '/api/admin/', '/api/me', '/v1/'];
+
+function withIsolatedPrivateHeaders(res) {
+  if (!res) return res;
+  const h = new Headers(res.headers);
+  h.set('cache-control', 'no-store, no-cache, private, must-revalidate');
+  h.set('cdn-cache-control', 'no-store');
+  h.set('cloudflare-cdn-cache-control', 'no-store');
+  h.set('pragma', 'no-cache');
+  return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+}
+
 export default {
   async fetch(req, env, ctx) {
     const url = new URL(req.url);
@@ -5357,12 +5776,15 @@ export default {
 
     // مسیرهای API
     if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/v1/')) {
+      const isPrivateRoute = SENSITIVE_PRIVATE_PREFIXES.some((prefix) => url.pathname === prefix || url.pathname.startsWith(prefix));
       try {
-        return await route(req, env, url, ctx);
+        const res = await route(req, env, url, ctx);
+        return isPrivateRoute ? withIsolatedPrivateHeaders(res) : res;
       } catch (e) {
-        if (e instanceof HttpError) return json({ error: e.message, ...(e.extra && typeof e.extra === 'object' ? e.extra : {}) }, e.status);
-        console.error('unhandled route error:', e && e.stack || e);
-        return json({ error: 'خطای داخلی سرور رخ داده است.' }, 500);
+        const errRes = (e instanceof HttpError)
+          ? json({ error: e.message, ...(e.extra && typeof e.extra === 'object' ? e.extra : {}) }, e.status)
+          : (console.error('unhandled route error:', e && e.stack || e), json({ error: 'خطای داخلی سرور رخ داده است.' }, 500));
+        return isPrivateRoute ? withIsolatedPrivateHeaders(errRes) : errRes;
       }
     }
 
