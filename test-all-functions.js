@@ -28,6 +28,8 @@ import { D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, getStaleThresholdSec, isPriceIte
 import worker, {
   loadData,
   saveData,
+  transferUserAssetsSafely,
+  runCron,
   rateLimit,
   writePricesKvSnapshot,
   getPrices,
@@ -2028,6 +2030,410 @@ test('primary admin can select secondary admin by email in dashboard without pas
   assert.equal(promotedUser.role, 'admin');
   assert.equal(promotedUser.adminTier, 'secondary');
 });
+
+test('wrangler.toml sets keep_vars = true and dark mode viewport styling + SW v12 are configured cleanly', () => {
+  const wrangler = fs.readFileSync(new URL('./wrangler.toml', import.meta.url), 'utf8');
+  assert.match(wrangler, /^\s*keep_vars\s*=\s*true\b/m);
+
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('<meta name="color-scheme" id="colorSchemeMeta" content="light">'));
+  assert.ok(html.includes(':root[data-theme=dark],html[data-theme=dark]'));
+  assert.ok(html.includes('document.body.style.backgroundColor'));
+  assert.ok(html.includes('/sw.js?v=12'));
+
+  const swFile = fs.readFileSync(new URL('./public/sw.js', import.meta.url), 'utf8');
+  assert.ok(swFile.includes("darayi-shell-v12"));
+  const workerSrc = fs.readFileSync(new URL('./src/worker.js', import.meta.url), 'utf8');
+  assert.ok(workerSrc.includes("darayi-shell-v12"));
+});
+
+test('shared Promises eliminated in worker.js while concurrent refreshPrices still coalesces without cross-request Promise sharing', async () => {
+  __resetWorkerStateForTests();
+  const workerSrc = fs.readFileSync(new URL('./src/worker.js', import.meta.url), 'utf8');
+  assert.equal(/\binFlightRefreshJob\s*=\s*\(\s*async/.test(workerSrc), false);
+  assert.equal(/\bhistoryInFlight\.set\([^,]+,\s*(?:p|run)\b/.test(workerSrc), false);
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const isoNow = new Date(nowSec * 1000).toISOString();
+  let domesticFetchCount = 0;
+  const origFetch = globalThis.fetch;
+
+  globalThis.fetch = async (input) => {
+    const url = typeof input === 'string' ? input : input?.url || '';
+    if (url === 'https://nerkhara.com/api/v1/latest.json') {
+      domesticFetchCount++;
+      await new Promise((r) => setTimeout(r, 35));
+      return new Response(JSON.stringify({
+        stale: false,
+        generated_utc: isoNow,
+        items: [{ id: 'usd', price: 86400, unit: 'IRT', updated_utc: isoNow }]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response(JSON.stringify({}), { status: 404 });
+  };
+
+  try {
+    const [r1, r2, r3] = await Promise.all([
+      refreshPrices({}, true, true),
+      refreshPrices({}, true, true),
+      refreshPrices({}, true, true)
+    ]);
+    assert.equal(domesticFetchCount, 1, 'Expected concurrent refreshPrices calls to coalesce onto one network fetch via coordination state');
+    assert.equal(r1.items.usd.price, 86400);
+    assert.equal(r2.items.usd.price, 86400);
+    assert.equal(r3.items.usd.price, 86400);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('runCron automatically ensures D1 schema_migrations and missing indexes non-destructively', async () => {
+  __resetWorkerStateForTests();
+  const now = Math.floor(Date.now() / 1000);
+  const db = new DatabaseSync(':memory:');
+  db.exec(`
+    CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, name TEXT NOT NULL DEFAULT '', password_hash TEXT, google_sub TEXT UNIQUE, created_at INTEGER NOT NULL);
+    CREATE TABLE sessions (id_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE otp_codes (email TEXT NOT NULL, purpose TEXT NOT NULL, code_hash TEXT NOT NULL, payload TEXT NOT NULL DEFAULT '{}', attempts INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(email, purpose));
+    CREATE TABLE oauth_states (state_hash TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires_at INTEGER NOT NULL);
+    CREATE TABLE rate_limits (k TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, reset_at INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT NOT NULL, updated_at INTEGER NOT NULL);
+    CREATE TABLE user_data (user_id TEXT PRIMARY KEY, holdings TEXT NOT NULL DEFAULT '[]', watch TEXT NOT NULL DEFAULT '[]', featured TEXT NOT NULL DEFAULT '[]', settings TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL);
+    CREATE TABLE alerts (id TEXT PRIMARY KEY, user_id TEXT NOT NULL, asset_id TEXT NOT NULL, direction TEXT NOT NULL, price REAL NOT NULL, triggered_at INTEGER, attempts INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
+    CREATE TABLE alert_units (alert_id TEXT PRIMARY KEY, currency TEXT NOT NULL DEFAULT 'IRT');
+    CREATE TABLE alert_state (alert_id TEXT PRIMARY KEY, version TEXT NOT NULL DEFAULT '');
+    CREATE TABLE alert_delivery (alert_id TEXT PRIMARY KEY, lease_until INTEGER NOT NULL DEFAULT 0, retry_at INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE price_history (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY (asset_id, t));
+    CREATE TABLE price_history_v2 (asset_id TEXT NOT NULL, t INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY (asset_id, t)) WITHOUT ROWID;
+    CREATE TABLE admin_roles (user_id TEXT PRIMARY KEY, email TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'admin', granted_by TEXT NOT NULL DEFAULT '', granted_at INTEGER NOT NULL);
+  `);
+  db.prepare('INSERT INTO users(id,email,name,created_at) VALUES(?,?,?,?)').run('u_cron', 'cron@example.com', 'Cron Keep', now);
+
+  const { DB } = createSqliteD1Wrapper(db);
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response('{}', { status: 404 });
+  try {
+    await runCron({ DB });
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+
+  const status = await getDatabaseMigrationStatus({ DB });
+  assert.equal(status.healthy, true);
+  assert.deepEqual(status.missingIndexes, []);
+  const migRows = db.prepare('SELECT version, status FROM schema_migrations').all();
+  assert.ok(migRows.some((r) => r.version === '004_schema_reconcile' && r.status === 'applied'));
+  assert.equal(db.prepare("SELECT email FROM users WHERE id='u_cron'").get().email, 'cron@example.com');
+});
+
+test('transferUserAssetsSafely and /api/admin/users/transfer-assets enforce RBAC, backup before write, deduplicate, and preserve both accounts', async () => {
+  __resetWorkerStateForTests();
+  const now = Math.floor(Date.now() / 1000);
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+
+  const kvStore = new Map();
+  const mockKv = {
+    async get(k, opts) {
+      const raw = kvStore.get(k);
+      return raw && opts?.type === 'json' ? JSON.parse(raw) : raw;
+    },
+    async put(k, v) {
+      kvStore.set(k, v);
+    }
+  };
+
+  const primaryEmail = 'owner@example.com';
+  const secEmail = 'sec@example.com';
+  const env = {
+    DB,
+    PRICES_KV: mockKv,
+    ADMIN_EMAIL: primaryEmail,
+    ADMIN_PASSWORD: 'OwnerMasterPassword!1',
+    AUTH_SECRET: 'test-auth-secret-key-minimum-32-chars!!'
+  };
+
+  const callApi = (path, { method = 'GET', body, token } = {}) =>
+    worker.fetch(
+      new Request(`https://darayi.example${path}`, {
+        method,
+        headers: {
+          origin: 'https://darayi.example',
+          ...(body ? { 'content-type': 'application/json' } : {}),
+          'x-requested-with': 'XMLHttpRequest',
+          ...(token ? { authorization: `Bearer ${token}` } : {})
+        },
+        ...(body ? { body: JSON.stringify(body) } : {})
+      }),
+      env
+    );
+
+  // Pre-seed Primary Admin with their own user ID ('u_primary_1', separate from legacy 'admin_root')
+  const ownerPassHash = await hashPassword('OwnerMasterPassword!1', env);
+  db.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').run('u_primary_1', primaryEmail, 'Primary Owner', ownerPassHash, now - 500);
+
+  // Login Primary Admin & create Primary user_data with 1 existing holding (so admin_root is no longer auto-inherited)
+  const pLogin = await (await callApi('/api/auth/login', { method: 'POST', body: { email: primaryEmail, password: 'OwnerMasterPassword!1' } })).json();
+  assert.equal(pLogin.user.id, 'u_primary_1');
+  const existingTargetHolding = { id: 'tgt_h1', assetId: 'btc', side: 'buy', qty: 0.1, buyPrice: 90000, wallet: 'اصلی', date: '1403/10/01', createdAt: now };
+  await callApi('/api/me/data', {
+    method: 'PUT',
+    token: pLogin.token,
+    body: {
+      holdings: [existingTargetHolding],
+      watch: ['btc'],
+      featured: ['btc'],
+      alerts: [],
+      settings: { theme: 'dark', unit: 'toman', privacy: false, filter: 'all' }
+    }
+  });
+
+  // Seed legacy source account ('admin_root') with 2 holdings, extra watch, alert, and setting
+  const oldHoldings = [
+    { id: 'old_h1', assetId: 'gold18', side: 'buy', qty: 5, buyPrice: 5200000, wallet: 'صندوق', date: '1403/05/10', createdAt: now - 500 },
+    { id: 'old_h2', assetId: 'usd', side: 'buy', qty: 200, buyPrice: 72000, wallet: 'کیف', date: '1403/06/15', createdAt: now - 300 }
+  ];
+  db.prepare('INSERT INTO user_data(user_id,holdings,watch,featured,settings,updated_at) VALUES(?,?,?,?,?,?)').run(
+    'admin_root',
+    JSON.stringify(oldHoldings),
+    JSON.stringify(['gold18', 'usd', 'btc']),
+    JSON.stringify(['usd', 'gold18']),
+    JSON.stringify({ theme: 'light', lang: 'fa' }),
+    now - 100
+  );
+  db.prepare('INSERT INTO alerts(id,user_id,asset_id,direction,price,created_at) VALUES(?,?,?,?,?,?)').run(
+    'admin_root:old_al1', 'admin_root', 'gold18', 'above', 6500000, now - 100
+  );
+  db.prepare('INSERT INTO alert_units(alert_id,currency) VALUES(?,?)').run('admin_root:old_al1', 'IRT');
+
+  // Create secondary admin -> MUST be forbidden (403) from calling transfer-assets
+  await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: pLogin.token,
+    body: { email: secEmail, name: 'Sec Admin', password: 'SecAdminPass!1', role: 'admin' }
+  });
+  const secLogin = await (await callApi('/api/auth/login', { method: 'POST', body: { email: secEmail, password: 'SecAdminPass!1' } })).json();
+  const forbiddenRes = await callApi('/api/admin/users/transfer-assets', {
+    method: 'POST',
+    token: secLogin.token,
+    body: { source: 'admin_root', target: primaryEmail, dryRun: true }
+  });
+  assert.equal(forbiddenRes.status, 403);
+
+  // 1. Dry-run preview returns exact diff without writing backup or mutating D1
+  const dryRes = await callApi('/api/admin/users/transfer-assets', {
+    method: 'POST',
+    token: pLogin.token,
+    body: { source: 'admin_root', target: primaryEmail, dryRun: true }
+  });
+  assert.equal(dryRes.status, 200);
+  const dryBody = await dryRes.json();
+  assert.equal(dryBody.dryRun, true);
+  assert.equal(dryBody.backupKey, null);
+  assert.equal(dryBody.summary.sourceHoldings, 2);
+  assert.equal(dryBody.summary.targetHoldingsBefore, 1);
+  assert.equal(dryBody.summary.targetHoldingsAfter, 3);
+  assert.equal(dryBody.summary.addedHoldings, 2);
+  assert.equal(dryBody.summary.addedWatch, 2);
+  assert.equal(dryBody.summary.addedAlerts, 1);
+  assert.equal(dryBody.summary.adoptedFeatured, false); // Target already had ['btc']
+  assert.equal(dryBody.summary.mergedSettingsKeys, 1); // Only 'lang' was missing; 'theme' preserved as 'dark'
+
+  // 2. Real transfer writes backup BEFORE updating target, preserves source & existing target records
+  const execRes = await callApi('/api/admin/users/transfer-assets', {
+    method: 'POST',
+    token: pLogin.token,
+    body: { source: 'admin_root', target: primaryEmail, dryRun: false }
+  });
+  assert.equal(execRes.status, 200);
+  const execBody = await execRes.json();
+  assert.equal(execBody.dryRun, false);
+  assert.match(execBody.backupKey, /^backup:asset_transfer:/);
+  assert.equal(execBody.summary.addedHoldings, 2);
+
+  // Verify backup exists in BOTH D1 kv table and PRICES_KV
+  const d1Backup = db.prepare('SELECT v FROM kv WHERE k=?').get(execBody.backupKey);
+  assert.ok(d1Backup);
+  assert.ok(kvStore.has(execBody.backupKey));
+  const parsedBackup = JSON.parse(d1Backup.v);
+  assert.equal(parsedBackup.source.userId, 'admin_root');
+  assert.equal(JSON.parse(parsedBackup.targetSnapshotBefore.userData.holdings).length, 1);
+
+  // Verify primary account now has all 3 holdings, merged watch, preserved dark theme, and imported alert
+  const meAfter = await (await callApi('/api/me/data?fresh=1', { token: pLogin.token })).json();
+  assert.equal(meAfter.data.holdings.length, 3);
+  assert.deepEqual(meAfter.data.watch, ['btc', 'gold18', 'usd']);
+  assert.deepEqual(meAfter.data.featured, ['btc']);
+  assert.equal(meAfter.data.settings.theme, 'dark');
+  assert.equal(meAfter.data.settings.lang, 'fa');
+  assert.equal(meAfter.data.alerts.length, 1);
+  assert.equal(meAfter.data.alerts[0].assetId, 'gold18');
+
+  // Verify source ('admin_root') was NOT deleted
+  const srcAfter = db.prepare("SELECT holdings FROM user_data WHERE user_id='admin_root'").get();
+  assert.equal(JSON.parse(srcAfter.holdings).length, 2);
+
+  // 3. Re-running transfer is idempotent (0 duplicates added)
+  const repeatBody = await (await callApi('/api/admin/users/transfer-assets', {
+    method: 'POST',
+    token: pLogin.token,
+    body: { source: 'admin_root', target: primaryEmail, dryRun: false }
+  })).json();
+  assert.equal(repeatBody.summary.addedHoldings, 0);
+  assert.equal(repeatBody.summary.skippedDuplicateHoldings, 2);
+  assert.equal(repeatBody.summary.addedAlerts, 0);
+  assert.equal(repeatBody.summary.skippedDuplicateAlerts, 1);
+  assert.equal(repeatBody.summary.wouldChange, false);
+
+  // 4. Fail-closed if backup insert fails: target untouched
+  const failingDb = {
+    prepare(sql) {
+      if (/INSERT INTO kv/i.test(sql)) {
+        return {
+          bind() { return this; },
+          async run() { throw new Error('kv_write_failed'); }
+        };
+      }
+      return DB.prepare(sql);
+    },
+    batch: (stmts) => DB.batch(stmts)
+  };
+  await assert.rejects(
+    () => transferUserAssetsSafely({ DB: failingDb }, { source: 'admin_root', target: secEmail, dryRun: false }),
+    (err) => err?.status === 500
+  );
+  assert.equal(db.prepare('SELECT user_id FROM user_data WHERE user_id=(SELECT id FROM users WHERE email=?)').get(secEmail), undefined);
+});
+
+test('history endpoint races fallback exchanges in parallel and UI prioritizes detail chart over background sparks', async () => {
+  __resetWorkerStateForTests();
+  const now = Math.floor(Date.now() / 1000);
+  const kvStore = new Map([
+    [
+      KV_SNAPSHOT_KEY,
+      JSON.stringify({
+        version: 1,
+        updatedAt: now,
+        checkedAt: now,
+        items: { btc: { price: 95000, change: 1.5, unit: 'USDT', crypto: true, src: 'kucoin', pair: 'BTC-USDT', sym: 'BTC', t: now, receivedAt: now } },
+        feeds: {}
+      })
+    ]
+  ]);
+  const mockKv = {
+    async get(k, opts) {
+      const raw = kvStore.get(k);
+      return raw && opts?.type === 'json' ? JSON.parse(raw) : raw;
+    },
+    async put(k, v) { kvStore.set(k, v); }
+  };
+
+  const origFetch = globalThis.fetch;
+  const startedUrls = [];
+  globalThis.fetch = async (input) => {
+    const url = typeof input === 'string' ? input : input?.url || '';
+    startedUrls.push(url);
+    if (url.includes('api.kucoin.com')) {
+      return new Response('{}', { status: 500 });
+    }
+    if (url.includes('okx.com')) {
+      // Slow OKX should not block fast Gate response
+      await new Promise((r) => setTimeout(r, 120));
+      return new Response(JSON.stringify({ code: '1', data: [] }), { status: 200 });
+    }
+    if (url.includes('gateio.ws')) {
+      return new Response(JSON.stringify([
+        [String(now - 600), '0', '94800'],
+        [String(now - 300), '0', '94950']
+      ]), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.includes('binance.vision')) {
+      await new Promise((r) => setTimeout(r, 120));
+      return new Response('[]', { status: 200 });
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  try {
+    const t0 = Date.now();
+    const res = await history({ PRICES_KV: mockKv }, new URL('https://darayi.example/api/history?id=btc&range=1D'));
+    const body = await res.json();
+    const elapsed = Date.now() - t0;
+    assert.equal(body.source, 'gate');
+    assert.ok(body.points.length >= 2);
+    assert.ok(elapsed < 110, `Expected parallel fallback race to resolve before slow 120ms upstreams, took ${elapsed}ms`);
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('let detailChartInFlight = 0;'));
+  assert.ok(html.includes('function hydrateLateCryptoIcons()'));
+  assert.ok(html.includes('darayi-crypto-icons-v6'));
+});
+
+test('local bundled crypto logos & flags skip external icon CDN calls when covered and card sparklines match 1D modal chart', async () => {
+  __resetWorkerStateForTests();
+  const iconsManifest = JSON.parse(fs.readFileSync(new URL('./public/logos/icons.json', import.meta.url), 'utf8'));
+  const manifestKeys = Object.keys(iconsManifest);
+  assert.ok(manifestKeys.length >= 2000, `Expected >=2000 local crypto logos, got ${manifestKeys.length}`);
+  assert.equal(iconsManifest.btc, '/logos/crypto/btc.png');
+  assert.equal(iconsManifest.eth, '/logos/crypto/eth.png');
+  assert.ok(fs.existsSync(new URL('./public/logos/flags/us.svg', import.meta.url)));
+
+  const now = Math.floor(Date.now() / 1000);
+  const kvStore = new Map([
+    [
+      KV_SNAPSHOT_KEY,
+      JSON.stringify({
+        version: 1,
+        updatedAt: now,
+        checkedAt: now,
+        items: {
+          btc: { price: 95000, change: 1.5, unit: 'USDT', crypto: true, src: 'kucoin', pair: 'BTC-USDT', sym: 'BTC', t: now, receivedAt: now },
+          eth: { price: 3200, change: -0.8, unit: 'USDT', crypto: true, src: 'kucoin', pair: 'ETH-USDT', sym: 'ETH', t: now, receivedAt: now }
+        },
+        feeds: {}
+      })
+    ]
+  ]);
+  const mockKv = {
+    async get(k, opts) {
+      const raw = kvStore.get(k);
+      return raw && opts?.type === 'json' ? JSON.parse(raw) : raw;
+    },
+    async put(k, v) { kvStore.set(k, v); }
+  };
+
+  const origFetch = globalThis.fetch;
+  let externalFetchCalls = 0;
+  globalThis.fetch = async () => {
+    externalFetchCalls++;
+    return new Response('{}', { status: 500 });
+  };
+  try {
+    const res = await worker.fetch(new Request('https://darayi.example/api/crypto-icons'), { PRICES_KV: mockKv });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.ok, true);
+    assert.equal(body.icons.btc, '/logos/crypto/btc.png');
+    assert.equal(body.icons.eth, '/logos/crypto/eth.png');
+    assert.equal(externalFetchCalls, 0, 'Expected /api/crypto-icons to skip external APIs when active coins are covered locally');
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+  assert.ok(html.includes('LOCAL_CRYPTO_PNG_LIST = "'), 'Expected populated LOCAL_CRYPTO_PNG_LIST in src/index.html');
+  assert.ok(html.includes('LOCAL_FLAG_CODES = new Set(["'), 'Expected populated LOCAL_FLAG_CODES in src/index.html');
+  assert.ok(html.includes("const targetRange='1D';"), 'Expected all card sparklines to target 1D');
+  assert.ok(html.includes('function renderSparkFromPoints(id, rawPts, usedRange'), 'Expected unified sparkline renderer');
+  assert.ok(html.includes("if(range==='1D'){\n    renderSparkFromPoints(a.id,detailState.points,'1D');"), 'Expected modal 1D drawDetail to sync card sparkline');
+});
+
+
+
 
 
 

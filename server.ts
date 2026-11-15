@@ -16,6 +16,7 @@ import {
   isTehranMarketOpen,
   isPriceItemStale
 } from './src/modules/market-core.js';
+import { buildLocalCryptoIconsMap } from './src/modules/local-icons.js';
 import {
   buildHtmlCsp,
   extractInlineScriptBodies,
@@ -1203,10 +1204,16 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
       const anchorPoints: [number, number][] = [];
       let foundAnchorAtWindowStart = false;
 
-      if (sym) {
-        const j = await fetchIranMarketDailyRaw(sym);
-        const records = Array.isArray(j?.data) ? j.data : j?.data?.records;
-        const isToman = j?.meta?.unit === 'toman' || j?.meta?.currency === 'IRT';
+      const [imAnchorSettled, naAnchorSettled] = await Promise.allSettled([
+        sym ? fetchIranMarketDailyRaw(sym) : Promise.resolve(null),
+        naId ? fetchNerkharaDailyRaw(naId) : Promise.resolve(null)
+      ]);
+      const jIm = imAnchorSettled.status === 'fulfilled' ? imAnchorSettled.value : null;
+      const nj = naAnchorSettled.status === 'fulfilled' ? naAnchorSettled.value : null;
+
+      if (jIm) {
+        const records = Array.isArray(jIm?.data) ? jIm.data : jIm?.data?.records;
+        const isToman = jIm?.meta?.unit === 'toman' || jIm?.meta?.currency === 'IRT';
         const div = isToman ? 1 : 10;
         if (Array.isArray(records) && records.length) {
           const recent = records.slice(-5);
@@ -1223,7 +1230,7 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
               anchorPoints.push([startTs, openVal]);
             }
             if (closeVal > 0) {
-              const pubMs = typeof j?.meta?.published_at === 'string' ? Date.parse(j.meta.published_at) : NaN;
+              const pubMs = typeof jIm?.meta?.published_at === 'string' ? Date.parse(jIm.meta.published_at) : NaN;
               const recEndTs = (rec === recent[recent.length - 1] && Number.isFinite(pubMs))
                 ? Math.floor(pubMs / 1000)
                 : (startTs + 45000);
@@ -1239,8 +1246,7 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
         }
       }
 
-      if (!foundAnchorAtWindowStart && naId) {
-        const nj = await fetchNerkharaDailyRaw(naId);
+      if (!foundAnchorAtWindowStart && nj) {
         const pts = nj?.points;
         if (Array.isArray(pts) && pts.length) {
           const recentNa = pts.slice(-4);
@@ -1290,11 +1296,17 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
     ? (domesticIntradayTicks.get(id) || []).filter((p) => p[0] >= now - span && p[0] <= now + 60)
     : [];
 
-  // 2. Multi-day ranges (3D, 1W, 1M, 1Y): Primary iran-market daily archive
+  // 2. Multi-day ranges (3D, 1W, 1M, 1Y): fetch iran-market and NerkhAra in parallel (prefer iran-market)
   const sym = id === 'usdt' ? 'USDT_IRR' : (IRAN_MARKET_MAP[id] || [])[0];
-  if (sym) {
+  const naId = (NERKHARA_MAP as any)[id];
+  const [imMultiSettled, naMultiSettled] = await Promise.allSettled([
+    sym ? fetchIranMarketDailyRaw(sym) : Promise.resolve(null),
+    naId ? fetchNerkharaDailyRaw(naId) : Promise.resolve(null)
+  ]);
+
+  if (sym && imMultiSettled.status === 'fulfilled' && imMultiSettled.value) {
     try {
-      const j = await fetchIranMarketDailyRaw(sym);
+      const j = imMultiSettled.value;
       const records = Array.isArray(j?.data) ? j.data : j?.data?.records;
       const isToman = j?.meta?.unit === 'toman' || j?.meta?.currency === 'IRT';
       const div = isToman ? 1 : 10;
@@ -1316,11 +1328,9 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
     } catch {}
   }
 
-  // Secondary multi-day source: NerkhAra daily history
-  const naId = (NERKHARA_MAP as any)[id];
-  if (naId) {
+  if (naId && naMultiSettled.status === 'fulfilled' && naMultiSettled.value) {
     try {
-      const j = await fetchNerkharaDailyRaw(naId);
+      const j = naMultiSettled.value;
       const pts = j?.points;
       if (Array.isArray(pts) && pts.length >= 2) {
         const out: [number, number][] = [];
@@ -1486,19 +1496,30 @@ app.get('/api/history', async (req, res) => {
     const exchangeOrder = range === '1Y'
       ? [...new Set([item?.src !== 'okx' ? item?.src : null, 'kucoin', 'gate', 'okx'].filter(Boolean))]
       : [...new Set([item?.src, 'kucoin', 'okx', 'gate'].filter(Boolean))];
-    for (const name of exchangeOrder) {
+    const tryExchangeKlines = async (name: string) => {
       const src = EXCHANGE_SOURCES[name];
-      if (!src) continue;
+      if (!src) throw new Error('missing_source');
+      const pair = (item && name === item.src && item.pair) ? item.pair : name === 'gate' ? `${base}_USDT` : `${base}-USDT`;
+      const rawPts = await src.klines(pair, iv, lim);
+      const points = validateHistoryPoints(rawPts, range, now, false, refP, true);
+      if (points.length >= 2) return { name, points };
+      throw new Error('insufficient_points');
+    };
+    if (exchangeOrder.length) {
       try {
-        const pair = (item && name === item.src && item.pair) ? item.pair : name === 'gate' ? `${base}_USDT` : `${base}-USDT`;
-        const rawPts = await src.klines(pair, iv, lim);
-        const points = validateHistoryPoints(rawPts, range, now, false, refP, true);
-        if (points.length >= 2) {
-          const payload = { id, range, currency: 'USDT', source: name, points };
+        const firstHit = await tryExchangeKlines(exchangeOrder[0]);
+        const payload = { id, range, currency: 'USDT', source: firstHit.name, points: firstHit.points };
+        historyMemCache.set(cacheKey, { at: now, data: payload });
+        return res.json(payload);
+      } catch {}
+      if (exchangeOrder.length > 1) {
+        try {
+          const raceHit = await Promise.any(exchangeOrder.slice(1).map((name) => tryExchangeKlines(name)));
+          const payload = { id, range, currency: 'USDT', source: raceHit.name, points: raceHit.points };
           historyMemCache.set(cacheKey, { at: now, data: payload });
           return res.json(payload);
-        }
-      } catch {}
+        } catch {}
+      }
     }
     return res.json({ id, range, currency: 'USDT', points: [], unavailable: true, reason: 'exchange_klines_unavailable' });
   }
@@ -2368,6 +2389,232 @@ app.post('/api/admin/users/add', async (req, res) => {
   res.json({ ok: true, user: sanitizeUserForAdmin(newUser) });
 });
 
+const previewTransferBackups: Record<string, any> = {};
+
+app.post('/api/admin/users/transfer-assets', async (req, res) => {
+  const reqAdmin = await resolveReqUser(req);
+  if (!reqAdmin || !reqAdmin.isPrimaryAdmin) {
+    return res.status(403).json({ error: 'انتقال امن دارایی بین حساب‌ها فقط توسط مدیر اصلی سیستم مجاز است.' });
+  }
+  const rawSource = String(req.body?.source || '').trim();
+  const rawTarget = String(req.body?.target || '').trim();
+  const dryRun = Boolean(req.body?.dryRun);
+  if (!rawSource || !rawTarget) {
+    return res.status(400).json({ error: 'شناسه یا ایمیل حساب مبدا و حساب مقصد الزامی است.' });
+  }
+
+  const resolvePreviewAccount = (rawRef: string, roleLabel: 'source' | 'target') => {
+    const cleanRef = rawRef.trim();
+    const lowerRef = cleanRef.toLowerCase();
+    const matchedUser = systemUsers.find(
+      (u) => u.id.toLowerCase() === lowerRef || u.email.toLowerCase() === lowerRef
+    );
+    if (matchedUser) {
+      return {
+        userId: matchedUser.id,
+        storeKey: matchedUser.email.toLowerCase(),
+        email: matchedUser.email.toLowerCase(),
+        name: matchedUser.name || ''
+      };
+    }
+    if (userStore[lowerRef]) {
+      return {
+        userId: cleanRef,
+        storeKey: lowerRef,
+        email: lowerRef.includes('@') ? lowerRef : '',
+        name: ''
+      };
+    }
+    return {
+      error: roleLabel === 'source' ? 'حساب مبدا یافت نشد.' : 'حساب مقصد یافت نشد.'
+    };
+  };
+
+  const srcAcct = resolvePreviewAccount(rawSource, 'source');
+  if ('error' in srcAcct) return res.status(404).json({ error: srcAcct.error });
+  const tgtAcct = resolvePreviewAccount(rawTarget, 'target');
+  if ('error' in tgtAcct) return res.status(404).json({ error: tgtAcct.error });
+  if (srcAcct.storeKey === tgtAcct.storeKey) {
+    return res.status(400).json({ error: 'حساب مبدا و مقصد نمی‌توانند یکسان باشند.' });
+  }
+
+  const srcRec = userStore[srcAcct.storeKey]?.data || { holdings: [], watch: [], featured: [], alerts: [], settings: {} };
+  const tgtRec = userStore[tgtAcct.storeKey]?.data || { holdings: [], watch: [], featured: [], alerts: [], settings: {} };
+
+  const holdingSig = (h: any) => [
+    String(h?.assetId || '').trim().toLowerCase(),
+    String(h?.side || 'buy').trim().toLowerCase(),
+    Number(h?.qty) || 0,
+    Number(h?.buyPrice) || 0,
+    String(h?.wallet || '').trim(),
+    String(h?.date || '').trim(),
+    Number(h?.fee) || 0,
+    String(h?.note || '').trim()
+  ].join('|');
+
+  const srcHoldings = Array.isArray(srcRec.holdings) ? srcRec.holdings : [];
+  const tgtHoldings = Array.isArray(tgtRec.holdings) ? tgtRec.holdings : [];
+  const seenIds = new Set(tgtHoldings.map((h: any) => String(h?.id || '').trim()).filter(Boolean));
+  const seenSigs = new Set(tgtHoldings.map(holdingSig));
+  const mergedHoldings = [...tgtHoldings];
+  let addedHoldings = 0;
+  let skippedDuplicateHoldings = 0;
+
+  for (const h of srcHoldings) {
+    if (!h || typeof h !== 'object') continue;
+    const hId = String(h.id || '').trim();
+    const sig = holdingSig(h);
+    if ((hId && seenIds.has(hId)) || seenSigs.has(sig)) {
+      skippedDuplicateHoldings++;
+      continue;
+    }
+    const finalId = hId || `tr_${crypto.randomBytes(4).toString('hex')}`;
+    seenIds.add(finalId);
+    seenSigs.add(sig);
+    mergedHoldings.push({ ...h, id: finalId });
+    addedHoldings++;
+  }
+
+  const srcWatch = Array.isArray(srcRec.watch) ? srcRec.watch : [];
+  const tgtWatch = Array.isArray(tgtRec.watch) ? tgtRec.watch : [];
+  const seenWatch = new Set(tgtWatch.map((w: any) => String(w || '').trim().toLowerCase()).filter(Boolean));
+  const mergedWatch = [...tgtWatch];
+  let addedWatch = 0;
+  for (const w of srcWatch) {
+    const cw = String(w || '').trim();
+    if (!cw || seenWatch.has(cw.toLowerCase())) continue;
+    seenWatch.add(cw.toLowerCase());
+    mergedWatch.push(cw);
+    addedWatch++;
+  }
+
+  const srcFeatured = Array.isArray(srcRec.featured) ? srcRec.featured : [];
+  const tgtFeatured = Array.isArray(tgtRec.featured) ? tgtRec.featured : [];
+  const adoptedFeatured = tgtFeatured.length === 0 && srcFeatured.length > 0;
+  const mergedFeatured = adoptedFeatured ? [...srcFeatured] : [...tgtFeatured];
+
+  const srcSettings = (srcRec.settings && typeof srcRec.settings === 'object') ? srcRec.settings : {};
+  const tgtSettings = (tgtRec.settings && typeof tgtRec.settings === 'object') ? tgtRec.settings : {};
+  const mergedSettings = { ...tgtSettings };
+  let mergedSettingsKeys = 0;
+  for (const [k, v] of Object.entries(srcSettings)) {
+    if (!Object.hasOwn(mergedSettings, k)) {
+      mergedSettings[k] = v;
+      mergedSettingsKeys++;
+    }
+  }
+
+  const srcAlerts = Array.isArray(srcRec.alerts) ? srcRec.alerts : [];
+  const tgtAlerts = Array.isArray(tgtRec.alerts) ? tgtRec.alerts : [];
+  const alertSig = (a: any) => [
+    String(a?.assetId || '').trim().toLowerCase(),
+    String(a?.direction || '').trim().toLowerCase(),
+    Number(a?.price) || 0,
+    String(a?.currency || 'IRT').trim().toUpperCase()
+  ].join('|');
+  const seenAlertSigs = new Set(tgtAlerts.map(alertSig));
+  const mergedAlerts = [...tgtAlerts];
+  let addedAlerts = 0;
+  let skippedDuplicateAlerts = 0;
+  for (const a of srcAlerts) {
+    if (!a || typeof a !== 'object') continue;
+    const sig = alertSig(a);
+    if (seenAlertSigs.has(sig)) {
+      skippedDuplicateAlerts++;
+      continue;
+    }
+    seenAlertSigs.add(sig);
+    mergedAlerts.push({ ...a, id: `tr_${String(a.id || crypto.randomBytes(4).toString('hex'))}` });
+    addedAlerts++;
+  }
+
+  const wouldChange = Boolean(
+    addedHoldings > 0 ||
+    addedWatch > 0 ||
+    adoptedFeatured ||
+    mergedSettingsKeys > 0 ||
+    addedAlerts > 0
+  );
+
+  const summary = {
+    sourceHoldings: srcHoldings.length,
+    targetHoldingsBefore: tgtHoldings.length,
+    targetHoldingsAfter: mergedHoldings.length,
+    addedHoldings,
+    skippedDuplicateHoldings,
+    addedWatch,
+    adoptedFeatured,
+    mergedSettingsKeys,
+    sourceAlerts: srcAlerts.length,
+    addedAlerts,
+    skippedDuplicateAlerts,
+    wouldChange
+  };
+
+  if (dryRun) {
+    return res.json({
+      ok: true,
+      dryRun: true,
+      backupKey: null,
+      source: { userId: srcAcct.userId, email: srcAcct.email, name: srcAcct.name },
+      target: { userId: tgtAcct.userId, email: tgtAcct.email, name: tgtAcct.name },
+      summary
+    });
+  }
+
+  const now = Math.floor(Date.now() / 1000);
+  const backupKey = `backup:asset_transfer:${tgtAcct.userId}:${now}:${crypto.randomBytes(2).toString('hex')}`;
+  previewTransferBackups[backupKey] = {
+    createdAt: now,
+    source: srcAcct,
+    target: tgtAcct,
+    sourceSnapshot: srcRec,
+    targetSnapshotBefore: tgtRec
+  };
+
+  if (wouldChange) {
+    const prevObj = userStore[tgtAcct.storeKey];
+    const currentRev = Number(prevObj?.updatedAt) || 0;
+    const nextRev = (Number(prevObj?.revision) || 0) + 1;
+    userStore[tgtAcct.storeKey] = {
+      ok: true,
+      status: 'loaded',
+      exists: true,
+      revision: nextRev,
+      updatedAt: Math.max(Date.now() * 1000, currentRev + 1),
+      data: {
+        holdings: mergedHoldings,
+        watch: mergedWatch,
+        featured: mergedFeatured,
+        alerts: mergedAlerts,
+        settings: mergedSettings
+      }
+    };
+    const usr = systemUsers.find(x => x.email.toLowerCase() === tgtAcct.storeKey);
+    if (usr) {
+      usr.holdingsCount = mergedHoldings.length;
+      usr.alertsCount = mergedAlerts.length;
+    }
+    saveAuthSessionToDisk();
+  }
+
+  systemAuditLogs.unshift({
+    id: Date.now(),
+    time: 'هم‌اکنون',
+    type: 'admin',
+    msg: `انتقال امن دارایی از ${srcAcct.email || srcAcct.userId} به ${tgtAcct.email || tgtAcct.userId} (${addedHoldings} رکورد جدید، پشتیبان ${backupKey})`
+  });
+
+  res.json({
+    ok: true,
+    dryRun: false,
+    backupKey,
+    source: { userId: srcAcct.userId, email: srcAcct.email, name: srcAcct.name },
+    target: { userId: tgtAcct.userId, email: tgtAcct.email, name: tgtAcct.name },
+    summary
+  });
+});
+
 app.post('/api/admin/password', async (req, res) => {
   const reqAdmin = await resolveReqUser(req);
   if (!reqAdmin || !reqAdmin.isAdmin) {
@@ -2439,6 +2686,54 @@ app.post('/api/admin/clear-cache', (req, res) => {
     msg: 'حافظه موقت کش قیمت‌ها توسط مدیر تخلیه شد.'
   });
   res.json({ ok: true });
+});
+
+app.get('/api/admin/migrations', async (req, res) => {
+  const reqAdmin = await resolveReqUser(req);
+  if (!reqAdmin || !reqAdmin.isAdmin) {
+    return res.status(403).json({ error: 'دسترسی فقط برای مدیر سیستم مجاز است.' });
+  }
+  res.json({
+    ok: true,
+    healthy: true,
+    preview: true,
+    missingTables: [],
+    missingColumns: [],
+    missingIndexes: [],
+    migrations: [
+      { version: '001_fix', status: 'applied' },
+      { version: '002_admin_roles', status: 'applied' },
+      { version: '003_legacy_columns', status: 'applied' },
+      { version: '004_schema_reconcile', status: 'applied' }
+    ]
+  });
+});
+
+app.post('/api/admin/migrations/run', async (req, res) => {
+  const reqAdmin = await resolveReqUser(req);
+  if (!reqAdmin || !reqAdmin.isPrimaryAdmin) {
+    return res.status(403).json({ error: 'اجرای دستی Migration فقط توسط مدیر اصلی سیستم مجاز است.' });
+  }
+  const status = {
+    ok: true,
+    healthy: true,
+    preview: true,
+    missingTables: [],
+    missingColumns: [],
+    missingIndexes: [],
+    migrations: [
+      { version: '001_fix', status: 'applied' },
+      { version: '002_admin_roles', status: 'applied' },
+      { version: '003_legacy_columns', status: 'applied' },
+      { version: '004_schema_reconcile', status: 'applied' }
+    ]
+  };
+  res.json({
+    ok: true,
+    preview: true,
+    runResult: { ok: true, healthy: true, createdTables: [], addedColumns: [], createdIndexes: [], errors: [] },
+    status
+  });
 });
 
 app.post('/api/admin/refresh-prices', async (req, res) => {
@@ -2885,6 +3180,22 @@ async function getDynamicCryptoIcons(): Promise<Record<string, string>> {
   }
   if (dynamicCryptoIconsJob) return dynamicCryptoIconsJob;
   dynamicCryptoIconsJob = (async () => {
+    const localIcons: Record<string, string> = buildLocalCryptoIconsMap();
+    const activeKeysInit = new Set(Object.keys(cachedPrices?.items || {}).map(k => k.toLowerCase()));
+    const hasLocalCover = (k: string) => {
+      if (localIcons[k]) return true;
+      const stripped = k.replace(/^(1000+|1m)/, '');
+      if (stripped && stripped !== k && localIcons[stripped]) return true;
+      if (k.startsWith('ok') && k.length > 3 && localIcons[k.slice(2)]) return true;
+      return Boolean(CURATED_CRYPTO_ICONS[k]);
+    };
+    const missingActive = [...activeKeysInit].filter(k => cachedPrices?.items?.[k]?.crypto && !hasLocalCover(k));
+    if (Object.keys(localIcons).length >= 1000 && activeKeysInit.size > 0 && missingActive.length === 0) {
+      const mergedLocal = { ...LEGACY_COINCAP_ICONS, ...CURATED_CRYPTO_ICONS, ...localIcons };
+      dynamicCryptoIconsCache = mergedLocal;
+      dynamicCryptoIconsTime = now;
+      return mergedLocal;
+    }
     const base: Record<string, string> = {};
     const [cmcRes, cpRes, cg1Res, cg2Res] = await Promise.allSettled([
       fetchJsonQuick('https://api.coinmarketcap.com/data-api/v3/cryptocurrency/listing?start=1&limit=3500&sortBy=market_cap&sortType=desc&convert=USD', 6500),
@@ -2972,12 +3283,19 @@ async function getDynamicCryptoIcons(): Promise<Record<string, string>> {
       if (found) out[k] = found;
     }
     for (const [k, u] of Object.entries(base)) {
-      if (!out[k] && (cmcTop1500.has(k) || activeKeys.has(k))) out[k] = u;
+      if (!out[k]) out[k] = u;
+    }
+    let cpAdded = 0;
+    for (const [k, u] of Object.entries(cpMap)) {
+      if (!out[k] && (activeKeys.has(k) || cpAdded < 2500)) {
+        out[k] = u;
+        cpAdded++;
+      }
     }
     for (const [k, u] of Object.entries(LEGACY_COINCAP_ICONS)) {
       if (!out[k]) out[k] = u;
     }
-    Object.assign(out, CURATED_CRYPTO_ICONS);
+    Object.assign(out, CURATED_CRYPTO_ICONS, localIcons);
 
     dynamicCryptoIconsCache = out;
     dynamicCryptoIconsTime = now;
@@ -3345,6 +3663,7 @@ app.get(['/', '/index.html'], (req, res) => {
 });
 
 // Serve public static files only (never expose /src directory)
+app.use('/logos', express.static(path.join(__dirname, 'public', 'logos'), { maxAge: '30d', immutable: true }));
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0, etag: false }));
 
 // Global error handler — never expose internal stack traces

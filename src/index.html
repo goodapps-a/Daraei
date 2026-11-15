@@ -8,7 +8,7 @@
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function() {
-    navigator.serviceWorker.register('/sw.js?v=10').then(function(reg) {
+    navigator.serviceWorker.register('/sw.js?v=12').then(function(reg) {
       reg.update().catch(function() {});
       if (reg.waiting) {
         reg.waiting.postMessage({ type: 'SKIP_WAITING' });
@@ -16,7 +16,7 @@ if ('serviceWorker' in navigator) {
     }).catch(function() {});
   });
 }
-</script><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png"><link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" id="appleStatusMeta" content="default"><meta name="apple-mobile-web-app-title" content="دارایی من"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="theme-color" id="themeColorMeta" content="#f8fafc"><meta name="description" content="دارایی من؛ داشبورد تعاملی پیگیری طلا، ارز و رمزارز و مدیریت سبد سرمایه‌گذاری"><title>دارایی من (Darayi)</title>
+</script><link rel="manifest" href="/manifest.webmanifest"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png"><link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png"><link rel="apple-touch-icon" href="/apple-touch-icon.png"><meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" id="appleStatusMeta" content="default"><meta name="apple-mobile-web-app-title" content="دارایی من"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" id="colorSchemeMeta" content="light"><meta name="theme-color" id="themeColorMeta" content="#f8fafc"><meta name="description" content="دارایی من؛ داشبورد تعاملی پیگیری طلا، ارز و رمزارز و مدیریت سبد سرمایه‌گذاری"><title>دارایی من (Darayi)</title>
 <script>
 try {
   var _stRaw = localStorage.getItem('darayi-v5');
@@ -26,6 +26,8 @@ try {
   _root.dataset.theme = _isDark ? 'dark' : 'light';
   _root.style.colorScheme = _isDark ? 'dark' : 'light';
   _root.style.backgroundColor = _isDark ? '#0b0d11' : '#f8fafc';
+  var _cm = document.getElementById('colorSchemeMeta');
+  if (_cm) _cm.setAttribute('content', _isDark ? 'dark' : 'light');
   var _tm = document.getElementById('themeColorMeta');
   if (_tm) _tm.setAttribute('content', _isDark ? '#0b0d11' : '#f8fafc');
   var _am = document.getElementById('appleStatusMeta');
@@ -36,8 +38,9 @@ try {
 <style>
 :root{color-scheme:light;--bg:#f8fafc;--paper:#ffffff;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--lime:#10b981;--primary:#10b981;--green:#059669;--greenbg:#ecfdf5;--red:#e11d48;--redbg:#fff1f2;--purple:#7357ff;--orange:#ff9851;--blue:#56c5e8;--shadow:0 12px 35px rgba(15,23,42,0.06);--radius:20px}
 :root[data-theme=dark],html[data-theme=dark]{color-scheme:dark!important;background:#0b0d11!important;background-color:#0b0d11!important;--bg:#0b0d11;--paper:#141820;--ink:#f4f6fa;--muted:#8f9bb0;--line:rgba(255,255,255,0.09);--lime:#10b981;--primary:#10b981;--green:#34d399;--greenbg:rgba(16,185,129,0.13);--red:#fb7185;--redbg:rgba(244,63,94,0.14);--shadow:0 8px 24px rgba(0,0,0,0.34)}
-:root[data-theme=dark] body,html[data-theme=dark] body{background:#0b0d11!important;background-color:#0b0d11!important}
-*{box-sizing:border-box}html{scroll-behavior:smooth;overflow-x:clip;overscroll-behavior-y:none;max-width:100vw;width:100%;min-height:100%;background:var(--bg)}body{margin:0;overflow-x:clip;overscroll-behavior-y:none;max-width:100vw;width:100%;min-height:100dvh;background:var(--bg);color:var(--ink);font:14px/1.7 Vazirmatn,Tahoma,sans-serif}button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #7357ff66;outline-offset:3px}button:disabled{opacity:.45;cursor:not-allowed}.app{min-height:100dvh;overflow-x:clip;max-width:100vw}.main{max-width:1200px;margin:auto;padding:20px 16px calc(150px + env(safe-area-inset-bottom))}
+:root[data-theme=dark] body,html[data-theme=dark] body,:root[data-theme=dark] .app,html[data-theme=dark] .app{background:#0b0d11!important;background-color:#0b0d11!important}
+@supports (-webkit-touch-callout:none){html,body,.app{min-height:-webkit-fill-available}}
+*{box-sizing:border-box}html{scroll-behavior:smooth;overflow-x:clip;overscroll-behavior-y:none;max-width:100vw;width:100%;min-height:100%;background:var(--bg)}body{margin:0;overflow-x:clip;overscroll-behavior-y:none;max-width:100vw;width:100%;min-height:100dvh;background:var(--bg);color:var(--ink);font:14px/1.7 Vazirmatn,Tahoma,sans-serif}button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #7357ff66;outline-offset:3px}button:disabled{opacity:.45;cursor:not-allowed}.app{min-height:100dvh;overflow-x:clip;max-width:100vw;background:var(--bg)}.main{max-width:1200px;margin:auto;padding:20px 16px calc(150px + env(safe-area-inset-bottom))}
 #ptrIndicator{display:none!important}
 @keyframes ptrSpin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
 .view{display:none;animation:enter .2s ease}.view.active{display:block!important}@keyframes enter{from{opacity:.55;transform:translateY(5px)}to{opacity:1;transform:none}}.topbar{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:22px}.brand{display:flex;align-items:center;gap:10px;font-weight:900;font-size:16px}.brand-mark{display:grid;place-items:center;width:36px;height:36px;border-radius:11px;background:var(--paper);color:#0f172a;font-size:20px;border:1.5px solid var(--line);box-shadow:0 2px 8px rgba(15,23,42,0.06)}.greeting{font-size:11px;color:var(--muted);margin-top:1px}.top-actions{display:flex;gap:8px;align-items:center}.icon-btn{width:44px;height:44px;border:1.2px solid rgba(255,255,255,0.85)!important;background:linear-gradient(135deg,rgba(255,255,255,0.85) 0%,rgba(245,248,252,0.7) 100%)!important;backdrop-filter:blur(16px)!important;-webkit-backdrop-filter:blur(16px)!important;color:var(--ink)!important;border-radius:15px;font-size:21px;display:grid;place-items:center;box-shadow:0 4px 12px rgba(15,23,42,0.05),inset 0 1px 1.5px rgba(255,255,255,0.95)!important;transition:all .18s ease!important}.icon-btn.primary{background:var(--ink);color:var(--paper);border-color:var(--ink)}h1,h2,h3,p{margin-top:0}h1{font-size:clamp(26px,5vw,38px);line-height:1.25;letter-spacing:-1px;margin-bottom:7px;font-weight:900}h2{font-size:19px;line-height:1.35;margin-bottom:4px;letter-spacing:-.4px}h3{font-size:14px;margin-bottom:4px}.muted{color:var(--muted)}.eyebrow{font-size:10px;text-transform:uppercase;letter-spacing:.8px;font-weight:800;color:var(--muted)}.intro{display:flex;align-items:flex-end;justify-content:space-between;gap:12px;margin:14px 0 20px}.intro p{margin:0;color:var(--muted);font-size:12px}.pill{display:inline-flex;align-items:center;gap:6px;padding:5px 9px;border-radius:100px;font-size:10px;font-weight:800;white-space:nowrap}.pill.live{background:var(--greenbg);color:var(--green)}.pill.sample{background:#fff1d8;color:#8e5b10}.dot{width:7px;height:7px;border-radius:50%;background:currentColor}.section{margin-top:27px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:12px}.section-head p{margin:3px 0 0;font-size:11px;color:var(--muted)}.text-btn{border:0;background:transparent;color:var(--purple);font-weight:800;font-size:11px;padding:8px 0}.btn{border:0;border-radius:14px;padding:11px 15px;font-weight:800;font-size:12px;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:transform .16s,filter .16s;min-height:42px}.btn:active{transform:scale(.97)}.btn-dark{background:var(--ink);color:var(--paper)}.btn-lime,.btn-navy{background:#0f2744!important;background-color:#0f2744!important;color:#ffffff!important;border:1px solid rgba(255,255,255,0.18)!important;box-shadow:0 4px 14px rgba(15,39,68,0.32),inset 0 1px 1px rgba(255,255,255,0.25)!important}.btn-lime:hover,.btn-navy:hover{background:#091a2f!important;background-color:#091a2f!important;color:#ffffff!important;box-shadow:0 6px 18px rgba(15,39,68,0.45)!important;transform:translateY(-1px)!important}.btn-soft{background:linear-gradient(135deg,rgba(255,255,255,0.92) 0%,rgba(241,245,249,0.82) 100%)!important;backdrop-filter:blur(20px) saturate(190%)!important;-webkit-backdrop-filter:blur(20px) saturate(190%)!important;border:1.2px solid rgba(203,213,225,0.8)!important;color:var(--ink)!important;box-shadow:0 4px 14px rgba(15,23,42,0.06),inset 0 1px 1.5px rgba(255,255,255,0.95),inset 0 -1px 1px rgba(15,23,42,0.04)!important;transition:all .18s ease!important}.btn-soft:hover{background:linear-gradient(135deg,rgba(255,255,255,0.98) 0%,rgba(248,250,252,0.92) 100%)!important;border-color:rgba(148,163,184,0.6)!important;box-shadow:0 6px 20px rgba(15,23,42,0.1),inset 0 1.5px 2px rgba(255,255,255,1)!important;transform:translateY(-1px)!important}.btn-purple{background:var(--purple);color:white}.btn-danger{background:var(--redbg);color:var(--red)}.portfolio-hero{position:relative;overflow:hidden;background:#172b22;color:#f8fff5;border-radius:30px;padding:22px 20px 19px;box-shadow:0 18px 38px #16291f25}.portfolio-hero:before{content:"";position:absolute;inset:-100px auto auto -70px;width:260px;height:260px;border-radius:50%;background:radial-gradient(circle,#d7ff613b,transparent 68%);pointer-events:none}.portfolio-hero:after{content:"";position:absolute;right:48%;bottom:-110px;width:230px;height:230px;border:1px solid #ffffff12;border-radius:50%;box-shadow:0 0 0 24px #ffffff06,0 0 0 50px #ffffff05;pointer-events:none}.hero-top{position:relative;z-index:1;display:flex;justify-content:space-between;gap:12px;align-items:flex-start}.hero-top .eyebrow{color:#b9cbbd}.hero-value{font-size:clamp(27px,6vw,42px);font-weight:900;letter-spacing:-1px;line-height:1.5;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.hero-gain{padding:7px 10px;border-radius:12px;background:var(--lime);color:#17231e;font-weight:900;font-size:12px;white-space:nowrap}.hero-chart{height:94px;position:relative;z-index:1;margin:8px -4px 0}.hero-chart svg{width:100%;height:100%;overflow:visible}.hero-bottom{display:flex;align-items:center;justify-content:space-between;gap:12px;position:relative;z-index:1;border-top:1px solid #ffffff20;padding-top:13px}.hero-metric span{display:block;font-size:10px;color:#b9cbbd}.hero-metric b{font-size:13px}.hero-cta{display:flex;align-items:center;gap:6px;color:#d7ff61;font-size:11px;font-weight:800;white-space:nowrap}.quick-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:11px}.quick-card{padding:12px;border-radius:18px;background:var(--paper);border:1px solid var(--line);min-width:0}.quick-card .qicon{display:grid;place-items:center;width:31px;height:31px;border-radius:11px;font-size:17px;margin-bottom:9px}.qicon.purple{background:#e8f5c5;color:#42651b}.qicon.orange{background:#fff0e4;color:#d66a1e}.qicon.blue{background:#e2f8ff;color:#167c9d}.quick-card small{display:block;font-size:10px;color:var(--muted)}.quick-card b{display:block;font-size:clamp(12px,2.5vw,16px);font-weight:900;overflow-wrap:anywhere;margin-top:3px}.market-strip{display:flex;gap:9px;overflow-x:auto;-webkit-overflow-scrolling:touch;touch-action:pan-x pan-y;padding:2px 1px 8px;scrollbar-width:none}.market-strip::-webkit-scrollbar{display:none}.ticker{touch-action:pan-x pan-y;min-width:154px;flex:1;padding:13px;border-radius:19px;background:var(--paper);border:1px solid var(--line);position:relative;overflow:hidden}.ticker:before{content:"";position:absolute;inset:0 0 auto;height:4px;background:var(--ticker,var(--purple))}.ticker-top{display:flex;align-items:center;gap:8px}.asset-icon{width:37px;height:37px;border-radius:13px;display:grid;place-items:center;background:var(--iconbg,#eee9ff);color:var(--iconcolor,#7357ff);font-size:18px;font-weight:900;flex:none}.ticker-name{font-size:11px;font-weight:800;line-height:1.3}.ticker-symbol{font-size:9px;color:var(--muted);direction:ltr}.ticker-price{font-size:17px;font-weight:900;letter-spacing:-.4px;margin-top:12px;direction:ltr;text-align:right;white-space:nowrap}.ticker-foot{display:flex;justify-content:space-between;align-items:center;gap:5px;margin-top:5px}.change{font-size:10px;font-weight:900;direction:ltr;white-space:nowrap}.change.up{color:var(--green)}.change.down{color:var(--red)}.spark{width:61px;height:23px}.spark svg{width:100%;height:100%}.market-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.market-card{padding:13px;border:1px solid var(--line);border-radius:21px;background:var(--paper);min-width:0;position:relative;overflow:hidden;cursor:pointer;transition:transform .18s,border-color .18s}.market-card:active{transform:scale(.985)}.market-card .card-top{display:flex;align-items:center;gap:8px}.market-card .asset-name{font-size:11px;font-weight:900;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.market-card .asset-symbol{font-size:9px;color:var(--muted);direction:ltr}.market-card .price{font-size:clamp(15px,3.4vw,21px);font-weight:900;letter-spacing:-.6px;margin-top:15px;direction:ltr;text-align:right;overflow-wrap:anywhere}.market-card .card-bottom{display:flex;justify-content:space-between;align-items:center;gap:4px;margin-top:5px}.market-card .change{padding:4px 6px;border-radius:8px;background:var(--greenbg)}.market-card .change.down{background:var(--redbg)}.market-card .spark{width:55px}.market-card .source{font-size:8px;color:var(--muted);margin-top:7px}.asset-grid-icon{width:40px;height:40px}.controls{display:grid;gap:9px;margin-bottom:14px}.search{width:100%;height:47px;border:1px solid var(--line);border-radius:15px;padding:0 14px;background:var(--paper);color:var(--ink)}.filter-row{display:flex;gap:7px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}.filter{border:1px solid var(--line);border-radius:99px;background:var(--paper);color:var(--muted);font-size:10px;font-weight:800;padding:8px 14px;white-space:nowrap}.filter.active{background:var(--ink);color:var(--paper);border-color:var(--ink)}.list{display:grid;gap:8px}.asset-row{display:flex;align-items:center;gap:10px;padding:12px;background:var(--paper);border:1px solid var(--line);border-radius:17px;min-width:0}.asset-row .row-main{min-width:0;flex:1}.row-name{font-weight:900;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.row-symbol{font-size:9px;color:var(--muted);direction:ltr;text-align:right}.row-price{font-size:12px;font-weight:900;direction:ltr;white-space:nowrap}.row-side{display:flex;align-items:flex-end;flex-direction:column;gap:2px}.row-source{font-size:8px;color:var(--muted)}.star{border:0;background:transparent;color:#9ba69d;font-size:21px;padding:2px}.star.active{color:#e4a92f}.empty{padding:28px 16px;text-align:center;background:var(--paper);border:1px dashed var(--line);border-radius:18px;color:var(--muted)}.empty b{display:block;color:var(--ink);margin-bottom:5px}.portfolio-summary{background:linear-gradient(135deg,#172b22,#24563d);color:white;border-radius:25px;padding:20px;position:relative;overflow:hidden}.portfolio-summary:after{content:"";position:absolute;width:180px;height:180px;border:1px solid #ffffff2b;border-radius:50%;left:-35px;bottom:-115px;box-shadow:0 0 0 25px #ffffff0b,0 0 0 50px #ffffff08}.portfolio-summary .eyebrow{color:#c5dbc9}.portfolio-summary .total{font-size:27px;font-weight:900;overflow-wrap:anywhere}.summary-row{display:flex;gap:10px;margin-top:12px}.summary-chip{padding:8px 10px;border-radius:12px;background:#ffffff20;font-size:10px}.holdings{display:grid;gap:9px}.holding{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center;padding:13px;border-radius:17px;border:1px solid var(--line);background:var(--paper)}.holding-left{display:flex;gap:9px;align-items:center;min-width:0}.holding-title{font-size:15px;font-weight:900;line-height:1.4}.holding-sub{display:none;font-size:9px;color:var(--muted)}.holding-right{text-align:left}.holding-right b{font-size:clamp(15px,3.6vw,19px);display:block;font-weight:900;white-space:nowrap}.holding-right small{font-size:clamp(11px,2.7vw,14px);font-weight:800;color:var(--muted)}.holding-actions{display:flex;gap:5px;margin-top:7px}.small-btn{border:1px solid var(--line);border-radius:9px;padding:5px 8px;font-size:9px;font-weight:800;background:var(--paper);color:var(--ink)}.chart-card{background:var(--paper);border:1px solid var(--line);border-radius:22px;padding:15px}.chart-header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}.chart-header b{font-size:18px}.chart-box{height:170px;margin:12px 0 5px}.chart-box svg{width:100%;height:100%;overflow:visible}.range-row{display:flex;gap:5px}.range{flex:1;border:0;background:var(--bg);color:var(--muted);padding:7px 4px;border-radius:9px;font-size:10px;font-weight:800}.range.active{background:var(--lime);color:#17231e}.allocation{display:grid;gap:13px}.allocation-item{display:grid;grid-template-columns:95px 1fr 45px;align-items:center;gap:9px;font-size:10px}.bar{height:9px;border-radius:99px;background:var(--bg);overflow:hidden}.bar span{display:block;height:100%;border-radius:99px;background:var(--bar,var(--purple))}.allocation-item b{font-size:10px;text-align:left}.settings-card{padding:16px;background:var(--paper);border:1px solid var(--line);border-radius:20px;margin-bottom:10px}.setting{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}.setting:last-child{border-bottom:0}.setting strong{display:block;font-size:12px}.setting small{display:block;color:var(--muted);font-size:10px}.setting select{max-width:140px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink);padding:8px}.switch{width:45px;height:26px;border:0;border-radius:99px;background:#bdc6be;padding:3px;flex:none}.switch:after{content:"";display:block;width:20px;height:20px;background:white;border-radius:50%;transition:transform .18s}.switch.on{background:var(--green)}.switch.on:after{transform:translateX(-19px)}.bottom-nav{position:fixed;z-index:30;bottom:0;left:0;right:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:3px;padding:8px 9px calc(8px + env(safe-area-inset-bottom));background:var(--paper);border-top:1px solid var(--line);box-shadow:0 -8px 30px #14241a0a}.bottom-nav button{border:0;background:transparent;color:var(--muted);border-radius:14px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:1px;min-width:0;padding:5px 1px;font-size:9px;font-weight:800}.bottom-nav .nav-icon{display:grid;place-items:center;width:31px;height:27px;border-radius:10px;font-size:18px;line-height:1}.bottom-nav button.active{color:var(--ink)}.bottom-nav button.active .nav-icon{background:transparent;color:var(--ink)}.modal-backdrop{display:none;position:fixed;inset:0;z-index:50;background:#101912a8;backdrop-filter:blur(5px);padding:16px;align-items:flex-end;justify-content:center}.modal-backdrop.open{display:flex}.modal{width:min(100%,510px);max-height:min(88dvh,780px);overflow:auto;background:var(--paper);border-radius:27px 27px 20px 20px;padding:21px;box-shadow:0 25px 80px #0004;animation:sheet .2s ease}@keyframes sheet{from{opacity:.6;transform:translateY(14px)}to{opacity:1;transform:none}}.modal-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:17px}.modal-head h2{margin:0}.close{border:0;background:var(--bg);color:var(--ink);width:37px;height:37px;border-radius:12px;font-size:21px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:11px}.asset-picker{border:1px solid var(--line);border-radius:15px;background:var(--bg);padding:10px}.asset-picker-search{width:100%;height:42px;border:1px solid var(--line);border-radius:11px;background:var(--paper);color:var(--ink);padding:0 12px;margin-bottom:8px}.asset-picker-list{display:grid;gap:4px;max-height:240px;overflow:auto}.asset-option{display:flex;align-items:center;gap:10px;width:100%;border:1px solid transparent;background:var(--paper);color:var(--ink);padding:9px 10px;border-radius:12px;text-align:right}.asset-option[aria-checked=true]{border-color:var(--green);background:var(--greenbg)}.asset-option .asset-icon{width:35px;height:35px}.asset-option .option-copy{flex:1;min-width:0}.asset-option strong{display:block;font-size:12px}.asset-option small{display:block;color:var(--muted);font-size:10px}.asset-option .radio-dot{width:20px;height:20px;border:2px solid var(--muted);border-radius:50%;display:grid;place-items:center}.asset-option[aria-checked=true] .radio-dot{border-color:var(--green)}.asset-option[aria-checked=true] .radio-dot:after{content:"";width:10px;height:10px;border-radius:50%;background:var(--green)}.featured-manage-list{display:grid;gap:7px}.featured-manage-row{display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--line);border-radius:14px;background:var(--paper)}.featured-manage-row .row-main{flex:1;min-width:0}.featured-manage-row .move-controls{display:flex;gap:4px}.featured-manage-row .move-controls button{width:35px;height:35px;border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--ink)}.drag-handle{touch-action:none;cursor:grab;user-select:none;border:1px solid var(--line);background:var(--paper);color:var(--muted);border-radius:10px;min-width:35px;height:35px;font-size:17px}.featured-manage-row.dragging{opacity:.45}.field{display:grid;gap:6px;min-width:0}.field.full{grid-column:1/-1}.field label{font-size:11px;font-weight:800}.field input,.field select{width:100%;min-width:0;height:44px;padding:0 11px;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--ink)}.field input{direction:ltr;text-align:left}.field input::placeholder{direction:rtl;text-align:right}.form-actions{display:flex;gap:8px;margin-top:17px}.form-actions>*{flex:1}.detail-hero{padding:18px;border-radius:20px;background:var(--bg);margin-bottom:12px}.detail-price{font-size:29px;font-weight:900;direction:ltr;text-align:right}.detail-chart{height:150px}.detail-chart svg{width:100%;height:100%}.toast{position:fixed;z-index:80;bottom:calc(83px + env(safe-area-inset-bottom));left:50%;transform:translate(-50%,14px);opacity:0;pointer-events:none;background:var(--ink);color:var(--paper);padding:10px 16px;border-radius:13px;font-size:11px;font-weight:800;box-shadow:0 8px 30px #0002;transition:opacity .2s,transform .2s;white-space:nowrap;max-width:calc(100vw - 24px);overflow:hidden;text-overflow:ellipsis}.toast.show{opacity:1;transform:translate(-50%,0)}.notice{padding:11px 13px;border-radius:13px;background:#fff1d8;color:#85540b;font-size:10px;margin:12px 0}.hide-value .hero-value,.hide-value .portfolio-summary .total{filter:blur(9px);user-select:none}.table-note{font-size:9px;color:var(--muted);margin-top:9px}.page-actions{display:flex;gap:8px;flex-wrap:wrap}.page-actions .btn{flex:1}.asset-detail-grid{display:grid;grid-template-columns:1fr 1fr;gap:9px}.detail-metric{background:var(--paper);border:1px solid var(--line);border-radius:15px;padding:12px}.detail-metric small{display:block;color:var(--muted);font-size:10px}.detail-metric b{display:block;font-size:13px;margin-top:3px;overflow-wrap:anywhere}
@@ -3956,8 +3959,9 @@ window.handleCryptoImgError=function(img,fallbackText,c1,c2){
   const xm = !REAL_X_CRYPTOS_CLIENT.has(rawSym) ? /^x([a-z]{1,6})$/.exec(rawSym) : null;
 
   if (step === 0 && rawSym) {
-    const apiUrl = window.cryptoIcons && (window.cryptoIcons[rawSym] || window.cryptoIcons[sym]);
-    if (apiUrl && /^https:\/\//i.test(apiUrl) && img.src !== apiUrl) {
+    const apiUrl = safeImgUrl(window.cryptoIcons && (window.cryptoIcons[rawSym] || window.cryptoIcons[sym]));
+    const curSrcAttr = img.getAttribute('src') || '';
+    if (apiUrl && curSrcAttr !== apiUrl && img.src !== apiUrl) {
       img.dataset.step = '0.5';
       img.src = apiUrl;
       return;
@@ -4014,7 +4018,7 @@ window.handleCryptoImgError=function(img,fallbackText,c1,c2){
   }
   if (step === 6 && sym) {
     img.dataset.step = '7';
-    img.src = `https://raw.githubusercontent.com/trustwallet/assets/master/blockchains/binance/assets/${encodeURIComponent(sym.toUpperCase())}-1DE/logo.png`;
+    img.src = `https://assets.coincap.io/assets/icons/${encodeURIComponent(sym)}@2x.png`;
     return;
   }
   
@@ -4022,6 +4026,10 @@ window.handleCryptoImgError=function(img,fallbackText,c1,c2){
   const parent=img.parentElement;
   if(!parent)return;
   parent.className='asset-icon asset-icon-badge';
+  if(sym)parent.dataset.iconSym=sym;
+  if(fbText)parent.dataset.fb=fbText;
+  parent.dataset.c1=bg1;
+  parent.dataset.c2=bg2;
   parent.style.background=`linear-gradient(135deg, ${bg1}, ${bg2})`;
   parent.style.color='#ffffff';
   parent.style.fontSize=(fbText&&fbText.length>2)?'9.5px':'11px';
@@ -4304,16 +4312,32 @@ function quality(a){
   return `${formatRelativeDate(ts)} · ${srcName}`;
 }
 const sparkSvgCache = new Map();
+const sparkSvgMeta = new Map();
 let sparkSvgSeq = 0;
 function instantiateSparkSvg(svgTemplate) {
   if (!svgTemplate) return '';
   return svgTemplate.replace(/__SGID__/g, 'sg_' + (++sparkSvgSeq));
 }
+function renderSparkFromPoints(id, rawPts, usedRange = '1D') {
+  if (!id) return '';
+  const curA = asset(id);
+  const p = withCurrent(rawPts, curA, usedRange);
+  if (p.length < 2) return '';
+  const sparkPct = p[0][1] > 0
+    ? ((p.at(-1)[1] - p[0][1]) / p[0][1]) * 100
+    : (Number.isFinite(curA?.change) ? curA.change : 0);
+  const isUp = sparkPct >= 0;
+  const svg = chartSVG(p, isUp ? '#10b981' : '#f43f5e', true, true);
+  sparkSvgCache.set(id, svg);
+  sparkSvgMeta.set(id, { at: Date.now(), range: usedRange });
+  document.querySelectorAll('[data-spark="' + id + '"]').forEach(el => { el.innerHTML = instantiateSparkSvg(svg); });
+  return svg;
+}
 function spark(a){
   if (!a || !a.id) {
     return `<span data-spark="" aria-hidden="true"></span>`;
   }
-  const label = (a.cat === 'crypto' || a.id === 'usdt') ? 'نمودار ۲۴ ساعت' : 'نمودار هفتگی';
+  const label = 'نمودار ۲۴ ساعت';
   if (sparkSvgCache.has(a.id)) {
     return `<span data-spark="${escapeHtml(a.id)}" aria-label="${escapeHtml(label)}">${instantiateSparkSvg(sparkSvgCache.get(a.id))}</span>`;
   }
@@ -5272,6 +5296,11 @@ const CRYPTO_SLUGS = {
 
 // Official ArzDigital slugs are preserved in CRYPTO_SLUGS for slug-based image fallback
 const ARZ_DIGITAL_ICONS = {};
+/* @LOCAL_ICONS_START */
+const LOCAL_CRYPTO_PNG_LIST = "0g,1000cat,1000cheems,1000sats,10set,1inch,1inchdown,1inchup,1mbabydoge,2z,3kds,3ull,4,4ever,4stock,9bit,a,a2z,a47,a8,aaoib,aapl,aaplb,aaplc,aaplon,aaplx,aark,aave,aavedown,aaveup,ab,abbc,abbvx,abel,abey,abt,abton,abtx,aca,ace,ach,acm,acn,acnon,acnx,acp,acs,act,acu,acx,ada,adadown,adapad,adaup,adbeb,adi,adp,ads,adx,ae,aeon,aergo,aero,aevo,afc,aggon,agi,agix,agld,agpub,agrs,agt,aht,ai,ai16z,aia,aiat,aic,aidoge,aigensyn,ain,aio,aion,aiot,aioz,air,airdrop,ait,aiv,aix9,aixbt,ake,akita,akro,akt,ala,alabb,alch,alcx,ale,aleo,aleph,alex,algo,ali,alice,align,alkimi,allo,alpa,alpaca,alph,alpha,alpine,alt,alu,amatb,amb,amcb,amdb,amdon,amdx,amo,amp,ampl,amzn,amznb,amznon,amznx,anc,andy,andyeth,anime,ankr,anoa,anon,ansem,ansemcat,ant,antfun,anthropic,any,anyone,ao,aog,aop,ape,apepe,apex,api3,apm,appb,apr,apt,aptm,apu,apx,aqa,ar,arara,arb,arc,arch,ardr,arena,arg,argus,aria,ark,arkm,armb,armon,arpa,arrr,art,artfi,artx,arw,arx,ask,asm,asmlb,asmlon,asp,asr,asset,ast,aster,asteroid,astr,astra,astsb,astson,at,ata,ath,atlas,atm,atom,atos,atr,ats,atwo,auction,audd,audf,audio,audm,auki,aura,aurora,aury,ausd,auto,ava,avaai,avail,avax,avc,avgob,avgoon,avgox,avici,avl,avnt,avt,avv,awe,awin,axis,axl,axs,axtib,azero,aznx,aztec,azur,b,b2,b3,b3x,babab,babaon,babi,baby,babydoge,babyshark,badger,baion,bake,bal,ban,banana,bananas31,band,bank,bar,bard,bas,basecat,based,basiscash,bat,batch,bay,bb,bbb,bbt,bcc,bccoin,bcd,bch,bchabc,bchdown,bchsv,bchup,bcn,bcut,bdca,bdg,bdt,bdx,bdxn,beam,beamx,bear,beat,beb,bee,bel,believe,bells,belong,benji,benqi,bera,bert,beta,beth,bf,bfc,bfg,bfusd,bgb,bgsc,bico,bid,bifi,bigtime,bill,bim,bio,birb,bitboard,bitcoin,bkn,bkrw,bld,blend,bless,blkdigon,blkgrwon,blkhion,blkon,bluai,blue,blum,blur,blz,bmnrb,bmnron,bmnrx,bmt,bmx,bnb,bnbbear,bnbbull,bnbdown,bnbtiger,bnbup,bnc,bnc4,bncb,bncold,bnkr,bnsol,bnt,bnx,bob,boba,bobo,bold,bome,bond,bone,boner,bonk,booe,boop,bora,borg,bos,boson,botb,bounty,box,bp,bpt,br,brainon,brett,brev,bric,brise,brkbb,brkl,brl1,brn,broccoli,broccoli714,brtron,bsai,bsb,bspb,bst,bsv,bsw,btc,btcdown,btcst,btcup,btg,btgoon,btr,btrst,bts,btse,btt,bttc,btw,btx,bubble,bubi,buck,bull,bulla,burger,burn,busd,busy,buttcoin,buy,bxn,byn,bzrx,bzz,c,c98,ca,caga,cake,camp,cap,carat,cards,carv,cashcat,cat,cate,catecoin,cati,cats,caw,cbk,cbrsb,cc,ccd,cel,cell,celo,celr,cent,cere,cess,cet,cetus,cfg,cfx,cgn,cgo,cgpt,chatai,check,cheel,cheems,cheq,chess,chex,chillguy,chip,chirp,cho,chr,chz,city,ckb,clanker,clash,clnd,clo,clore,cloud,clv,cmcsax,cnpy,coai,cocos,codex,cohrb,coin,coinb,coindepo,coinon,coinx,col,collect,cols,combo,common,comp,cookie,coq,core,coreum,corn,cos,coti,cow,cp,cpool,cpr,crcl,crclb,crclon,crclx,crdob,cre,cream,credi,creo,crepe,creta,crf,crmb,cro,cross,crown,crts,cru,crv,crvusd,crwdb,crwdx,crwvb,cscoon,cscox,cspr,cst,ct,ctc,ctk,ctm,ctp,ctr,ctsi,ctx,ctxc,cudis,cult,cummies,cusd,cvc,cvp,cvx,cvxon,cwar,cweb,cwif,cws,cxt,cyber,cyc,cyphb,cys,d,d2t,daddy,dag,dai,dao,dar,dash,data,dbc,dbr,dcr,debit,deep,deepseek,defi,degen,dego,delabs,dellb,dent,deod,dep,deso,desu,deus,dexe,dext,df,dfdvx,dfg,dgai,dgb,dgma,dhn,dhrx,dhv,dia,diam,diem,dimo,din,divi,djed,dji6930,djtb,dka,dl,dmc,dmd,dmtr,dn,dna,dnt,dobo,dock,dodo,dog,doge,dogelonmars,doginme,dogs,dolo,dome,dood,dos,dot,dotdown,dotup,dpr,dramb,dramon,drb,drep,dress,drift,drv,dsync,dtec,duck,durev,dusd,dusk,dxi,dydx,dym,dyor,eat,edel,eden,edge,edgex,edu,eemon,efaon,egame,egl1,egld,eigen,el,ela,elf,elg,elizaos,elon,elp,elsa,elx,emc,emt,ena,enj,ens,enso,eos,eosbear,eosbull,eosdown,eosup,epic,eps,ept,epx,eqb,eqty,era,erd,erg,ern,es,ese,esim,esp,esports,etc,eth,ethbear,ethbull,ethdown,ethdydx,ethfi,ethup,ethw,etn,eul,eurc,eurcv,euri,eurq,eurr,eusd,eusx,ev,evaa,ever,ewt,ewyb,ewyx,f,fai,far,farm,fartboy,fartcoin,fb,fct,fdusd,fearnot,feg,fei,fely,fet,ff,fhe,fida,fidd,fight,fil,fildown,filup,fio,fir,fire,firo,fis,fishw,fiwa,flip,flm,flncb,flock,floki,flow,flr,flt,fluid,flux,fly,fogo,fold,folks,fone,for,forest,forex,form,fort,forth,fourcoin,fox,foxsy,foxy,frax,frong,front,frxusd,ft,ftm,ftrb,ftt,fuel,ful,fun,funtoken,fusd,fuse,fwdib,fwog,fxion,fxs,fyn,g,g3,gafi,gaib,gain,gal,gala,galeon,galo,game,games,gas,gat,gata,gato,gbyte,gcb,gcoin,gear,geg,gems,genius,geod,gevb,gf,gfal,gfi,gft,gho,ghst,ghx,giga,giggle,gitcoin,gldon,gldx,gleec,glm,glmr,glwb,gme,gmeb,gmee,gmmt,gmrx,gmt,gmx,gnc,gno,gnot,gns,go4,goat,goated,goats,gods,gog,gohome,goldao,gomining,googl,googlb,googlc,googlon,googlx,googon,gp,gprob,gps,gram,grass,griffain,grin,grnd,grok,grove,grow,grs,grt,grvt,gsb,gstock,gt,gtai,gtbtc,gtc,gteth,gua,gun,gusd,gwei,gxe,gxs,gyen,h,haedal,haha,hai,hamster,hana,hard,harold,hbar,hdg,hdn,hdx,heart,hegic,hei,hello,hemi,hero,hez,hft,hget,hgpt,hibs,hifi,high,himsb,himson,hint,hippo,hive,hln,hmnd,hmstr,hnb,hnt,hod,hold,holdstation,holo,home,honey,honx,hoodb,hoodon,hoodx,hook,hookr,hoppy,hopr,hord,hot,hp,hpeb,hpos10i,hpp,hsk,ht,htm,htr,htx,huma,hunt,hvlo,hype,hyper,iag,iauon,ibiton,ibmb,ibmon,ibs,icnt,icp,icx,id,idex,idia,idol,idos,idrt,iefaon,iemgon,ihc,ijhon,ika,ilv,ily,impt,imt,imu,imx,in,inc,index,init,inj,intcb,intcon,intcx,inter,intwb,inv,inx,io,iost,iota,iotx,iq,ir,irenb,iris,iron,irys,isikc,isk,island,islm,isp,ita,ithaca,ivvon,iwfon,iwmon,iwnon,ixs,izi,jager,janet,jasmy,jct,jeanphil,jellyjelly,jfi,jitosol,jlp,joc,joe,jpmb,jpmon,jsm,jst,jto,juc,jup,juv,kaia,kaio,kaito,kan,kas,kat,kava,kcs,kct,kda,kdk,keep,kekius,kernel,key,keycat,kgen,kgst,kii,kilo,kishu,kite,kiteai,klay,klk,klv,kmd,kmno,knc,kntq,koge,koma,konet,koon,kor,korub,kox,kp3r,kpol,krl,ksm,kstrb,kt,kta,kton,kub,kyo,kyve,kzen,l3,la,lab,labubu,ladys,lair,laptop,lat,lava,layer,lazio,lbt,lcx,ldo,legion,lend,leo,lever,lf,light,ligo,like,lime,lina,linea,lingo,link,linkdown,linkup,lion,lista,lisusd,lit,liteb,litex,ll,llyb,llyon,llyx,lm,lmton,lmts,lmwr,ln,lnq,loa,loan,lobo,locus,lofi,logt,logx,loka,lon,loom,lot,loulou,lpt,lq,lqr,lqty,lrc,lrds,lrn,lsk,ltc,ltcdown,ltcup,lto,luca,lucic,lumia,luna,lunc,lunrx,lusd,lv,lvly,lvva,lwp,lyn,lyp,lyx,m,m87,ma,mag7ssi,mag7xon,magic,magma,majo,major,mak,mamo,man,mana,mana3,manifest,manta,mantra,manyu,maon,mapo,marscoin,mart,mask,mat,match,math,mav,mavia,max,may,mbg,mbl,mbox,mbx,mc,mcat,mcb,mcdon,mcdull,mcdx,mcm,mcn,mco,mcoin,mctp,mdbb,mdf,mdt,mdx,me,med,mega,melania,meld,meme,mengo,mepad,merl,met,meta,metab,metac,metadao,metan,metaon,metax,metfi,metis,meto,mev,mew,mey,mezo,mf,mft,mgkl,mgo,mha,miladycult,milo,mim,min,mina,mir,mira,mito,mkr,ml,mlc,mlk,mln,mmpro,mmt,mmui,mnde,mngo,mnsry,mnt,mob,mobile,moc,moca,mode,mog,mon,mona,moodeng,mooney,moov,mori,morpho,move,movr,mow,mpc,mplx,mrnab,mrvlb,mrvlon,mrvlx,msftb,msfton,msftx,msol,msp,msq,mstr,mstrb,mstron,mstrx,mtos,mtv,mtx,mu,mub,mubarak,mug,multi,muon,musd,musebook,muub,mux,mvc,mvl,mvllb,mwxt,mx,my,myro,myst,myx,naft,naka,nano,naoris,nap,natix,navi,navx,naws,nbisb,nbison,nblu,nbot,nbs,nbt,nc,ncn,nct,near,nebl,neet,neiro,neirocto,neko,neo,neon,nero,nes,ness,net,nett,netx,neural,neuro,newt,nex,nexa,nexi,nexo,nfe,nflxb,nflxon,nflxx,nfp,nft,nibi,night,niko,nil,nila,nim,niulai,niza,nkn,nmc,nmr,nock,node,nodl,nokb,nom,noot,nos,not,now,npc,npxs,ns,nsdx,nst,ntrn,nu,nuls,num,numi,nuts,nux,nvda,nvdab,nvdac,nvdaon,nvdax,nvoon,nxa,nxpc,nxt,nyan,nym,o,o4dx,oas,oax,obi,obol,obsr,obt,ocean,octa,ofc,og,ogn,ogpu,ogy,oho,okb,oksol,ol,olas,ole,om,omg,omi,omikami,omni,on,ondo,one,ong,ont,ooki,oort,op,open,openai,opg,opn,orai,orbio,orbr,orbs,orca,orclb,orclon,orclx,order,ordi,ore,orion,orn,oro,ort,osak,osmo,otk,ousd,ovl,ovo,ovr,owb,owl,own,oxt,p2p,paal,pace,pack,pact,pal,palm,pando,panwon,paparazzi,part,parti,pax,paxg,payai,pbron,pbtc,pbtc35a,pci,pda,pddb,pddon,pdt,peaq,pearl,peipei,pell,pendle,pengb,pengu,penguin,people,pep,pepe,pepecoin,pepon,pepx,perp,pfeon,pgon,pgx,pha,phb,phnix,pi,pieverse,piggy,pika,pin,pine,pingo,pipe,pipedog,pippin,pit,pivx,pixel,pla,plai,planet,play,plspad,pltr,pltrb,pltron,pltrx,plume,pm,pmt,pmx,png,pnk,pnt,pnut,pod,pokt,pol,polis,pols,poly,polyx,pond,ponke,pons,pool,pop,popcat,popmtx,por,pork,pornrocket,port,port3,portal,porto,power,powr,ppc,ppoly,ppt,prai,prcl,predict,preopai,prespcx,prime,prl,pro,prom,prompt,propc,props,pros,prosper,prove,psg,psi,ptb,public,puffer,pump,pumpbtc,pundiai,pundix,puss,pwease,pybobo,pym,pyplb,pyr,pyth,pyusd,pzm,pzp,q,qait,qanx,qbx,qcomb,qcomon,qfi,qi,qie,qka,qkc,qnt,qntb,qorpo,qqq,qqqb,qqqon,qqqx,qtum,quai,qubic,quick,quid,r2,raca,rad,rai,rail,rain,rally,ramd,ramp,rare,rari,rats,rave,ravgo,ray,rbc,rbnt,rcrcl,rddtb,rdnt,re,react,ready,real,recall,rect,red,redo,redstone,reef,ref,rei,reign,rekt,rektcoin,ren,render,rep,reppo,req,resolv,revu,rez,rfc,rfrm,rgoogl,rgt,rhea,rif,ring,rintc,rio,rion,rite,ritual,river,riz,rize,rjv,rklbb,rlb,rlc,rls,rlusd,rmrvl,rmstr,rmu,rnbw,rndr,rnvda,roa,roam,robo,rog,roll,ron,ronin,roobee,root,rose,rpl,rqqq,rsc,rsndk,rsoxl,rsoxs,rspcx,rspy,rsr,rss3,rtf,rtqqq,rtsla,rtsm,rtx,ruji,rune,rvn,rvv,rwa,rwainc,rwusd,rzto,rzusd,s,safe,saga,sahara,sai,saito,sand,santos,sapien,saros,sats,sauber,sauce,save,sbd,sbeton,sbuxon,sc,scam,scarcity,scihub,scor,scr,scrt,sct,sd,sdex,seczb,sei,send,senso,sent,sentis,serv,sfi,sfp,sgovon,sgr,share,shazb,shdw,shell,shfl,shft,shib,shib2,shiro,shldx,shm,shping,shr,shx,si,sign,simonscat,sin,siren,six,skate,skddb,skhy,skhyb,skhyg,skhyon,skhyx,skl,skop,skr,skuub,sky,skya,skyai,slc,slerf,slf,slp,slrs,slt,slvon,slx,smart,smb,smcib,smhb,smx,sn3,sn4,sn44,sn5,sn51,sn56,sn62,sn9,snc,sndkb,sndkc,sndkon,sndkx,snek,snpt,sns,snt,sntr,snx,snxxb,sofion,sogni,soil,sol,solo,solv,somi,sonic,soon,soph,soso,soul,soxlb,soxsb,spa,space,spacex,sparklet,spcm,spcx,spcxb,spcxc,spcxon,spcxx,spectre,spell,spellfire,spk,spo,spurs,spx,spy,spyb,spyon,spyx,sqd,sqgrow,sqqqb,sqqqx,sqr,srm,srx,ssg,ssv,st,stable,star,stay,stbl,stc,steem,steth,stg,stik,stix,stmx,sto,stoc,stonk,stonkbroker,storj,storm,stpt,strat,strax,strcon,strcx,stream,strike,strk,strm,strx,stt,stx,stxb,sui,suku,sun,sundog,supe,super,superform,supra,sure,susd,sushi,sushidown,sushiup,sut,svl,swan,swap,swarm,swarms,swash,sway,swch,swell,swftc,swgt,sxp,sxpdown,sxpup,sxt,symm,syn,syrup,sys,t,ta,tac,tag,tai,taiko,take,talent,tao,taobot,tapprotocol,tart,taur,tbc,tbk,tcentx,tcom,tct,tdrop,tea,ted,tel,tendies,tet,teva,tfuel,tgbp,tgc,the,theta,thq,tia,tibbir,tipon,tit,titn,tko,tlm,tlos,tlton,tmfb,tmon,tmx,tnk,tnsr,tokamak,toke,token,tolly,tomo,ton,torn,toshi,tower,town,towns,tpt,tqqqb,tqqqon,tqqqx,tra,trac,trade,tradoor,trb,trcl,treat,tree,tria,tribe,trio,troll,troy,tru,truf,trump,trust,truth,trvl,trwa,trx,trxdown,trxup,tsla,tslab,tslac,tslaon,tslax,tsmb,tsmon,tsmx,tst,tstbsc,tt,tune,turbo,turbos,turt,turtle,tusd,tut,tvk,twt,tx,txc,tycoon,u,u2u,uai,ub,ubt,ucn,udao,uds,ufd,uft,ultima,uma,umia,umxm,unfi,unhon,unhx,uni,unidown,union,unit0,uniup,unn,unp,uos,up,upc,uqc,uranus,us,usarb,usat,usd0,usd1,usdai,usdc,usdcv,usdd,usde,usdeb,usdf,usdg,usdgo,usdh,usdk,usdm,usdon,usdp,usdpt,usdq,usdr,usds,usdsui,usdt,usdv,usdy,useless,usoon,ust,ustc,usual,usx,utk,uvxyb,uxlink,vai,val,vam,vana,vanry,vanta,vara,vatreni,vbusd,vc,vchf,vcnt,vdai,velo,velodrome,velvet,vemp,ven,venom,verem,verona,vert,vest,vet,vfy,vgx,vib,vic,vidt,vine,vinu,virtual,vite,vlink,vltc,vlx,vmt,vnxau,void,von,vooi,vow,voxel,vpr,vr,vsn,vstb,vsx,vsys,vt,vtc,vtho,vtix,vvs,vvv,vxt,w,w3gg,wai,wal,wallet,wam,wan,ward,waves,waxp,wbai,wbeth,wbtc,wct,wdcb,we,wecan,weeth,wefi,well,well3,wemix,wen,wenb,wet,wfi,white,whuf,whypad,wif,wild,win,wing,wkc,wl,wld,wlfi,wmton,wmtx,wncg,wnxm,wod,wojak,wolf,wom,woo,would,wpay,wrt,wrx,wsb,wspp,wtc,wusd,wxt,wxtm,wzrd,x,xaaoi,xaapl,xabbv,xacn,xadi,xaehr,xai,xalab,xamat,xamc,xan,xapld,xapp,xarm,xasml,xasts,xaum,xaut,xaut0,xava,xavgo,xaxti,xbac,xbb,xbe,xbmnr,xbx,xcbrs,xceg,xcgnx,xch,xcien,xcn,xcoin,xcost,xcp,xcrdo,xcrm,xcrwd,xcrwv,xcsco,xcvna,xcx,xdb,xdc,xddog,xdell,xdkng,xdp,xec,xels,xem,xewj,xewt,xewy,xfc,xflnc,xfly,xge,xgev,xgild,xgme,xgn,xgoogl,xgpro,xgs,xgtlb,xhims,xhpe,xhut,xiaox,xibm,xintc,xionq,xiren,xisrg,xiwm,xjnj,xjpm,xklac,xko,xl1,xlite,xlly,xlm,xlrcx,xlunr,xmcd,xmeta,xmn,xmp,xmpwr,xmr,xmrk,xmrna,xmstr,xmu,xna,xnbis,xnet,xnflx,xnke,xnl,xno,xnow,xnvda,xny,xoklo,xon,xorcl,xoscr,xoust,xp,xpeng,xpin,xpl,xpla,xpltr,xpoet,xpr,xprt,xpypl,xqcom,xqqq,xr,xrd,xrdw,xriot,xrivn,xrklb,xrok,xrp,xseed,xsgd,xshop,xsimo,xsmci,xsmh,xsndk,xsnow,xsony,xsoxs,xspcx,xspy,xsqqq,xstrc,xswap,xt,xtag,xteam,xtem,xter,xtmf,xtqqq,xtsla,xtsll,xtsm,xtta,xttmi,xttwo,xtwlo,xtxn,xtz,xtzup,xu3o8,xunh,xurnm,xusar,xusd,xuso,xv,xvg,xvicr,xvrt,xvs,xwdc,xwen,xwmt,xxbi,xxle,xxom,xym,xyo,xzm,y8u,yala,yb,ybdbd,yct,yec,yee,yellow,yfi,yfidown,yfii,yfiup,ygg,yld5on,yld8on,yng,yom,yusd,yzy,zama,zano,zbcn,zbt,zcat,zchf,zcl,zec,zen,zent,zerebro,zest,zeta,zeum,zeus,zig,zil,zix,zk,zkc,zkj,zkl,zkp,zlw,zmb,zoon,zora,zpay,zrc,zro,zrx,zsc,ztc,zulu,zyra";
+const LOCAL_CRYPTO_EXTRA = {"aart":"/logos/crypto/aart.jpg","fxnw":"/logos/crypto/fxnw.jpg","xcv":"/logos/crypto/xcv.jpg"};
+const LOCAL_FLAG_CODES = new Set(["ae","af","am","au","az","bh","br","ca","ch","cn","dk","gb","ge","hk","in","iq","ir","jp","kg","kr","kw","kz","my","no","nz","om","qa","ru","sa","se","sg","th","tj","tm","tr","us","uz"]);
+/* @LOCAL_ICONS_END */
 
 const CRYPTO_FULL_NAMES = {
   btc: 'Bitcoin',
@@ -5493,15 +5522,29 @@ function assetTitles(a) {
   };
 }
 
+const LOCAL_CRYPTO_ICONS = {};
+if (typeof LOCAL_CRYPTO_PNG_LIST === 'string' && LOCAL_CRYPTO_PNG_LIST) {
+  for (const sym of LOCAL_CRYPTO_PNG_LIST.split(',')) {
+    if (sym) LOCAL_CRYPTO_ICONS[sym] = '/logos/crypto/' + sym + '.png';
+  }
+}
+if (typeof LOCAL_CRYPTO_EXTRA === 'object' && LOCAL_CRYPTO_EXTRA) {
+  for (const [k, v] of Object.entries(LOCAL_CRYPTO_EXTRA)) {
+    if (k && v) LOCAL_CRYPTO_ICONS[k] = v;
+  }
+}
+
 const INITIAL_CRYPTO_ICONS = {
-  ...ARZ_DIGITAL_ICONS
+  ...ARZ_DIGITAL_ICONS,
+  ...LOCAL_CRYPTO_ICONS
 };
 
 let cryptoIcons = { ...INITIAL_CRYPTO_ICONS };
 try {
   localStorage.removeItem('darayi-crypto-icons-v4');
-  const cachedIcons = localStorage.getItem('darayi-crypto-icons-v5');
-  if (cachedIcons) cryptoIcons = { ...cryptoIcons, ...(JSON.parse(cachedIcons) || {}) };
+  localStorage.removeItem('darayi-crypto-icons-v5');
+  const cachedIcons = localStorage.getItem('darayi-crypto-icons-v6');
+  if (cachedIcons) cryptoIcons = { ...(JSON.parse(cachedIcons) || {}), ...INITIAL_CRYPTO_ICONS };
 } catch {}
 window.cryptoIcons = cryptoIcons;
 
@@ -5510,6 +5553,8 @@ function getCryptoIcon(symOrId) {
   const key = String(symOrId).toLowerCase().trim();
   const stripped = key.replace(/^(1000+|1m)/, '');
   const alt = (stripped && stripped !== key) ? stripped : (key.startsWith('ok') && key.length > 3 ? key.slice(2) : '');
+  if (LOCAL_CRYPTO_ICONS[key]) return LOCAL_CRYPTO_ICONS[key];
+  if (alt && LOCAL_CRYPTO_ICONS[alt]) return LOCAL_CRYPTO_ICONS[alt];
   if (ARZ_DIGITAL_ICONS[key]) return ARZ_DIGITAL_ICONS[key];
   if (alt && ARZ_DIGITAL_ICONS[alt]) return ARZ_DIGITAL_ICONS[alt];
   if (window.cryptoIcons && window.cryptoIcons[key]) return window.cryptoIcons[key];
@@ -5523,36 +5568,72 @@ function getCryptoIcon(symOrId) {
 }
 
 function cryptoCoinBadge(sym, name) {
+  const symClean = String(sym || '').toLowerCase().trim();
   const text = escapeHtml((sym || name || '?').slice(0, 3).toUpperCase());
   const [c1, c2] = getBadgeColors(text);
   const fs = text.length > 2 ? '9.5px' : '11px';
-  return `<span class="asset-icon asset-icon-badge" style="background:linear-gradient(135deg, ${c1}, ${c2});color:#ffffff;font-size:${fs};font-weight:900">${text}</span>`;
+  return `<span class="asset-icon asset-icon-badge" data-icon-sym="${escapeHtml(symClean)}" data-fb="${text}" data-c1="${safeColor(c1,'#3b82f6')}" data-c2="${safeColor(c2,'#1d4ed8')}" style="background:linear-gradient(135deg, ${c1}, ${c2});color:#ffffff;font-size:${fs};font-weight:900">${text}</span>`;
 }
 
-async function loadCryptoIconsOnce() {
+function hydrateLateCryptoIcons() {
+  document.querySelectorAll('.asset-icon-badge[data-icon-sym]').forEach((el) => {
+    const rawSym = String(el.dataset.iconSym || '').toLowerCase().trim();
+    const stripped = rawSym.replace(/^(1000+|1m)/, '');
+    const sym = (stripped && stripped !== rawSym) ? stripped : (rawSym.startsWith('ok') && rawSym.length > 3 ? rawSym.slice(2) : rawSym);
+    const url = safeImgUrl(window.cryptoIcons?.[rawSym] || window.cryptoIcons?.[sym]);
+    if (!url) return;
+    const fb = el.dataset.fb || el.textContent || '?';
+    const c1 = safeColor(el.dataset.c1, '#3b82f6');
+    const c2 = safeColor(el.dataset.c2, '#1d4ed8');
+    el.className = 'asset-icon asset-icon-crypto';
+    el.removeAttribute('style');
+    el.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(fb)}" class="crypto-logo-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-sym="${escapeHtml(rawSym)}" data-fb="${escapeHtml(fb)}" data-c1="${c1}" data-c2="${c2}">`;
+  });
+}
+
+async function loadCryptoIconsOnce(forceCheck = false) {
   if (window._cryptoIconsLoaded) return;
-  try {
-    const res = await fetch('/api/crypto-icons?v=5');
-    if (res.ok) {
-      const data = await res.json();
-      if (data && data.icons) {
-        window._cryptoIconsLoaded = true;
-        cryptoIcons = { ...cryptoIcons, ...data.icons };
-        window.cryptoIcons = cryptoIcons;
-        if (Object.keys(data.icons).length >= 250) {
-          try { localStorage.setItem('darayi-crypto-icons-v5', JSON.stringify(cryptoIcons)); } catch {}
-        }
-        renderFeatured();
-        if (typeof renderMarketMovers === 'function') renderMarketMovers();
-        renderMarket();
-        renderHoldings();
-        renderAlertsPreview();
-        updateConverterButtonsUI();
-      }
-    }
-  } catch (e) {
-    console.debug('Crypto icons fetch:', e);
+  const localCount = Object.keys(LOCAL_CRYPTO_ICONS).length;
+  if (localCount >= 1000 && !forceCheck) {
+    const hasUncovered = Array.isArray(assets) && assets.some((a) => {
+      if (!a || a.cat !== 'crypto') return false;
+      const key = String(a.symbol || a.id || '').toLowerCase().trim();
+      const stripped = key.replace(/^(1000+|1m)/, '');
+      const alt = (stripped && stripped !== key) ? stripped : (key.startsWith('ok') && key.length > 3 ? key.slice(2) : '');
+      if (!REAL_X_CRYPTOS_CLIENT.has(key) && /^x[a-z]{1,6}$/.test(key)) return false;
+      return !(window.cryptoIcons?.[key] || (alt && window.cryptoIcons?.[alt]));
+    });
+    if (!hasUncovered) return;
   }
+  if (window._cryptoIconsJob) return window._cryptoIconsJob;
+  window._cryptoIconsJob = (async () => {
+    try {
+      const res = await fetch('/api/crypto-icons?v=7');
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.icons) {
+          window._cryptoIconsLoaded = true;
+          cryptoIcons = { ...cryptoIcons, ...data.icons, ...LOCAL_CRYPTO_ICONS };
+          window.cryptoIcons = cryptoIcons;
+          if (Object.keys(data.icons).length >= 250) {
+            try { localStorage.setItem('darayi-crypto-icons-v6', JSON.stringify(cryptoIcons)); } catch {}
+          }
+          renderFeatured();
+          if (typeof renderMarketMovers === 'function') renderMarketMovers();
+          renderMarket();
+          renderHoldings();
+          renderAlertsPreview();
+          updateConverterButtonsUI();
+          hydrateLateCryptoIcons();
+        }
+      }
+    } catch (e) {
+      console.debug('Crypto icons fetch:', e);
+    } finally {
+      window._cryptoIconsJob = null;
+    }
+  })();
+  return window._cryptoIconsJob;
 }
 
 const COUNTRY_FLAGS = {
@@ -5602,8 +5683,11 @@ function getCountryFlag(symOrId) {
   if (!symOrId) return null;
   const key = String(symOrId).toLowerCase().trim();
   const code = COUNTRY_FLAGS[key];
-  if (code) return `https://cdn.jsdelivr.net/gh/HatScripts/circle-flags@gh-pages/flags/${code}.svg`;
-  return null;
+  if (!code) return null;
+  if (typeof LOCAL_FLAG_CODES !== 'undefined' && LOCAL_FLAG_CODES.has(code)) {
+    return `/logos/flags/${code}.svg`;
+  }
+  return `https://cdn.jsdelivr.net/gh/HatScripts/circle-flags@gh-pages/flags/${code}.svg`;
 }
 
 function goldBarSvg(label = '999.9', isSilver = false) {
@@ -6885,7 +6969,7 @@ function isConnectionFreshForSmartRefresh() {
   const wsStreaming = Boolean(ws && ws.readyState === WebSocket.OPEN && lastWs > 0 && (now - lastWs < 15000) && lastServerReceiveTime > 0 && (now - lastServerReceiveTime < 300000));
   return recentHttp || wsStreaming;
 }
-async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();lastServerReceiveTime=Date.now();consecutivePriceFails=0;serverConnected=true;const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(!hasFreshPricesLoaded||Date.now()-lastSparkClearTime>900000){sparkSeen.clear();lastSparkClearTime=Date.now();}hasFreshPricesLoaded=true;}
+async function loadPrices(manual=false){if(priceJob)return priceJob;priceJob=(async()=>{try{const j=await api('/api/prices'+(manual?'?refresh=1':''),{cache:'no-store',signal:AbortSignal.timeout(30000)});lastPriceFetchTime=Date.now();lastServerReceiveTime=Date.now();consecutivePriceFails=0;serverConnected=true;const r0=applyPrices(j.items);let n=r0.n,added=r0.added,sig=r0.sig;if(n){savePriceCache(j.items);if(!hasFreshPricesLoaded||Date.now()-lastSparkClearTime>120000){sparkSeen.clear();if(!hasFreshPricesLoaded){sparkSvgCache.clear();sparkSvgMeta.clear();}else{const nowMs=Date.now();for(const [sid,meta] of sparkSvgMeta){if(nowMs-(meta?.at||0)>120000){sparkSvgCache.delete(sid);sparkSvgMeta.delete(sid);}}}lastSparkClearTime=Date.now();}hasFreshPricesLoaded=true;if(added)loadCryptoIconsOnce(false);}
 state.lastSync=j.updatedAt?new Date(j.updatedAt*1000).toISOString():null;window.feedStatus=j.feeds||{};evaluateAlerts();if(added){renderAll();}else if(sig!==lastPriceSig||manual){softRender();if($('#portfolio')?.classList.contains('active'))renderPortfolio();}lastPriceSig=sig;snapshot();updateTrust();if(!splashPending&&!statusIntroTriggered)triggerServerStatusIntro();hydrateSparks();if(manual)toast(n?'قیمت‌ها از سرور دریافت شدند.':'قیمتی دریافت نشد؛ وضعیت اتصال را بررسی کن.');return n>0}catch(e){consecutivePriceFails++;const wsAlive=Boolean(lastWs&&Date.now()-lastWs<25000);const recentHttp=Boolean(lastServerReceiveTime>0&&Date.now()-lastServerReceiveTime<45000);if(navigator.onLine===false){serverConnected=false;}else if(serverConnected===true){if(consecutivePriceFails>=3&&!wsAlive&&!recentHttp){serverConnected=false;}else if(consecutivePriceFails===1&&!manual){setTimeout(()=>{if(!document.hidden)loadPrices(false);},2500);}}else{if(wsAlive){serverConnected=true;if(!lastServerReceiveTime)lastServerReceiveTime=Date.now();}else if(consecutivePriceFails>=2||manual){serverConnected=false;}else{setTimeout(()=>{if(!document.hidden)loadPrices(false);},2000);}}if($('#syncStatus'))$('#syncStatus').textContent='دریافت ناموفق؛ '+(e.message==='no_api'?'سایت باید روی Worker باز شود.':e.message);updateTrust();if(!splashPending&&!statusIntroTriggered&&serverConnected!==null)triggerServerStatusIntro();hydrateSparks();if(manual)toast('قیمت تازه دریافت نشد؛ آخرین داده با زمان خودش نمایش داده می‌شود.');return false}finally{priceJob=null}})();return priceJob;}
 let syncCryptoActive = false;
 async function syncCrypto(){
@@ -7114,18 +7198,36 @@ function validateClientHistory(rawPoints, range, a) {
   }
   return pts.length >= 2 ? pts : [];
 }
+let detailChartInFlight = 0;
 async function loadChart(a, r, allowFallback = false) {
   const req = ++chartReq, box = $('#detailChart');
-  box.innerHTML = '<span class="muted">در حال دریافت و راستی‌آزمایی تاریخچه…</span>';
-  let pts = await getHistory(a.id, r);
-  if (pts.length < 2 && allowFallback && (r === '1D' || r === '1H')) {
-    r = '1W';
-    pts = await getHistory(a.id, '1W');
-    $$('#detailRanges button').forEach(x => x.classList.toggle('active', x.dataset.detailRange === '1W'));
+  const cachedKey = a.id + ':' + r;
+  const cachedHit = histories.get(cachedKey);
+  const cachedTtlMs = (r === '1H' || r === '1D') ? 60000 : 600000;
+  if (cachedHit && cachedHit.points?.length >= 2 && Date.now() - cachedHit.at < cachedTtlMs) {
+    const validCached = validateClientHistory(cachedHit.points, r, a);
+    if (validCached.length >= 2) {
+      detailState = { id: a.id, range: r, points: validCached };
+      drawDetail();
+      return;
+    }
   }
-  if (req !== chartReq || !$('#detailChart')) return;
-  detailState = { id: a.id, range: r, points: pts };
-  drawDetail();
+  box.innerHTML = '<span class="muted">در حال دریافت و راستی‌آزمایی تاریخچه…</span>';
+  detailChartInFlight++;
+  try {
+    let pts = await getHistory(a.id, r);
+    if (pts.length < 2 && allowFallback && (r === '1D' || r === '1H')) {
+      r = '1W';
+      pts = await getHistory(a.id, '1W');
+      $$('#detailRanges button').forEach(x => x.classList.toggle('active', x.dataset.detailRange === '1W'));
+    }
+    if (req !== chartReq || !$('#detailChart')) return;
+    detailState = { id: a.id, range: r, points: pts };
+    drawDetail();
+  } finally {
+    detailChartInFlight = Math.max(0, detailChartInFlight - 1);
+    if (detailChartInFlight === 0) drainSparks();
+  }
 }
 let detailState=null;
 function formatAxisTime(ts, range, isDomestic) {
@@ -7175,6 +7277,9 @@ function drawDetail(){
   if(cap)cap.style.direction='ltr';
   const end=cap?.lastElementChild;
   if(end)end.textContent=formatAxisTime(pts.at(-1)[0],range,isDomestic);
+  if(range==='1D'){
+    renderSparkFromPoints(a.id,detailState.points,'1D');
+  }
 }
 const histories=new Map(),historyBusy=new Map();
 async function getHistory(id,range='1D'){
@@ -7230,12 +7335,16 @@ function withCurrent(points, a, range = '1D') {
 }
 let sparkActive=0;const sparkQueue=[];const sparkSeen=new Set();
 function enqueueSpark(id){
-  if(!id||sparkSvgCache.has(id)||sparkSeen.has(id))return;
+  if(!id||sparkSeen.has(id))return;
+  const meta=sparkSvgMeta.get(id);
+  if(sparkSvgCache.has(id)&&meta&&(Date.now()-meta.at<120000))return;
   sparkSeen.add(id);
   sparkQueue.push(id);
 }
 function drainSparks(){
-  while(sparkActive<8&&sparkQueue.length){
+  if(detailChartInFlight>0)return;
+  while(sparkActive<4&&sparkQueue.length){
+    if(detailChartInFlight>0)return;
     const id=sparkQueue.shift();
     sparkActive++;
     const a=asset(id);
@@ -7244,24 +7353,19 @@ function drainSparks(){
       sparkSeen.delete(id);
       continue;
     }
-    const isCryptoOrUsdt=(a.cat==='crypto'||a.id==='usdt');
-    const targetRange=isCryptoOrUsdt?'1D':'1W';
+    const targetRange='1D';
     getHistory(id,targetRange).then(async points=>{
       let usedRange=targetRange;
       let curA=asset(id);
       let p=withCurrent(points,curA,usedRange);
-      if(p.length<2&&isCryptoOrUsdt){
+      if(p.length<2){
         usedRange='1W';
         const fallbackPts=await getHistory(id,'1W');
         curA=asset(id);
         p=withCurrent(fallbackPts,curA,'1W');
       }
       if(p.length>=2){
-        const chg=Number.isFinite(curA.change)&&usedRange==='1D'?curA.change:(p[0][1]>0?((p.at(-1)[1]-p[0][1])/p[0][1])*100:0);
-        const isUp=chg>=0;
-        const svg=chartSVG(p,isUp?'#10b981':'#f43f5e',true,true);
-        sparkSvgCache.set(id,svg);
-        document.querySelectorAll('[data-spark="'+id+'"]').forEach(el=>{el.innerHTML=instantiateSparkSvg(svg);});
+        renderSparkFromPoints(id,p,usedRange);
       }else if(!sparkSvgCache.has(id)){
         document.querySelectorAll('[data-spark="'+id+'"]').forEach(el=>{el.innerHTML='';});
       }
@@ -7318,21 +7422,21 @@ function prefetchUpcomingAssets() {
     const id = el.dataset.spark;
     if (!id || sparkSvgCache.has(id) || sparkSeen.has(id)) return;
     const r = el.getBoundingClientRect();
-    if (r.top < vh + 2200 && r.bottom > -600) {
+    if (r.top < vh + 900 && r.bottom > -400) {
       sparkObserver.unobserve(el);
       enqueueSpark(id);
     }
   });
   document.querySelectorAll('[data-detail]').forEach(card => {
     const r = card.getBoundingClientRect();
-    if (r.top < vh + 2400 && r.bottom > -600) {
+    if (r.top < vh + 1200 && r.bottom > -400) {
       const a = asset(card.dataset.detail);
       const u = assetIconUrl(a);
       if (u) enqueuePreloadIcon(u);
     }
   });
   if (Array.isArray(lastFilteredMarket) && lastFilteredMarket.length > marketLimit) {
-    const upcomingSlice = lastFilteredMarket.slice(marketLimit, marketLimit + 60);
+    const upcomingSlice = lastFilteredMarket.slice(marketLimit, marketLimit + 12);
     for (const a of upcomingSlice) {
       if (!a?.id) continue;
       enqueueSpark(a.id);
@@ -8561,6 +8665,32 @@ async function renderAdmin() {
             </div>
           `).join('')}
         </div>
+
+        ${viewerIsPrimary ? `
+          <div class="settings-card" style="margin-top:16px">
+            <h3 style="margin:0 0 4px">انتقال امن دارایی‌ها بین حساب‌ها</h3>
+            <p class="muted" style="font-size:11px;margin:0 0 12px;line-height:1.7">انتقال رکوردهای دارایی، واچ‌لیست و هشدارها بدون حذف حساب مبدا، همراه با پشتیبان‌گیری خودکار قبل از نوشتن و جلوگیری از ثبت تکراری یا بازنویسی اطلاعات.</p>
+            <datalist id="transferAccountList">
+              <option value="admin_root">admin_root (حساب مدیر قدیمی)</option>
+              ${users.map(u => `<option value="${escapeHtml(u.email)}">${escapeHtml(u.name || u.email)} (${escapeHtml(u.id)})</option>`).join('')}
+            </datalist>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-bottom:10px">
+              <div class="field">
+                <label>حساب مبدا (ایمیل یا شناسه)</label>
+                <input id="transferSourceInput" list="transferAccountList" placeholder="مثلاً admin_root یا ایمیل قبلی" value="admin_root" style="direction:ltr;text-align:left">
+              </div>
+              <div class="field">
+                <label>حساب مقصد (ایمیل یا شناسه)</label>
+                <input id="transferTargetInput" list="transferAccountList" placeholder="ایمیل حساب اصلی" value="${escapeHtml(state.user?.email || '')}" style="direction:ltr;text-align:left">
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="btn btn-soft" id="transferDryRunBtn" type="button" style="height:38px;border-radius:10px;font-size:11.5px">پیش‌نمایش انتقال (بدون تغییر)</button>
+              <button class="btn btn-lime" id="transferExecuteBtn" type="button" style="height:38px;border-radius:10px;font-size:11.5px;font-weight:800">پشتیبان‌گیری و انتقال امن</button>
+            </div>
+            <div id="transferResultBox" style="margin-top:10px;font-size:11.5px;color:var(--muted)"></div>
+          </div>
+        ` : ''}
       `;
 
       let activeUserFilter = 'all';
@@ -8676,6 +8806,44 @@ async function renderAdmin() {
             btn.disabled = false;
           }
         };
+      });
+
+      const runAssetTransfer = async (dryRun) => {
+        const source = ($('#transferSourceInput')?.value || '').trim();
+        const target = ($('#transferTargetInput')?.value || '').trim();
+        const box = $('#transferResultBox');
+        if (!source || !target) {
+          toast('لطفاً مبدا و مقصد انتقال را وارد کنید.');
+          return;
+        }
+        if (box) box.textContent = dryRun ? 'در حال بررسی رکوردها…' : 'در حال ایجاد بکاپ و انتقال امن…';
+        try {
+          const res = await api('/api/admin/users/transfer-assets', {
+            method: 'POST',
+            body: JSON.stringify({ source, target, dryRun })
+          });
+          const s = res.summary || {};
+          if (box) {
+            box.innerHTML = `<div style="padding:10px 12px;border-radius:12px;background:var(--bg);border:1px solid var(--line);line-height:1.8;color:var(--ink)">
+              <div><b>${res.dryRun ? 'پیش‌نمایش انتقال (هیچ تغییری اعمال نشد):' : 'انتقال امن با موفقیت انجام شد:'}</b></div>
+              <div>دارایی‌های مبدا: <b>${fmt.format(s.sourceHoldings || 0)}</b> · افزوده‌شده به مقصد: <b style="color:var(--green)">${fmt.format(s.addedHoldings || 0)}</b> · تکراری صرف‌نظرشده: <b>${fmt.format(s.skippedDuplicateHoldings || 0)}</b></div>
+              <div>واچ‌لیست جدید: <b>${fmt.format(s.addedWatch || 0)}</b> · هشدارهای جدید: <b>${fmt.format(s.addedAlerts || 0)}</b></div>
+              ${res.backupKey ? `<div style="direction:ltr;text-align:right;font-size:10.5px;color:var(--muted);margin-top:4px">Backup Key: ${escapeHtml(res.backupKey)}</div>` : ''}
+            </div>`;
+          }
+          toast(res.dryRun ? 'پیش‌نمایش انتقال آماده شد' : 'انتقال امن دارایی‌ها همراه با بکاپ انجام شد');
+          if (!res.dryRun) {
+            try { await syncFromServer(true); } catch {}
+          }
+        } catch (err) {
+          if (box) box.innerHTML = `<span style="color:var(--red)">خطا: ${escapeHtml(err.message)}</span>`;
+          toast('خطا: ' + err.message);
+        }
+      };
+
+      $('#transferDryRunBtn')?.addEventListener('click', () => runAssetTransfer(true));
+      $('#transferExecuteBtn')?.addEventListener('click', () => {
+        askConfirm('ابتدا از داده‌های هر دو حساب نسخه پشتیبان تهیه می‌شود و سپس فقط موارد غیرتکراری بدون حذف داده قبلی منتقل می‌شوند. ادامه می‌دهید؟', () => runAssetTransfer(false));
       });
     } catch (e) {
       container.innerHTML = `<div class="empty" style="padding:20px">خطا در دریافت کاربران: ${escapeHtml(e.message)}</div>`;
@@ -9009,6 +9177,13 @@ async function renderAdmin() {
               ذخیره تنظیمات هسته سامانه
             </button>
           </div>
+
+          <div class="settings-card" style="margin-top:6px">
+            <h3 style="margin:0 0 4px">وضعیت و اجرای امن Migration دیتابیس (D1)</h3>
+            <p class="muted" style="font-size:11px;margin:0 0 10px;line-height:1.7">بررسی جدول <code>schema_migrations</code> و ایجاد ایمن ستون‌ها یا ایندکس‌های ناقص بدون حذف هیچ رکورد یا جدول قبلی.</p>
+            <div id="admMigrationStatusBox" style="font-size:11.5px;color:var(--muted);margin-bottom:10px">در حال بررسی وضعیت دیتابیس…</div>
+            <button class="btn btn-soft" id="admRunMigrationsBtn" type="button" style="height:38px;border-radius:10px;font-size:11.5px;font-weight:800">اجرای امن Migration بدون حذف داده</button>
+          </div>
         </div>
       `;
 
@@ -9027,6 +9202,39 @@ async function renderAdmin() {
           toast('تنظیمات هسته با موفقیت ذخیره شد');
         } catch (err) {
           toast('خطا: ' + err.message);
+        }
+      });
+
+      const refreshMigrationBox = async () => {
+        const mBox = $('#admMigrationStatusBox');
+        if (!mBox) return;
+        try {
+          const ms = await api('/api/admin/migrations');
+          const migCount = Array.isArray(ms.migrations) ? ms.migrations.length : 0;
+          const missIdx = Array.isArray(ms.missingIndexes) ? ms.missingIndexes.length : 0;
+          const missCol = Array.isArray(ms.missingColumns) ? ms.missingColumns.length : 0;
+          mBox.innerHTML = `<div style="padding:10px 12px;border-radius:12px;background:var(--bg);border:1px solid var(--line);line-height:1.8;color:var(--ink)">
+            <div>وضعیت کلی: <b style="color:${ms.healthy ? 'var(--green)' : 'var(--orange)'}">${ms.healthy ? 'سالم و هماهنگ' : 'نیازمند همگام‌سازی'}</b></div>
+            <div>تعداد Migrationهای ثبت‌شده: <b>${fmt.format(migCount)}</b> · ایندکس‌های ناقص: <b>${fmt.format(missIdx)}</b> · ستون‌های ناقص: <b>${fmt.format(missCol)}</b></div>
+          </div>`;
+        } catch (err) {
+          mBox.textContent = 'خطا در بررسی وضعیت Migration: ' + err.message;
+        }
+      };
+      refreshMigrationBox();
+      $('#admRunMigrationsBtn')?.addEventListener('click', async e => {
+        const btn = e.currentTarget;
+        btn.disabled = true;
+        btn.textContent = 'در حال اجرا…';
+        try {
+          await api('/api/admin/migrations/run', { method: 'POST' });
+          toast('Migration با موفقیت و بدون حذف داده اجرا شد');
+          await refreshMigrationBox();
+        } catch (err) {
+          toast('خطا: ' + err.message);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'اجرای امن Migration بدون حذف داده';
         }
       });
     } catch (e) {
@@ -9075,7 +9283,10 @@ function renderAll() {
   document.documentElement.dataset.theme = state.theme;
   document.documentElement.style.colorScheme = isDark ? 'dark' : 'light';
   document.documentElement.style.backgroundColor = isDark ? '#0b0d11' : '#f8fafc';
+  if (document.body) document.body.style.backgroundColor = isDark ? '#0b0d11' : '#f8fafc';
   if ($('#themeBtn')) $('#themeBtn').innerHTML = isDark ? SUN_SVG : MOON_SVG;
+  const cm = $('#colorSchemeMeta') || $('meta[name=color-scheme]');
+  if (cm) cm.setAttribute('content', isDark ? 'dark' : 'light');
   const tc = $('#themeColorMeta') || $('meta[name=theme-color]');
   if (tc) tc.content = isDark ? '#0b0d11' : '#f8fafc';
   const am = $('#appleStatusMeta') || $('meta[name=apple-mobile-web-app-status-bar-style]');
