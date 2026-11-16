@@ -19,7 +19,10 @@ import {
   parseBinanceKlineEntry,
   buildHistoryMetadata,
   normalizeCryptoIconName,
-  resolveCryptoIconByAssetId
+  resolveCryptoIconByAssetId,
+  filterIsolatedHistorySpikes,
+  pruneStaleCryptoItems,
+  setBoundedMapEntry
 } from './src/modules/market-core.js';
 import { buildLocalCryptoIconsMap } from './src/modules/local-icons.js';
 import {
@@ -902,9 +905,11 @@ async function updateAllPrices(force = false) {
 
           if (rows.length < 15) throw new Error('insufficient tickers');
 
+          const freshCryptoIds = new Set<string>();
           for (const x of rows) {
             const base = String(x.base);
             const id = base.toLowerCase();
+            freshCryptoIds.add(id);
             const srcTs = (Number.isFinite(x.ts) && x.ts > 1500000000 && x.ts <= now + 300) ? Math.floor(x.ts) : null;
             put(id, x.last, x.open > 0 ? (x.last / x.open - 1) * 100 : null, name, srcTs, 'USDT', {
               crypto: 1,
@@ -915,6 +920,7 @@ async function updateAllPrices(force = false) {
               priceType: 'last'
             });
           }
+          pruneStaleCryptoItems(items, freshCryptoIds);
           feeds.crypto = { ok: true, checkedAt: now, count: rows.length, source: name };
           return;
         } catch (e: any) {
@@ -1135,13 +1141,14 @@ function validateHistoryPoints(
       filtered.push(deduped[i]);
     }
   }
-  if (filtered.length < 2) return [];
+  const despiked = filterIsolatedHistorySpikes(filtered, isDomestic);
+  if (despiked.length < 2) return [];
 
   const isIntraday = range === '1H' || range === '1D';
   const cryptoBucketLead = isIntraday ? 300 : 86400;
   const minTs = isDomestic ? (now - span) : (now - span - cryptoBucketLead);
   const maxTs = now + (isIntraday ? 60 : 3600);
-  const pts = filtered.filter((p) => p[0] >= minTs && p[0] <= maxTs);
+  const pts = despiked.filter((p) => p[0] >= minTs && p[0] <= maxTs);
   if (pts.length < 2) return [];
 
   const validRefTs = Number(refTs) > 1500000000 ? Math.floor(Number(refTs)) : 0;
@@ -1166,7 +1173,7 @@ async function fetchIranMarketDailyRaw(sym: string): Promise<any | null> {
   try {
     const j = await fetchJSON(`https://iran-market.github.io/data/history/${encodeURIComponent(sym)}.json`, 7);
     if (j) {
-      dailyArchiveMemCache.set('im:' + sym, { at: now, im: j });
+      setBoundedMapEntry(dailyArchiveMemCache, 'im:' + sym, { at: now, im: j }, 120);
       return j;
     }
   } catch {}
@@ -1180,7 +1187,7 @@ async function fetchNerkharaDailyRaw(naId: string): Promise<any | null> {
   try {
     const j = await fetchJSON(`https://nerkhara.com/api/v1/history/${encodeURIComponent(naId)}.json`, 7);
     if (j) {
-      dailyArchiveMemCache.set('na:' + naId, { at: now, na: j });
+      setBoundedMapEntry(dailyArchiveMemCache, 'na:' + naId, { at: now, na: j }, 120);
       return j;
     }
   } catch {}
@@ -1345,16 +1352,18 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
       const isToman = j?.meta?.unit === 'toman' || j?.meta?.currency === 'IRT';
       const div = isToman ? 1 : 10;
       if (Array.isArray(records) && records.length >= 2) {
-        const out: [number, number][] = [];
-        for (const rec of records.slice(-maxSlice)) {
+        const parsedOut: [number, number][] = [];
+        for (const rec of records) {
           const closeRaw = Number(rec.close);
           if (!(closeRaw > 0)) continue;
           const closeToman = Math.round(closeRaw / div);
           const baseTs = parseArchiveRecTs(rec);
           if (baseTs >= minTs && baseTs <= now + 3600) {
-            out.push([baseTs, closeToman]);
+            parsedOut.push([baseTs, closeToman]);
           }
         }
+        parsedOut.sort((a, b) => a[0] - b[0]);
+        const out = parsedOut.slice(-maxSlice);
         for (const pt of recentIntraday) out.push(pt);
         if (curPrice > 0 && curTs >= minTs && curTs <= now + 3600 && curTs > (out.at(-1)?.[0] || 0)) {
           out.push([curTs, curPrice]);
@@ -1369,17 +1378,19 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
       const j = naMultiSettled.value;
       const pts = j?.points;
       if (Array.isArray(pts) && pts.length >= 2) {
-        const out: [number, number][] = [];
-        for (const row of pts.slice(-maxSlice)) {
+        const parsedOut: [number, number][] = [];
+        for (const row of pts) {
           if (!Array.isArray(row) || row.length < 2) continue;
           const dateStr = String(row[0] || '').trim();
           const val = Math.round(Number(row[1]));
           if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !(val > 0)) continue;
           const ts = Math.floor(Date.parse(`${dateStr}T12:00:00Z`) / 1000);
           if (Number.isFinite(ts) && ts >= minTs && ts <= now + 3600) {
-            out.push([ts, val]);
+            parsedOut.push([ts, val]);
           }
         }
+        parsedOut.sort((a, b) => a[0] - b[0]);
+        const out = parsedOut.slice(-maxSlice);
         for (const pt of recentIntraday) out.push(pt);
         if (curPrice > 0 && curTs >= minTs && curTs <= now + 3600 && curTs > (out.at(-1)?.[0] || 0)) {
           out.push([curTs, curPrice]);
@@ -1402,16 +1413,18 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
     const endDaysIdx = text.indexOf(']]', daysIdx);
     if (daysIdx === -1 || endDaysIdx === -1) return { points: [], source: 'archive' };
     const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
-    const out: [number, number][] = [];
-    for (const [d, v] of days.slice(-maxSlice)) {
+    const parsedOut: [number, number][] = [];
+    for (const [d, v] of days) {
       const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
       if (!m || !(v > 0)) continue;
       const [gy, gm, gd] = jalaliToGregorian(+m[1], +m[2], +m[3]);
       const ts = Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600;
       if (ts >= minTs && ts <= now + 3600) {
-        out.push([ts, Number(v)]);
+        parsedOut.push([ts, Number(v)]);
       }
     }
+    parsedOut.sort((a, b) => a[0] - b[0]);
+    const out = parsedOut.slice(-maxSlice);
     for (const pt of recentIntraday) out.push(pt);
     if (curPrice > 0 && curTs >= minTs && curTs <= now + 3600 && curTs > (out.at(-1)?.[0] || 0)) {
       out.push([curTs, curPrice]);
@@ -1528,9 +1541,21 @@ app.get('/api/history', async (req, res) => {
         srcUsed = archRes.source || ((range === '1H' || range === '1D') ? 'd1_intraday' : 'archive');
       }
       if (pts.length >= 2) {
+        if (refP > 0 && liveRefTs > 1500000000 && liveRefTs <= now + 60) {
+          const lastPt = pts[pts.length - 1];
+          const roundedRef = Math.round(refP);
+          if (lastPt && Math.abs(roundedRef - lastPt[1]) / (lastPt[1] || roundedRef) <= 0.15) {
+            if (liveRefTs > lastPt[0]) {
+              pts = [...pts, [liveRefTs, roundedRef]];
+            } else if (liveRefTs === lastPt[0]) {
+              pts = pts.slice();
+              pts[pts.length - 1] = [lastPt[0], roundedRef];
+            }
+          }
+        }
         const meta = buildHistoryMetadata({ id, range, source: srcUsed, points: pts, liveItem: item, nowSec: now, isDomestic: true });
         const payload = { id, range, currency: 'IRT', ...meta, points: pts };
-        historyMemCache.set(cacheKey, { at: now, data: payload });
+        setBoundedMapEntry(historyMemCache, cacheKey, { at: now, data: payload }, 400);
         return res.json(payload);
       }
       return res.json({ id, range, currency: 'IRT', points: [], unavailable: true, reason: 'insufficient_real_points' });
@@ -1557,7 +1582,7 @@ app.get('/api/history', async (req, res) => {
         const firstHit = await tryExchangeKlines(exchangeOrder[0]);
         const meta = buildHistoryMetadata({ id, range, source: firstHit.name, points: firstHit.points, liveItem: item, nowSec: now, isDomestic: false });
         const payload = { id, range, currency: 'USDT', ...meta, points: firstHit.points };
-        historyMemCache.set(cacheKey, { at: now, data: payload });
+        setBoundedMapEntry(historyMemCache, cacheKey, { at: now, data: payload }, 400);
         return res.json(payload);
       } catch {}
       if (exchangeOrder.length > 1) {
@@ -1565,7 +1590,7 @@ app.get('/api/history', async (req, res) => {
           const raceHit = await Promise.any(exchangeOrder.slice(1).map((name) => tryExchangeKlines(name)));
           const meta = buildHistoryMetadata({ id, range, source: raceHit.name, points: raceHit.points, liveItem: item, nowSec: now, isDomestic: false });
           const payload = { id, range, currency: 'USDT', ...meta, points: raceHit.points };
-          historyMemCache.set(cacheKey, { at: now, data: payload });
+          setBoundedMapEntry(historyMemCache, cacheKey, { at: now, data: payload }, 400);
           return res.json(payload);
         } catch {}
       }
@@ -1599,7 +1624,7 @@ app.get('/api/history', async (req, res) => {
       ...meta,
       points
     };
-    historyMemCache.set(cacheKey, { at: now, data: payload });
+    setBoundedMapEntry(historyMemCache, cacheKey, { at: now, data: payload }, 400);
     return res.json(payload);
   } catch (e) {
     return res.json({ id, range, currency: item?.unit || 'IRT', points: [], unavailable: true });
@@ -2727,14 +2752,29 @@ app.post('/api/admin/settings', (req, res) => {
   res.json({ ok: true, settings: systemSettings });
 });
 
-app.post('/api/admin/clear-cache', (req, res) => {
-  cachedPrices.items = {};
-  cachedPrices.updatedAt = 0;
+app.post('/api/admin/clear-cache', async (req, res) => {
+  const reqAdmin = await resolveReqUser(req);
+  if (!reqAdmin || !reqAdmin.isAdmin) {
+    return res.status(403).json({ error: 'دسترسی فقط برای مدیر سیستم مجاز است.' });
+  }
+  cachedPrices = { version: KV_SNAPSHOT_VERSION, items: {}, updatedAt: 0, checkedAt: 0, feeds: {} };
+  lastFetchTime = 0;
+  historyMemCache.clear();
+  dailyArchiveMemCache.clear();
+  domesticIntradayTicks.clear();
+  domesticPrevCloseCache = null;
+  domesticPrevCloseTime = 0;
+  dynamicCryptoIconsCache = null;
+  dynamicCryptoIconsTime = 0;
+  dynamicCryptoIconsJob = null;
+  try {
+    if (fs.existsSync(CACHE_FILE)) fs.unlinkSync(CACHE_FILE);
+  } catch {}
   systemAuditLogs.unshift({
     id: Date.now(),
     time: 'هم‌اکنون',
     type: 'system',
-    msg: 'حافظه موقت کش قیمت‌ها توسط مدیر تخلیه شد.'
+    msg: 'تمام لایه‌های کش موقت قیمت، نمودار و آیکون‌ها توسط مدیر تخلیه شد.'
   });
   res.json({ ok: true });
 });

@@ -2058,12 +2058,12 @@ test('wrangler.toml sets keep_vars = true and dark mode viewport styling + SW v1
   assert.ok(html.includes('<meta name="color-scheme" id="colorSchemeMeta" content="light">'));
   assert.ok(html.includes(':root[data-theme=dark],html[data-theme=dark]'));
   assert.ok(html.includes('document.body.style.backgroundColor'));
-  assert.ok(html.includes('/sw.js?v=12'));
+  assert.ok(html.includes('/sw.js?v=13'));
 
   const swFile = fs.readFileSync(new URL('./public/sw.js', import.meta.url), 'utf8');
-  assert.ok(swFile.includes("darayi-shell-v12"));
+  assert.ok(swFile.includes("darayi-shell-v13"));
   const workerSrc = fs.readFileSync(new URL('./src/worker.js', import.meta.url), 'utf8');
-  assert.ok(workerSrc.includes("darayi-shell-v12"));
+  assert.ok(workerSrc.includes("darayi-shell-v13"));
 });
 
 test('shared Promises eliminated in worker.js while concurrent refreshPrices still coalesces without cross-request Promise sharing', async () => {
@@ -2929,6 +2929,160 @@ test('crypto icon mapping resolves by unique asset id/slug first and blocks wron
   assert.ok(html.includes('دقت نمونه‌برداری'));
   assert.ok(html.includes('وضعیت داده'));
 });
+
+test('filterIsolatedHistorySpikes removes single-point glitch while preserving real drops/rallies, and splitHistoryGapSegments breaks genuine gaps', async () => {
+  const { filterIsolatedHistorySpikes, splitHistoryGapSegments } = await import('./src/modules/market-core.js');
+  const t0 = 1700000000;
+
+  // Single-tick outlier glitch (100 -> 145 -> 101): neighbors within 1%, middle spikes +44% -> removed
+  const withSpike = [
+    [t0, 100],
+    [t0 + 300, 101],
+    [t0 + 600, 145],
+    [t0 + 900, 101.5],
+    [t0 + 1200, 102]
+  ];
+  const cleaned = filterIsolatedHistorySpikes(withSpike, true);
+  assert.deepEqual(cleaned.map(p => p[1]), [100, 101, 101.5, 102]);
+
+  // Genuine crash/trend (100 -> 70 -> 68): neighbors differ widely (32%), NOT removed
+  const genuineCrash = [
+    [t0, 100],
+    [t0 + 300, 70],
+    [t0 + 600, 68]
+  ];
+  assert.deepEqual(filterIsolatedHistorySpikes(genuineCrash, false).map(p => p[1]), [100, 70, 68]);
+
+  // Gap segmentation breaks across real outage gap (>7200s for 1D crypto) while keeping domestic overnight closure connected
+  const gapped = [
+    [t0, 100],
+    [t0 + 300, 101],
+    [t0 + 10800, 105],
+    [t0 + 11100, 106]
+  ];
+  const segs = splitHistoryGapSegments(gapped, '1D', false);
+  assert.equal(segs.length, 2);
+  assert.equal(segs[0].length, 2);
+  assert.equal(segs[1].length, 2);
+  assert.equal(splitHistoryGapSegments(gapped, '1D', true).length, 1);
+  assert.equal(splitHistoryGapSegments([[t0, 100], [t0 + 80000, 105]], '1D', true).length, 2);
+});
+
+test('pruneStaleCryptoItems drops delisted/stale crypto coins on healthy feed while preserving on failed/partial feed', async () => {
+  const { pruneStaleCryptoItems } = await import('./src/modules/market-core.js');
+  const sampleItems = {
+    usd: { price: 89000, kind: 'domestic' },
+    usdt: { price: 90000, kind: 'domestic' },
+    btc: { price: 95000, kind: 'crypto' },
+    eth: { price: 3200, kind: 'crypto' },
+    deadcoin: { price: 0.4, kind: 'crypto' }
+  };
+  const smallFeed = new Set(['btc', 'eth']);
+  assert.equal(pruneStaleCryptoItems(sampleItems, smallFeed), 0);
+  assert.ok(sampleItems.deadcoin, 'Partial feed must not prune snapshot items');
+
+  const fullFreshIds = new Set(Array.from({ length: 18 }, (_, idx) => idx === 0 ? 'btc' : idx === 1 ? 'eth' : `coin${idx}`));
+  const pruned = pruneStaleCryptoItems(sampleItems, fullFreshIds);
+  assert.equal(pruned, 1);
+  assert.equal(sampleItems.deadcoin, undefined);
+  assert.ok(sampleItems.btc && sampleItems.eth && sampleItems.usd && sampleItems.usdt);
+});
+
+test('POST /api/admin/clear-cache clears KV, D1 kv, edge cache, and isolate memory while preserving user accounts and price_history_v2', async () => {
+  __resetWorkerStateForTests();
+  const now = Math.floor(Date.now() / 1000);
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+
+  const kvStore = new Map([
+    [KV_SNAPSHOT_KEY, '{"ts":1,"items":{}}'],
+    ['hist_cache:usdt:1D', '{"points":[]}'],
+    ['backup:asset_transfer:keep', '{"keep":true}']
+  ]);
+  const deletedKvKeys = [];
+  const mockKv = {
+    async get(k, opts) {
+      const raw = kvStore.get(k);
+      return raw && opts?.type === 'json' ? JSON.parse(raw) : raw;
+    },
+    async put(k, v) { kvStore.set(k, v); },
+    async delete(k) { deletedKvKeys.push(k); kvStore.delete(k); }
+  };
+
+  db.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?)').run('prices', '{"items":{}}', now);
+  db.prepare('INSERT INTO kv(k,v,updated_at) VALUES(?,?,?)').run('backup:keep_me', '{"ok":1}', now);
+  db.prepare('INSERT INTO price_history_v2(asset_id,t,price) VALUES(?,?,?)').run('usd', now - 600, 89000);
+
+  const ownerEmail = 'owner-clear@example.com';
+  const env = {
+    DB,
+    PRICES_KV: mockKv,
+    ADMIN_EMAIL: ownerEmail,
+    ADMIN_PASSWORD: 'OwnerClearPass!123',
+    AUTH_SECRET: 'test-auth-secret-key-minimum-32-chars!!'
+  };
+  const ownerPassHash = await hashPassword('OwnerClearPass!123', env);
+  db.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)').run('u_clear', ownerEmail, 'Owner', ownerPassHash, now - 100);
+
+  const callApi = (path, { method = 'GET', body, token } = {}) =>
+    worker.fetch(
+      new Request(`https://darayi.example${path}`, {
+        method,
+        headers: {
+          origin: 'https://darayi.example',
+          ...(body ? { 'content-type': 'application/json' } : {}),
+          'x-requested-with': 'XMLHttpRequest',
+          ...(token ? { authorization: `Bearer ${token}` } : {})
+        },
+        ...(body ? { body: JSON.stringify(body) } : {})
+      }),
+      env
+    );
+
+  const login = await (await callApi('/api/auth/login', { method: 'POST', body: { email: ownerEmail, password: 'OwnerClearPass!123' } })).json();
+  const clearRes = await callApi('/api/admin/clear-cache', { method: 'POST', token: login.token });
+  assert.equal(clearRes.status, 200);
+  const clearBody = await clearRes.json();
+  assert.equal(clearBody.ok, true);
+
+  assert.equal(kvStore.has(KV_SNAPSHOT_KEY), false);
+  assert.equal(kvStore.has('hist_cache:usdt:1D'), false);
+  assert.equal(kvStore.has('backup:asset_transfer:keep'), true);
+  assert.equal(db.prepare("SELECT k FROM kv WHERE k='prices'").get(), undefined);
+  assert.equal(db.prepare("SELECT k FROM kv WHERE k='backup:keep_me'").get().k, 'backup:keep_me');
+  assert.equal(db.prepare('SELECT price FROM price_history_v2 WHERE asset_id=?').get('usd').price, 89000);
+});
+
+test('All local crypto logos, 38 fiat SVG flags, and PWA manifest maskable paths exist cleanly without missing files', () => {
+  const iconsIndex = JSON.parse(fs.readFileSync(new URL('./public/logos/icons.json', import.meta.url), 'utf8'));
+  const iconKeys = Object.keys(iconsIndex);
+  assert.ok(iconKeys.length >= 2000, `Expected >=2000 local crypto logos, found ${iconKeys.length}`);
+  for (const sym of ['btc', 'eth', 'usdt', 'sol', 'xrp', 'doge', 'pepe', 'ton']) {
+    const rel = iconsIndex[sym];
+    assert.ok(rel && fs.existsSync(new URL(`./public${rel}`, import.meta.url)), `Missing critical local logo for ${sym}`);
+  }
+
+  const expectedFlags = ['ae','af','am','au','az','bh','br','ca','ch','cn','dk','eu','gb','ge','hk','in','iq','ir','jp','kg','kr','kw','kz','my','no','nz','om','qa','ru','sa','se','sg','th','tj','tm','tr','us','uz'];
+  for (const code of expectedFlags) {
+    const p = new URL(`./public/logos/flags/${code}.svg`, import.meta.url);
+    assert.ok(fs.existsSync(p) && fs.statSync(p).size > 80, `Missing or empty flag SVG: ${code}.svg`);
+  }
+
+  const pubManifest = JSON.parse(fs.readFileSync(new URL('./public/manifest.webmanifest', import.meta.url), 'utf8'));
+  const pubMaskable = pubManifest.icons.find(ic => String(ic.purpose || '').includes('maskable'));
+  const workerSrc = fs.readFileSync(new URL('./src/worker.js', import.meta.url), 'utf8');
+  assert.equal(pubMaskable.src, '/icons/icon-maskable-512.png');
+  assert.ok(workerSrc.includes("src: '/icons/icon-maskable-512.png'"));
+  assert.ok(fs.existsSync(new URL('./public/icons/icon-maskable-512.png', import.meta.url)));
+
+  // Verify index.html keeps exact 6 inline <script> blocks and zero inline on*= handlers
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+  const scriptMatches = html.match(/<script\b[^>]*>/gi) || [];
+  assert.equal(scriptMatches.length, 6, `Expected 6 <script> tags in src/index.html for CSP parity, got ${scriptMatches.length}`);
+  assert.equal(/\bon(?:error|submit|click|load|change|input)\s*=\s*["']/.test(html), false, 'Inline on*= attribute violates strict CSP');
+});
+
 
 
 

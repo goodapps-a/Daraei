@@ -356,3 +356,86 @@ export function resolveCryptoIconByAssetId(asset, maps = {}) {
   return '';
 }
 
+// حذف اسپایک‌های تک‌نقطه‌ای پرت (فقط نقطه‌ای که هر دو همسایه مجاورش در روند عادی هم‌سطح باشند اما خودش جهش/سقوط لحظه‌ای غیرعادی داشته باشد)
+export function filterIsolatedHistorySpikes(points, isDomestic = false) {
+  if (!Array.isArray(points) || points.length < 3) return Array.isArray(points) ? points : [];
+  const neighborTol = isDomestic ? 0.08 : 0.14;
+  const upRatio = isDomestic ? 1.18 : 1.30;
+  const downRatio = isDomestic ? 0.84 : 0.74;
+  const out = [points[0]];
+  for (let i = 1; i < points.length - 1; i++) {
+    const prevVal = Number(out[out.length - 1]?.[1]);
+    const curVal = Number(points[i]?.[1]);
+    const nextVal = Number(points[i + 1]?.[1]);
+    if (!(prevVal > 0) || !(curVal > 0) || !(nextVal > 0)) continue;
+    const minSide = Math.min(prevVal, nextVal);
+    const maxSide = Math.max(prevVal, nextVal);
+    const neighborsClose = ((maxSide - minSide) / minSide) <= neighborTol;
+    const isOutlier = (curVal >= maxSide * upRatio) || (curVal <= minSide * downRatio);
+    if (neighborsClose && isOutlier) {
+      continue;
+    }
+    out.push(points[i]);
+  }
+  out.push(points[points.length - 1]);
+  return out;
+}
+
+// تفکیک سگمنت‌های نمودار روی شکاف‌های واقعی زمانی تا بازه‌های قطع‌شده با خط مستقیم به هم وصل نشوند
+export function splitHistoryGapSegments(points, range = '1D', isDomestic = false) {
+  if (!Array.isArray(points) || !points.length) return [];
+  const gapThresholds = {
+    '1H': 900,
+    '1D': isDomestic ? 64800 : 7200,
+    '3D': isDomestic ? 86400 : 21600,
+    '1W': isDomestic ? 216000 : 86400,
+    '1M': 432000,
+    '1Y': 864000
+  };
+  const maxGap = gapThresholds[range] || (isDomestic ? 64800 : 7200);
+  const firstTs = Number(points[0]?.[0] || 0);
+  // برای نمودارهای شاخص‌محور بدون مهر زمان یونیکس، شکاف زمانی اعمال نمی‌شود
+  if (!(firstTs > 1500000000)) return [points];
+  const segments = [[points[0]]];
+  for (let i = 1; i < points.length; i++) {
+    const prevTs = Number(points[i - 1]?.[0] || 0);
+    const curTs = Number(points[i]?.[0] || 0);
+    if (curTs - prevTs > maxGap) {
+      segments.push([points[i]]);
+    } else {
+      segments[segments.length - 1].push(points[i]);
+    }
+  }
+  return segments;
+}
+
+// حذف رمزارزهای قدیمی و منقضی‌شده از Snapshot فقط زمانی که فید صرافی با موفقیت تازه دریافت شده باشد
+export function pruneStaleCryptoItems(items, freshCryptoIds) {
+  if (!items || typeof items !== 'object' || !(freshCryptoIds instanceof Set) || freshCryptoIds.size < 15) {
+    return 0;
+  }
+  let removed = 0;
+  for (const id of Object.keys(items)) {
+    if (id === 'usdt') continue;
+    const it = items[id];
+    if (it && (it.crypto || it.kind === 'crypto' || it.unit === 'USDT') && !freshCryptoIds.has(id)) {
+      delete items[id];
+      removed++;
+    }
+  }
+  return removed;
+}
+
+// نگهداری کش حافظه با سقف تعداد مشخص برای جلوگیری از رشد بی‌رویه حافظه ایزوله Worker/Node
+export function setBoundedMapEntry(map, key, value, maxEntries = 400) {
+  if (!map || typeof map.set !== 'function') return;
+  if (map.has(key)) map.delete(key);
+  map.set(key, value);
+  while (map.size > maxEntries) {
+    const oldestKey = map.keys().next().value;
+    if (oldestKey === undefined) break;
+    map.delete(oldestKey);
+  }
+}
+
+

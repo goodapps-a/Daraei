@@ -21,7 +21,7 @@
  * | hasActiveAlertsCache          | D1 (alerts WHERE triggered_at NULL)| 30m (1800s) | جلوگیری از اسکن جدول هشدارها در صورت نبود هشدار فعال  |
  * ============================================================================
  */
-import { NERKHARA_MAP, BONBAST_MAP, parseBonbastPayload, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale, normalizeCandleOpenTimeSec, parseBinanceKlineEntry, buildHistoryMetadata, resolveCryptoIconByAssetId } from './modules/market-core.js';
+import { NERKHARA_MAP, BONBAST_MAP, parseBonbastPayload, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale, normalizeCandleOpenTimeSec, parseBinanceKlineEntry, buildHistoryMetadata, resolveCryptoIconByAssetId, filterIsolatedHistorySpikes, pruneStaleCryptoItems, setBoundedMapEntry } from './modules/market-core.js';
 import { enc, SEC_HEADERS, PROD_CSP, buildHtmlCsp, b64u, b64uDec, teq, sha256, hmacB64u, createMemoryRateLimiter, cleanEmail, isEmail, okPass, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, getConfiguredAdminPassword, getAdminSecret, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
 import { buildLocalCryptoIconsMap } from './modules/local-icons.js';
 export { cleanData, validateTransactions, isSafePublicUrl, hashPassword, verifyPassword, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, parseBonbastPayload, getAdminSecret };
@@ -2950,9 +2950,11 @@ async function refreshPricesLocal(env, force = false, skipSideEffects = false, c
             !/(?:3L|3S|2L|2S|5L|5S|UP|DOWN|BEAR|BULL)$/i.test(String(x.base))
           ).sort((x, y) => y.vol - x.vol).slice(0, cap);
           if (rows.length < 15) throw new Error('insufficient pairs: ' + rows.length);
+          const freshCryptoIds = new Set();
           for (const x of rows) {
             const base = String(x.base);
             const id = base.toLowerCase();
+            freshCryptoIds.add(id);
             const srcTs = (Number.isFinite(x.ts) && x.ts > 1500000000 && x.ts <= t + 300) ? Math.floor(x.ts) : null;
             put(id, x.last, x.open > 0 ? (x.last / x.open - 1) * 100 : NaN, name, srcTs, 'USDT', {
               crypto: 1,
@@ -2963,6 +2965,7 @@ async function refreshPricesLocal(env, force = false, skipSideEffects = false, c
               priceType: 'last'
             });
           }
+          pruneStaleCryptoItems(items, freshCryptoIds);
           feeds.crypto = { ok: true, checkedAt: t, count: rows.length, source: name };
           return;
         } catch (e) {
@@ -3098,6 +3101,7 @@ export class PriceCoordinator {
     if (url.pathname === '/clear' && req.method === 'POST') {
       this.snapshot = null;
       this.loaded = false;
+      this.inFlightState = null;
       this.lastFailureAt = 0;
       try {
         if (this.ctx && this.ctx.storage) {
@@ -3299,14 +3303,15 @@ function validateHistoryPoints(rawPoints, range, now, isDomestic, refPrice = 0, 
       filtered.push(deduped[i]);
     }
   }
-  if (filtered.length < 2) return [];
+  const despiked = filterIsolatedHistorySpikes(filtered, isDomestic);
+  if (despiked.length < 2) return [];
 
   const isIntraday = range === '1H' || range === '1D';
   // برای طلا و ارز بازه کاملاً سخت‌گیرانه [now - span, now + maxLead] اعمال می‌شود تا هیچ نقطه‌ای خارج از بازه وارد نمودار و درصد تغییر نشود
   const cryptoBucketLead = isIntraday ? 300 : 86400;
   const minTs = isDomestic ? (now - span) : (now - span - cryptoBucketLead);
   const maxTs = now + (isIntraday ? 60 : 3600);
-  const pts = filtered.filter(p => p[0] >= minTs && p[0] <= maxTs);
+  const pts = despiked.filter(p => p[0] >= minTs && p[0] <= maxTs);
   if (pts.length < 2) return [];
 
   // اتصال نقطه فعلی بازار فقط با زمان واقعی منبع و در محدوده بازه مجاز (هرگز زمان now را به داده قدیمی الصاق نکن)
@@ -3337,7 +3342,7 @@ async function fetchIranMarketDailyRaw(sym) {
     if (r.ok) {
       const j = await r.json();
       if (j) {
-        dailyArchiveMemCache.set('im:' + sym, { at: now, im: j });
+        setBoundedMapEntry(dailyArchiveMemCache, 'im:' + sym, { at: now, im: j }, 120);
         return j;
       }
     }
@@ -3358,7 +3363,7 @@ async function fetchNerkharaDailyRaw(naId) {
     if (r.ok) {
       const j = await r.json();
       if (j) {
-        dailyArchiveMemCache.set('na:' + naId, { at: now, na: j });
+        setBoundedMapEntry(dailyArchiveMemCache, 'na:' + naId, { at: now, na: j }, 120);
         return j;
       }
     }
@@ -3522,16 +3527,18 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
       const isToman = j?.meta?.unit === 'toman' || j?.meta?.currency === 'IRT';
       const div = isToman ? 1 : 10;
       if (Array.isArray(records) && records.length >= 2) {
-        const out = [];
-        for (const rec of records.slice(-maxSlice)) {
+        const parsedOut = [];
+        for (const rec of records) {
           const closeRaw = Number(rec.close);
           if (!(closeRaw > 0)) continue;
           const closeToman = Math.round(closeRaw / div);
           const baseTs = parseArchiveRecTs(rec);
           if (baseTs >= minTs && baseTs <= now + 3600) {
-            out.push([baseTs, closeToman]);
+            parsedOut.push([baseTs, closeToman]);
           }
         }
+        parsedOut.sort((a, b) => a[0] - b[0]);
+        const out = parsedOut.slice(-maxSlice);
         if (curPrice > 0 && curTs >= minTs && curTs <= now + 3600 && curTs > (out.at(-1)?.[0] || 0)) {
           out.push([curTs, curPrice]);
         }
@@ -3545,17 +3552,19 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
       const j = naMultiSettled.value;
       const pts = j?.points;
       if (Array.isArray(pts) && pts.length >= 2) {
-        const out = [];
-        for (const row of pts.slice(-maxSlice)) {
+        const parsedOut = [];
+        for (const row of pts) {
           if (!Array.isArray(row) || row.length < 2) continue;
           const dateStr = String(row[0] || '').trim();
           const val = Math.round(Number(row[1]));
           if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !(val > 0)) continue;
           const ts = Math.floor(Date.parse(`${dateStr}T12:00:00Z`) / 1000);
           if (Number.isFinite(ts) && ts >= minTs && ts <= now + 3600) {
-            out.push([ts, val]);
+            parsedOut.push([ts, val]);
           }
         }
+        parsedOut.sort((a, b) => a[0] - b[0]);
+        const out = parsedOut.slice(-maxSlice);
         if (curPrice > 0 && curTs >= minTs && curTs <= now + 3600 && curTs > (out.at(-1)?.[0] || 0)) {
           out.push([curTs, curPrice]);
         }
@@ -3582,16 +3591,18 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
           const endDaysIdx = text.indexOf(']]', daysIdx);
           if (daysIdx !== -1 && endDaysIdx !== -1) {
             const days = JSON.parse(text.slice(daysIdx + 7, endDaysIdx + 2));
-            const out = [];
-            for (const [d, v] of days.slice(-maxSlice)) {
+            const parsedOut = [];
+            for (const [d, v] of days) {
               const m = /^(\d{4})\/(\d{2})\/(\d{2})$/.exec(d);
               if (!m || !(v > 0)) continue;
               const [gy, gm, gd] = jalaliToGregorian(+m[1], +m[2], +m[3]);
               const ts = Math.floor(Date.UTC(gy, gm - 1, gd, 12) / 1000) - 12600;
               if (ts >= minTs && ts <= now + 3600) {
-                out.push([ts, Number(v)]);
+                parsedOut.push([ts, Number(v)]);
               }
             }
+            parsedOut.sort((a, b) => a[0] - b[0]);
+            const out = parsedOut.slice(-maxSlice);
             if (curPrice > 0 && curTs >= minTs && curTs <= now + 3600 && curTs > (out.at(-1)?.[0] || 0)) {
               out.push([curTs, curPrice]);
             }
@@ -3762,7 +3773,7 @@ export async function history(env, url, ctx = null) {
     }
 
     const buildCachedResult = (payload) => {
-      historyMemCache.set(cacheKey, { at: t, data: payload });
+      setBoundedMapEntry(historyMemCache, cacheKey, { at: t, data: payload }, 400);
       const headers = {
         'access-control-allow-origin': '*',
         'cache-control': `public, max-age=${ttlSec}`,
@@ -4414,6 +4425,9 @@ export function __resetWorkerStateForTests() {
   lastD1HistoryWriteTime = 0;
   lastD1RecordedMap.clear();
   domesticIntradayTicks.clear();
+  dailyArchiveMemCache.clear();
+  domesticPrevCloseCache = null;
+  domesticPrevCloseTime = 0;
   memRateLimiter.clear();
   rateLimitSchemaMode = 'standard';
   historyMemCache.clear();
@@ -5166,14 +5180,44 @@ async function route(req, env, url, ctx) {
       inMemoryPricesLoadedAt = 0;
       inMemoryCoordinatorReadAt = 0;
       inMemoryRefreshFailureAt = 0;
+      inMemoryRefreshLock = 0;
+      inFlightRefreshJob = null;
       inMemoryKvLoaded = false;
       inMemoryKvLoadedAt = 0;
+      lastKvWriteTime = 0;
+      lastKvSnapshotSig = '';
+      lastD1HistoryWriteTime = 0;
+      lastD1RecordedMap.clear();
+      domesticIntradayTicks.clear();
+      dailyArchiveMemCache.clear();
       historyMemCache.clear();
+      histKvWriteAt.clear();
+      domesticPrevCloseCache = null;
+      domesticPrevCloseTime = 0;
+      inMemoryDynamicIcons = null;
+      inMemoryDynamicIconsTime = 0;
+      inMemoryDynamicIconsJob = null;
+      inMemorySystemFeeds = null;
       try {
         if (typeof caches !== 'undefined' && caches.default) {
-          await caches.default.delete(PRICES_EDGE_CACHE_KEY);
+          const edgeDeleteJobs = [caches.default.delete(PRICES_EDGE_CACHE_KEY)];
+          const histIds = ['usdt', 'btc', 'eth', 'sol', 'bnb', 'xrp', 'ada', 'doge', 'trx', 'ton', ...ALL_DOMESTIC_IDS];
+          for (const hid of histIds) {
+            for (const r of Object.keys(RANGES)) {
+              edgeDeleteJobs.push(caches.default.delete(`https://edge.darayi.local/api/history?id=${encodeURIComponent(hid)}&range=${encodeURIComponent(r)}`));
+            }
+          }
+          await Promise.allSettled(edgeDeleteJobs);
         }
       } catch {}
+      if (hasPricesKv(env) && typeof env.PRICES_KV.delete === 'function') {
+        try {
+          await Promise.allSettled([
+            env.PRICES_KV.delete(KV_SNAPSHOT_KEY),
+            ...Object.keys(RANGES).map((r) => env.PRICES_KV.delete(`hist_cache:usdt:${r}`))
+          ]);
+        } catch {}
+      }
       if (hasPriceCoordinator(env)) {
         try {
           const stub = getPriceCoordinatorStub(env);
@@ -5182,7 +5226,7 @@ async function route(req, env, url, ctx) {
       }
       if (env.DB) {
         try {
-          await env.DB.prepare("DELETE FROM kv WHERE k IN ('prices','prices_checked')").run();
+          await env.DB.prepare("DELETE FROM kv WHERE k IN ('prices','prices_checked') OR k = ? OR k LIKE 'hist_cache:%'").bind(KV_SNAPSHOT_KEY).run();
         } catch {}
       }
       return json({ ok: true });
@@ -5739,13 +5783,13 @@ const MANIFEST = {
   icons: [
     { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
     { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-    { src: '/icons/maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
+    { src: '/icons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
   ]
 };
-const SW_JS = `const V='darayi-shell-v12';
+const SW_JS = `const V='darayi-shell-v13';
 self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(V).then(c=>c.addAll(['/','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png','/coin-face.png','/coin-splash.js'])).catch(()=>{}))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==V).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
-self.addEventListener('message',e=>{if(e.data&&(e.data.type==='SKIP_WAITING'||e.data==='skipWaiting')){self.skipWaiting()}});
+self.addEventListener('message',e=>{if(e.data&&(e.data.type==='SKIP_WAITING'||e.data==='skipWaiting')){self.skipWaiting()}else if(e.data&&e.data.type==='CLEAR_RUNTIME_CACHE'){e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x.startsWith('darayi-shell-')).map(x=>caches.delete(x)))).catch(()=>{}))}});
 self.addEventListener('fetch',e=>{
   const r=e.request,u=new URL(r.url);
   if(r.method!=='GET'||u.origin!==location.origin||u.pathname.startsWith('/api/')||u.pathname.startsWith('/v1/'))return;
@@ -5753,11 +5797,7 @@ self.addEventListener('fetch',e=>{
     e.respondWith(fetch(r).then(res=>{if(res&&res.status===200){const c=res.clone();caches.open(V).then(x=>x.put('/',c))}return res}).catch(()=>caches.match('/').then(m=>m||caches.match(r))));
     return;
   }
-  if(u.pathname.startsWith('/logos/')){
-    e.respondWith(caches.match(r).then(m=>m||fetch(r).then(res=>{if(res&&res.status===200){const c=res.clone();caches.open(V).then(x=>x.put(r,c))}return res})));
-    return;
-  }
-  e.respondWith(caches.match(r).then(m=>m||fetch(r)));
+  e.respondWith(caches.match(r).then(cached=>{const fp=fetch(r).then(res=>{if(res&&res.status===200){const c=res.clone();caches.open(V).then(x=>x.put(r,c))}return res}).catch(()=>cached);return cached||fp;}));
 });`;
 
 const b64bytes = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
@@ -5768,6 +5808,7 @@ function staticResponse(path) {
   const iconMap = {
     '/icons/icon-192.png': ICON192,
     '/icons/icon-512.png': ICON512,
+    '/icons/icon-maskable-512.png': ICONM,
     '/icons/maskable-512.png': ICONM,
     '/apple-touch-icon.png': ICON180,
     '/favicon.ico': ICON192,

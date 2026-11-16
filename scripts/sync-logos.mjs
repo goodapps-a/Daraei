@@ -128,7 +128,8 @@ async function main() {
       flagCount++;
       return;
     }
-    const img = await downloadImage(`https://cdn.jsdelivr.net/gh/HatScripts/circle-flags@gh-pages/flags/${code}.svg`, 5000);
+    const remoteCode = code === 'eu' ? 'european_union' : code;
+    const img = await downloadImage(`https://cdn.jsdelivr.net/gh/HatScripts/circle-flags@gh-pages/flags/${remoteCode}.svg`, 5000);
     if (img && img.ext === 'svg') {
       fs.writeFileSync(target, img.buf);
       flagCount++;

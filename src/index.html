@@ -8,7 +8,7 @@
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function() {
-    navigator.serviceWorker.register('/sw.js?v=12').then(function(reg) {
+    navigator.serviceWorker.register('/sw.js?v=13').then(function(reg) {
       reg.update().catch(function() {});
       if (reg.waiting) {
         reg.waiting.postMessage({ type: 'SKIP_WAITING' });
@@ -2112,10 +2112,10 @@ body:has(.modal-backdrop.open) .bottom-nav {
     border-radius: 6px !important;
   }
   .detail-chart {
-    height: 88px !important;
-    min-height: 88px !important;
-    max-height: 88px !important;
-    margin: 3px 0 1px !important;
+    height: 124px !important;
+    min-height: 124px !important;
+    max-height: 124px !important;
+    margin: 4px 0 2px !important;
   }
   .detail-chart-caption {
     font-size: 8.5px !important;
@@ -4351,7 +4351,7 @@ function renderSparkFromPoints(id, rawPts, usedRange = '1D') {
     ? ((p.at(-1)[1] - p[0][1]) / p[0][1]) * 100
     : (Number.isFinite(curA?.change) ? curA.change : 0);
   const isUp = sparkPct >= 0;
-  const svg = chartSVG(p, isUp ? '#10b981' : '#f43f5e', true, true);
+  const svg = chartSVG(p, isUp ? '#10b981' : '#f43f5e', true, true, usedRange, Boolean(curA && curA.cat !== 'crypto' && curA.id !== 'usdt'));
   sparkSvgCache.set(id, svg);
   sparkSvgMeta.set(id, { at: Date.now(), range: usedRange });
   document.querySelectorAll('[data-spark="' + id + '"]').forEach(el => { el.innerHTML = instantiateSparkSvg(svg); });
@@ -4369,17 +4369,54 @@ function spark(a){
 }
 function lineChart(values,color='#d7ff61',fill=true){return chartSVG(values.map((v,i)=>[i,v]),color,fill)}
 function chartGeometry(points){const n=points.length,min=Math.min(...points.map(p=>p[1])),max=Math.max(...points.map(p=>p[1])),span=(max-min)||Math.max(Math.abs(min)*.01,1),t0=points[0][0],t1=points.at(-1)[0];return points.map((p,i)=>[8+(p[0]-t0)/(t1-t0||1)*624,168-(p[1]-min+span*.05)/(span*1.1)*140])}
+function getClientGapThresholdSec(range='1D',isDomestic=false){
+  if(range==='1H')return 900;
+  if(range==='1D')return isDomestic?64800:7200;
+  if(range==='3D')return isDomestic?86400:21600;
+  if(range==='1W')return isDomestic?216000:86400;
+  if(range==='1M')return 432000;
+  if(range==='1Y')return 864000;
+  if(range==='ALL')return 1296000;
+  return isDomestic?86400:21600;
+}
+function splitClientChartGapSegments(points,range='1D',isDomestic=false){
+  if(!Array.isArray(points)||!points.length)return [];
+  const maxGap=getClientGapThresholdSec(range,isDomestic);
+  const segs=[];
+  let cur=[[points[0],0]];
+  for(let i=1;i<points.length;i++){
+    if((points[i][0]-points[i-1][0])>maxGap){
+      segs.push(cur);
+      cur=[[points[i],i]];
+    }else{
+      cur.push([points[i],i]);
+    }
+  }
+  if(cur.length)segs.push(cur);
+  return segs;
+}
 function smoothPath(p){if(p.length<2)return '';let d=`M${p[0][0]},${p[0][1]}`;for(let i=1;i<p.length;i++){d+=` L${p[i][0]},${p[i][1]}`}return d}
-function chartSVG(points,color,fill=true,sparkMode=false){
+function chartSVG(points,color,fill=true,sparkMode=false,range='1D',isDomestic=false){
   if(points.length<2)return '';
+  const rawSegs=splitClientChartGapSegments(points,range,isDomestic);
   if(sparkMode){
     const min=Math.min(...points.map(p=>p[1])),max=Math.max(...points.map(p=>p[1])),span=(max-min)||Math.max(Math.abs(min)*.01,1),t0=points[0][0],t1=points.at(-1)[0];
     const sp=points.map(p=>[4+(p[0]-t0)/(t1-t0||1)*115,41-(p[1]-min+span*.08)/(span*1.16)*34]);
-    const sd=smoothPath(sp),last=sp[sp.length-1],gid='__SGID__';
-    return `<svg style="direction:ltr;overflow:visible" viewBox="0 0 128 48" preserveAspectRatio="xMidYMid meet" role="img" aria-label="نمودار روند قیمت"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop stop-color="${color}" stop-opacity=".34"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${fill?`<path d="${sd} L${last[0]},47 L${sp[0][0]},47 Z" fill="url(#${gid})"/>`:''}<path d="${sd}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><circle class="spark-dot-halo" cx="${last[0]}" cy="${last[1]}" r="5.2" fill="${color}"/><circle class="spark-dot-core" cx="${last[0]}" cy="${last[1]}" r="2.5" fill="${color}" stroke="var(--paper, #ffffff)" stroke-width="0.9"/></svg>`;
+    const geomSegs=rawSegs.map(seg=>seg.map(([,idx])=>sp[idx])).filter(seg=>seg.length>=2);
+    const useSparseFallback = geomSegs.length === 0;
+    const drawSegs = useSparseFallback ? [sp] : geomSegs;
+    const areaPaths=fill?drawSegs.map(seg=>{const d=smoothPath(seg);return `<path d="${d} L${seg[seg.length-1][0]},47 L${seg[0][0]},47 Z" fill="url(#__SGID__)"/>`;}).join(''):'';
+    const strokeD=drawSegs.map(smoothPath).join(' ');
+    const dashAttr = useSparseFallback ? ' stroke-dasharray="2.5 2"' : '';
+    const last=sp[sp.length-1],gid='__SGID__';
+    return `<svg style="direction:ltr;overflow:visible" viewBox="0 0 128 48" preserveAspectRatio="xMidYMid meet" role="img" aria-label="نمودار روند قیمت"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop stop-color="${color}" stop-opacity=".34"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${areaPaths}${strokeD?`<path d="${strokeD}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"${dashAttr}/>`:''}<circle class="spark-dot-halo" cx="${last[0]}" cy="${last[1]}" r="5.2" fill="${color}"/><circle class="spark-dot-core" cx="${last[0]}" cy="${last[1]}" r="2.5" fill="${color}" stroke="var(--paper, #ffffff)" stroke-width="0.9"/></svg>`;
   }
-  const p=chartGeometry(points),d=smoothPath(p),gid='chart-'+uid();
-  return `<svg style="direction:ltr" viewBox="0 0 640 180" preserveAspectRatio="none" role="img" aria-label="تاریخچه واقعی قیمت؛ زمان از چپ به راست"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop stop-color="${color}" stop-opacity=".28"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${fill?`<path d="${d} L${p.at(-1)[0]},180 L${p[0][0]},180 Z" fill="url(#${gid})"/>`:''}<path d="${d}" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" vector-effect="non-scaling-stroke"/><g class="crosshair" visibility="hidden"><line y1="0" y2="180" stroke="${color}" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/></g></svg>`;
+  const p=chartGeometry(points),gid='chart-'+uid();
+  const geomSegs=rawSegs.map(seg=>seg.map(([,idx])=>p[idx]));
+  const areaPaths=fill?geomSegs.filter(seg=>seg.length>=2).map(seg=>{const d=smoothPath(seg);return `<path d="${d} L${seg[seg.length-1][0]},180 L${seg[0][0]},180 Z" fill="url(#${gid})"/>`;}).join(''):'';
+  const strokeD=geomSegs.filter(seg=>seg.length>=2).map(smoothPath).join(' ');
+  const singleDots=geomSegs.filter(seg=>seg.length===1).map(seg=>`<circle cx="${seg[0][0]}" cy="${seg[0][1]}" r="3" fill="${color}" stroke="var(--paper, #ffffff)" stroke-width="1.2"/>`).join('');
+  return `<svg style="direction:ltr" viewBox="0 0 640 180" preserveAspectRatio="none" role="img" aria-label="تاریخچه واقعی قیمت؛ زمان از چپ به راست"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop stop-color="${color}" stop-opacity=".28"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${areaPaths}${strokeD?`<path d="${strokeD}" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`:''}${singleDots}<g class="crosshair" visibility="hidden"><line y1="0" y2="180" stroke="${color}" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/></g></svg>`;
 }
 function paintChart(box, points, color, formatter, opts = {}) {
   points = points.filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]) && p[1] > 0).sort((a, b) => a[0] - b[0]);
@@ -4393,7 +4430,7 @@ function paintChart(box, points, color, formatter, opts = {}) {
   let tip = box.querySelector(':scope > .chart-tooltip');
   let glowDot = box.querySelector(':scope > .chart-glow-dot');
   const existingSvg = box.querySelector(':scope > svg');
-  const svgMarkup = chartSVG(points, color);
+  const svgMarkup = chartSVG(points, color, true, false, opts.range || '1D', !!opts.isDomestic);
 
   if (existingSvg && tip && glowDot) {
     const tmp = document.createElement('div');
@@ -5069,7 +5106,7 @@ function renderSnapshots(box, range) {
     const valFormatter = box.id === 'portfolioHistoryChart'
       ? (n => formatPortfolioUnitValue(n, uInfo))
       : money;
-    paintChart(box, pts, chartColor, valFormatter, { isDaily: res.isDaily });
+    paintChart(box, pts, chartColor, valFormatter, { isDaily: res.isDaily, range: res.apiRange || range, isDomestic: false });
     if (box.id === 'portfolioHistoryChart') {
       const pCh = $('#portfolioChartChange');
       if (pCh) {
@@ -5321,9 +5358,9 @@ const CRYPTO_SLUGS = {
 // Official ArzDigital slugs are preserved in CRYPTO_SLUGS for slug-based image fallback
 const ARZ_DIGITAL_ICONS = {};
 /* @LOCAL_ICONS_START */
-const LOCAL_CRYPTO_PNG_LIST = "0g,1000cat,1000cheems,1000sats,10set,1inch,1inchdown,1inchup,1mbabydoge,2z,3kds,3ull,4,4ever,4stock,9bit,a,a2z,a47,a8,aaoib,aapl,aaplb,aaplc,aaplon,aaplx,aark,aave,aavedown,aaveup,ab,abbc,abbvx,abel,abey,abt,abton,abtx,aca,ace,ach,acm,acn,acnon,acnx,acp,acs,act,acu,acx,ada,adadown,adapad,adaup,adbeb,adi,adp,ads,adx,ae,aeon,aergo,aero,aevo,afc,aggon,agi,agix,agld,agpub,agrs,agt,aht,ai,ai16z,aia,aiat,aic,aidoge,aigensyn,ain,aio,aion,aiot,aioz,air,airdrop,ait,aiv,aix9,aixbt,ake,akita,akro,akt,ala,alabb,alch,alcx,ale,aleo,aleph,alex,algo,ali,alice,align,alkimi,allo,alpa,alpaca,alph,alpha,alpine,alt,alu,amatb,amb,amcb,amdb,amdon,amdx,amo,amp,ampl,amzn,amznb,amznon,amznx,anc,andy,andyeth,anime,ankr,anoa,anon,ansem,ansemcat,ant,antfun,anthropic,any,anyone,ao,aog,aop,ape,apepe,apex,api3,apm,appb,apr,apt,aptm,apu,apx,aqa,ar,arara,arb,arc,arch,ardr,arena,arg,argus,aria,ark,arkm,armb,armon,arpa,arrr,art,artfi,artx,arw,arx,ask,asm,asmlb,asmlon,asp,asr,asset,ast,aster,asteroid,astr,astra,astsb,astson,at,ata,ath,atlas,atm,atom,atos,atr,ats,atwo,auction,audd,audf,audio,audm,auki,aura,aurora,aury,ausd,auto,ava,avaai,avail,avax,avc,avgob,avgoon,avgox,avici,avl,avnt,avt,avv,awe,awin,axis,axl,axs,axtib,azero,aznx,aztec,azur,b,b2,b3,b3x,babab,babaon,babi,baby,babydoge,babyshark,badger,baion,bake,bal,ban,banana,bananas31,band,bank,bar,bard,bas,basecat,based,basiscash,bat,batch,bay,bb,bbb,bbt,bcc,bccoin,bcd,bch,bchabc,bchdown,bchsv,bchup,bcn,bcut,bdca,bdg,bdt,bdx,bdxn,beam,beamx,bear,beat,beb,bee,bel,believe,bells,belong,benji,benqi,bera,bert,beta,beth,bf,bfc,bfg,bfusd,bgb,bgsc,bico,bid,bifi,bigtime,bill,bim,bio,birb,bitboard,bitcoin,bkn,bkrw,bld,blend,bless,blkdigon,blkgrwon,blkhion,blkon,bluai,blue,blum,blur,blz,bmnrb,bmnron,bmnrx,bmt,bmx,bnb,bnbbear,bnbbull,bnbdown,bnbtiger,bnbup,bnc,bnc4,bncb,bncold,bnkr,bnsol,bnt,bnx,bob,boba,bobo,bold,bome,bond,bone,boner,bonk,booe,boop,bora,borg,bos,boson,botb,bounty,box,bp,bpt,br,brainon,brett,brev,bric,brise,brkbb,brkl,brl1,brn,broccoli,broccoli714,brtron,bsai,bsb,bspb,bst,bsv,bsw,btc,btcdown,btcst,btcup,btg,btgoon,btr,btrst,bts,btse,btt,bttc,btw,btx,bubble,bubi,buck,bull,bulla,burger,burn,busd,busy,buttcoin,buy,bxn,byn,bzrx,bzz,c,c98,ca,caga,cake,camp,cap,carat,cards,carv,cashcat,cat,cate,catecoin,cati,cats,caw,cbk,cbrsb,cc,ccd,cel,cell,celo,celr,cent,cere,cess,cet,cetus,cfg,cfx,cgn,cgo,cgpt,chatai,check,cheel,cheems,cheq,chess,chex,chillguy,chip,chirp,cho,chr,chz,city,ckb,clanker,clash,clnd,clo,clore,cloud,clv,cmcsax,cnpy,coai,cocos,codex,cohrb,coin,coinb,coindepo,coinon,coinx,col,collect,cols,combo,common,comp,cookie,coq,core,coreum,corn,cos,coti,cow,cp,cpool,cpr,crcl,crclb,crclon,crclx,crdob,cre,cream,credi,creo,crepe,creta,crf,crmb,cro,cross,crown,crts,cru,crv,crvusd,crwdb,crwdx,crwvb,cscoon,cscox,cspr,cst,ct,ctc,ctk,ctm,ctp,ctr,ctsi,ctx,ctxc,cudis,cult,cummies,cusd,cvc,cvp,cvx,cvxon,cwar,cweb,cwif,cws,cxt,cyber,cyc,cyphb,cys,d,d2t,daddy,dag,dai,dao,dar,dash,data,dbc,dbr,dcr,debit,deep,deepseek,defi,degen,dego,delabs,dellb,dent,deod,dep,deso,desu,deus,dexe,dext,df,dfdvx,dfg,dgai,dgb,dgma,dhn,dhrx,dhv,dia,diam,diem,dimo,din,divi,djed,dji6930,djtb,dka,dl,dmc,dmd,dmtr,dn,dna,dnt,dobo,dock,dodo,dog,doge,dogelonmars,doginme,dogs,dolo,dome,dood,dos,dot,dotdown,dotup,dpr,dramb,dramon,drb,drep,dress,drift,drv,dsync,dtec,duck,durev,dusd,dusk,dxi,dydx,dym,dyor,eat,edel,eden,edge,edgex,edu,eemon,efaon,egame,egl1,egld,eigen,el,ela,elf,elg,elizaos,elon,elp,elsa,elx,emc,emt,ena,enj,ens,enso,eos,eosbear,eosbull,eosdown,eosup,epic,eps,ept,epx,eqb,eqty,era,erd,erg,ern,es,ese,esim,esp,esports,etc,eth,ethbear,ethbull,ethdown,ethdydx,ethfi,ethup,ethw,etn,eul,eurc,eurcv,euri,eurq,eurr,eusd,eusx,ev,evaa,ever,ewt,ewyb,ewyx,f,fai,far,farm,fartboy,fartcoin,fb,fct,fdusd,fearnot,feg,fei,fely,fet,ff,fhe,fida,fidd,fight,fil,fildown,filup,fio,fir,fire,firo,fis,fishw,fiwa,flip,flm,flncb,flock,floki,flow,flr,flt,fluid,flux,fly,fogo,fold,folks,fone,for,forest,forex,form,fort,forth,fourcoin,fox,foxsy,foxy,frax,frong,front,frxusd,ft,ftm,ftrb,ftt,fuel,ful,fun,funtoken,fusd,fuse,fwdib,fwog,fxion,fxs,fyn,g,g3,gafi,gaib,gain,gal,gala,galeon,galo,game,games,gas,gat,gata,gato,gbyte,gcb,gcoin,gear,geg,gems,genius,geod,gevb,gf,gfal,gfi,gft,gho,ghst,ghx,giga,giggle,gitcoin,gldon,gldx,gleec,glm,glmr,glwb,gme,gmeb,gmee,gmmt,gmrx,gmt,gmx,gnc,gno,gnot,gns,go4,goat,goated,goats,gods,gog,gohome,goldao,gomining,googl,googlb,googlc,googlon,googlx,googon,gp,gprob,gps,gram,grass,griffain,grin,grnd,grok,grove,grow,grs,grt,grvt,gsb,gstock,gt,gtai,gtbtc,gtc,gteth,gua,gun,gusd,gwei,gxe,gxs,gyen,h,haedal,haha,hai,hamster,hana,hard,harold,hbar,hdg,hdn,hdx,heart,hegic,hei,hello,hemi,hero,hez,hft,hget,hgpt,hibs,hifi,high,himsb,himson,hint,hippo,hive,hln,hmnd,hmstr,hnb,hnt,hod,hold,holdstation,holo,home,honey,honx,hoodb,hoodon,hoodx,hook,hookr,hoppy,hopr,hord,hot,hp,hpeb,hpos10i,hpp,hsk,ht,htm,htr,htx,huma,hunt,hvlo,hype,hyper,iag,iauon,ibiton,ibmb,ibmon,ibs,icnt,icp,icx,id,idex,idia,idol,idos,idrt,iefaon,iemgon,ihc,ijhon,ika,ilv,ily,impt,imt,imu,imx,in,inc,index,init,inj,intcb,intcon,intcx,inter,intwb,inv,inx,io,iost,iota,iotx,iq,ir,irenb,iris,iron,irys,isikc,isk,island,islm,isp,ita,ithaca,ivvon,iwfon,iwmon,iwnon,ixs,izi,jager,janet,jasmy,jct,jeanphil,jellyjelly,jfi,jitosol,jlp,joc,joe,jpmb,jpmon,jsm,jst,jto,juc,jup,juv,kaia,kaio,kaito,kan,kas,kat,kava,kcs,kct,kda,kdk,keep,kekius,kernel,key,keycat,kgen,kgst,kii,kilo,kishu,kite,kiteai,klay,klk,klv,kmd,kmno,knc,kntq,koge,koma,konet,koon,kor,korub,kox,kp3r,kpol,krl,ksm,kstrb,kt,kta,kton,kub,kyo,kyve,kzen,l3,la,lab,labubu,ladys,lair,laptop,lat,lava,layer,lazio,lbt,lcx,ldo,legion,lend,leo,lever,lf,light,ligo,like,lime,lina,linea,lingo,link,linkdown,linkup,lion,lista,lisusd,lit,liteb,litex,ll,llyb,llyon,llyx,lm,lmton,lmts,lmwr,ln,lnq,loa,loan,lobo,locus,lofi,logt,logx,loka,lon,loom,lot,loulou,lpt,lq,lqr,lqty,lrc,lrds,lrn,lsk,ltc,ltcdown,ltcup,lto,luca,lucic,lumia,luna,lunc,lunrx,lusd,lv,lvly,lvva,lwp,lyn,lyp,lyx,m,m87,ma,mag7ssi,mag7xon,magic,magma,majo,major,mak,mamo,man,mana,mana3,manifest,manta,mantra,manyu,maon,mapo,marscoin,mart,mask,mat,match,math,mav,mavia,max,may,mbg,mbl,mbox,mbx,mc,mcat,mcb,mcdon,mcdull,mcdx,mcm,mcn,mco,mcoin,mctp,mdbb,mdf,mdt,mdx,me,med,mega,melania,meld,meme,mengo,mepad,merl,met,meta,metab,metac,metadao,metan,metaon,metax,metfi,metis,meto,mev,mew,mey,mezo,mf,mft,mgkl,mgo,mha,miladycult,milo,mim,min,mina,mir,mira,mito,mkr,ml,mlc,mlk,mln,mmpro,mmt,mmui,mnde,mngo,mnsry,mnt,mob,mobile,moc,moca,mode,mog,mon,mona,moodeng,mooney,moov,mori,morpho,move,movr,mow,mpc,mplx,mrnab,mrvlb,mrvlon,mrvlx,msftb,msfton,msftx,msol,msp,msq,mstr,mstrb,mstron,mstrx,mtos,mtv,mtx,mu,mub,mubarak,mug,multi,muon,musd,musebook,muub,mux,mvc,mvl,mvllb,mwxt,mx,my,myro,myst,myx,naft,naka,nano,naoris,nap,natix,navi,navx,naws,nbisb,nbison,nblu,nbot,nbs,nbt,nc,ncn,nct,near,nebl,neet,neiro,neirocto,neko,neo,neon,nero,nes,ness,net,nett,netx,neural,neuro,newt,nex,nexa,nexi,nexo,nfe,nflxb,nflxon,nflxx,nfp,nft,nibi,night,niko,nil,nila,nim,niulai,niza,nkn,nmc,nmr,nock,node,nodl,nokb,nom,noot,nos,not,now,npc,npxs,ns,nsdx,nst,ntrn,nu,nuls,num,numi,nuts,nux,nvda,nvdab,nvdac,nvdaon,nvdax,nvoon,nxa,nxpc,nxt,nyan,nym,o,o4dx,oas,oax,obi,obol,obsr,obt,ocean,octa,ofc,og,ogn,ogpu,ogy,oho,okb,oksol,ol,olas,ole,om,omg,omi,omikami,omni,on,ondo,one,ong,ont,ooki,oort,op,open,openai,opg,opn,orai,orbio,orbr,orbs,orca,orclb,orclon,orclx,order,ordi,ore,orion,orn,oro,ort,osak,osmo,otk,ousd,ovl,ovo,ovr,owb,owl,own,oxt,p2p,paal,pace,pack,pact,pal,palm,pando,panwon,paparazzi,part,parti,pax,paxg,payai,pbron,pbtc,pbtc35a,pci,pda,pddb,pddon,pdt,peaq,pearl,peipei,pell,pendle,pengb,pengu,penguin,people,pep,pepe,pepecoin,pepon,pepx,perp,pfeon,pgon,pgx,pha,phb,phnix,pi,pieverse,piggy,pika,pin,pine,pingo,pipe,pipedog,pippin,pit,pivx,pixel,pla,plai,planet,play,plspad,pltr,pltrb,pltron,pltrx,plume,pm,pmt,pmx,png,pnk,pnt,pnut,pod,pokt,pol,polis,pols,poly,polyx,pond,ponke,pons,pool,pop,popcat,popmtx,por,pork,pornrocket,port,port3,portal,porto,power,powr,ppc,ppoly,ppt,prai,prcl,predict,preopai,prespcx,prime,prl,pro,prom,prompt,propc,props,pros,prosper,prove,psg,psi,ptb,public,puffer,pump,pumpbtc,pundiai,pundix,puss,pwease,pybobo,pym,pyplb,pyr,pyth,pyusd,pzm,pzp,q,qait,qanx,qbx,qcomb,qcomon,qfi,qi,qie,qka,qkc,qnt,qntb,qorpo,qqq,qqqb,qqqon,qqqx,qtum,quai,qubic,quick,quid,r2,raca,rad,rai,rail,rain,rally,ramd,ramp,rare,rari,rats,rave,ravgo,ray,rbc,rbnt,rcrcl,rddtb,rdnt,re,react,ready,real,recall,rect,red,redo,redstone,reef,ref,rei,reign,rekt,rektcoin,ren,render,rep,reppo,req,resolv,revu,rez,rfc,rfrm,rgoogl,rgt,rhea,rif,ring,rintc,rio,rion,rite,ritual,river,riz,rize,rjv,rklbb,rlb,rlc,rls,rlusd,rmrvl,rmstr,rmu,rnbw,rndr,rnvda,roa,roam,robo,rog,roll,ron,ronin,roobee,root,rose,rpl,rqqq,rsc,rsndk,rsoxl,rsoxs,rspcx,rspy,rsr,rss3,rtf,rtqqq,rtsla,rtsm,rtx,ruji,rune,rvn,rvv,rwa,rwainc,rwusd,rzto,rzusd,s,safe,saga,sahara,sai,saito,sand,santos,sapien,saros,sats,sauber,sauce,save,sbd,sbeton,sbuxon,sc,scam,scarcity,scihub,scor,scr,scrt,sct,sd,sdex,seczb,sei,send,senso,sent,sentis,serv,sfi,sfp,sgovon,sgr,share,shazb,shdw,shell,shfl,shft,shib,shib2,shiro,shldx,shm,shping,shr,shx,si,sign,simonscat,sin,siren,six,skate,skddb,skhy,skhyb,skhyg,skhyon,skhyx,skl,skop,skr,skuub,sky,skya,skyai,slc,slerf,slf,slp,slrs,slt,slvon,slx,smart,smb,smcib,smhb,smx,sn3,sn4,sn44,sn5,sn51,sn56,sn62,sn9,snc,sndkb,sndkc,sndkon,sndkx,snek,snpt,sns,snt,sntr,snx,snxxb,sofion,sogni,soil,sol,solo,solv,somi,sonic,soon,soph,soso,soul,soxlb,soxsb,spa,space,spacex,sparklet,spcm,spcx,spcxb,spcxc,spcxon,spcxx,spectre,spell,spellfire,spk,spo,spurs,spx,spy,spyb,spyon,spyx,sqd,sqgrow,sqqqb,sqqqx,sqr,srm,srx,ssg,ssv,st,stable,star,stay,stbl,stc,steem,steth,stg,stik,stix,stmx,sto,stoc,stonk,stonkbroker,storj,storm,stpt,strat,strax,strcon,strcx,stream,strike,strk,strm,strx,stt,stx,stxb,sui,suku,sun,sundog,supe,super,superform,supra,sure,susd,sushi,sushidown,sushiup,sut,svl,swan,swap,swarm,swarms,swash,sway,swch,swell,swftc,swgt,sxp,sxpdown,sxpup,sxt,symm,syn,syrup,sys,t,ta,tac,tag,tai,taiko,take,talent,tao,taobot,tapprotocol,tart,taur,tbc,tbk,tcentx,tcom,tct,tdrop,tea,ted,tel,tendies,tet,teva,tfuel,tgbp,tgc,the,theta,thq,tia,tibbir,tipon,tit,titn,tko,tlm,tlos,tlton,tmfb,tmon,tmx,tnk,tnsr,tokamak,toke,token,tolly,tomo,ton,torn,toshi,tower,town,towns,tpt,tqqqb,tqqqon,tqqqx,tra,trac,trade,tradoor,trb,trcl,treat,tree,tria,tribe,trio,troll,troy,tru,truf,trump,trust,truth,trvl,trwa,trx,trxdown,trxup,tsla,tslab,tslac,tslaon,tslax,tsmb,tsmon,tsmx,tst,tstbsc,tt,tune,turbo,turbos,turt,turtle,tusd,tut,tvk,twt,tx,txc,tycoon,u,u2u,uai,ub,ubt,ucn,udao,uds,ufd,uft,ultima,uma,umia,umxm,unfi,unhon,unhx,uni,unidown,union,unit0,uniup,unn,unp,uos,up,upc,uqc,uranus,us,usarb,usat,usd0,usd1,usdai,usdc,usdcv,usdd,usde,usdeb,usdf,usdg,usdgo,usdh,usdk,usdm,usdon,usdp,usdpt,usdq,usdr,usds,usdsui,usdt,usdv,usdy,useless,usoon,ust,ustc,usual,usx,utk,uvxyb,uxlink,vai,val,vam,vana,vanry,vanta,vara,vatreni,vbusd,vc,vchf,vcnt,vdai,velo,velodrome,velvet,vemp,ven,venom,verem,verona,vert,vest,vet,vfy,vgx,vib,vic,vidt,vine,vinu,virtual,vite,vlink,vltc,vlx,vmt,vnxau,void,von,vooi,vow,voxel,vpr,vr,vsn,vstb,vsx,vsys,vt,vtc,vtho,vtix,vvs,vvv,vxt,w,w3gg,wai,wal,wallet,wam,wan,ward,waves,waxp,wbai,wbeth,wbtc,wct,wdcb,we,wecan,weeth,wefi,well,well3,wemix,wen,wenb,wet,wfi,white,whuf,whypad,wif,wild,win,wing,wkc,wl,wld,wlfi,wmton,wmtx,wncg,wnxm,wod,wojak,wolf,wom,woo,would,wpay,wrt,wrx,wsb,wspp,wtc,wusd,wxt,wxtm,wzrd,x,xaaoi,xaapl,xabbv,xacn,xadi,xaehr,xai,xalab,xamat,xamc,xan,xapld,xapp,xarm,xasml,xasts,xaum,xaut,xaut0,xava,xavgo,xaxti,xbac,xbb,xbe,xbmnr,xbx,xcbrs,xceg,xcgnx,xch,xcien,xcn,xcoin,xcost,xcp,xcrdo,xcrm,xcrwd,xcrwv,xcsco,xcvna,xcx,xdb,xdc,xddog,xdell,xdkng,xdp,xec,xels,xem,xewj,xewt,xewy,xfc,xflnc,xfly,xge,xgev,xgild,xgme,xgn,xgoogl,xgpro,xgs,xgtlb,xhims,xhpe,xhut,xiaox,xibm,xintc,xionq,xiren,xisrg,xiwm,xjnj,xjpm,xklac,xko,xl1,xlite,xlly,xlm,xlrcx,xlunr,xmcd,xmeta,xmn,xmp,xmpwr,xmr,xmrk,xmrna,xmstr,xmu,xna,xnbis,xnet,xnflx,xnke,xnl,xno,xnow,xnvda,xny,xoklo,xon,xorcl,xoscr,xoust,xp,xpeng,xpin,xpl,xpla,xpltr,xpoet,xpr,xprt,xpypl,xqcom,xqqq,xr,xrd,xrdw,xriot,xrivn,xrklb,xrok,xrp,xseed,xsgd,xshop,xsimo,xsmci,xsmh,xsndk,xsnow,xsony,xsoxs,xspcx,xspy,xsqqq,xstrc,xswap,xt,xtag,xteam,xtem,xter,xtmf,xtqqq,xtsla,xtsll,xtsm,xtta,xttmi,xttwo,xtwlo,xtxn,xtz,xtzup,xu3o8,xunh,xurnm,xusar,xusd,xuso,xv,xvg,xvicr,xvrt,xvs,xwdc,xwen,xwmt,xxbi,xxle,xxom,xym,xyo,xzm,y8u,yala,yb,ybdbd,yct,yec,yee,yellow,yfi,yfidown,yfii,yfiup,ygg,yld5on,yld8on,yng,yom,yusd,yzy,zama,zano,zbcn,zbt,zcat,zchf,zcl,zec,zen,zent,zerebro,zest,zeta,zeum,zeus,zig,zil,zix,zk,zkc,zkj,zkl,zkp,zlw,zmb,zoon,zora,zpay,zrc,zro,zrx,zsc,ztc,zulu,zyra";
+const LOCAL_CRYPTO_PNG_LIST = "4,0g,1000cat,1000cheems,1000sats,10set,1inch,1inchdown,1inchup,1mbabydoge,2z,3kds,3ull,4ever,4stock,9bit,a,a2z,a47,a8,aaoib,aapl,aaplb,aaplc,aaplon,aaplx,aark,aave,aavedown,aaveup,ab,abbc,abbvx,abel,abey,abt,abton,abtx,aca,ace,ach,acm,acn,acnon,acnx,acp,acs,act,acu,acx,ada,adadown,adapad,adaup,adbeb,adi,adp,ads,adx,ae,aeon,aergo,aero,aevo,afc,aggon,agi,agix,agld,agpub,agrs,agt,aht,ai,ai16z,aia,aiat,aic,aidoge,aigensyn,ain,aio,aion,aiot,aioz,air,airdrop,aiv,aix9,aixbt,ake,akita,akro,akt,ala,alabb,alch,alcx,ale,aleo,aleph,alex,algo,ali,alice,align,alkimi,allo,alpa,alpaca,alph,alpha,alpine,alt,altszn,alu,amatb,amb,amcb,amdb,amdon,amdx,amo,amp,ampl,amzn,amznb,amznon,amznx,anc,andy,andyeth,anime,ankr,anoa,anon,ansem,ansemcat,ant,antfun,anthropic,any,anyone,ao,aog,aop,ape,apepe,apex,api3,apm,appb,apr,apt,aptm,apu,apx,aqa,ar,arara,arb,arc,arch,ardr,arena,arg,argus,aria,ark,arkm,armb,arpa,arrr,art,artfi,artx,arw,arx,ask,asm,asmlb,asmlon,asp,asr,asset,ast,aster,asteroid,astr,astra,astsb,astson,at,ata,ath,atlas,atm,atom,atos,atr,ats,atwo,auction,audd,audf,audio,audm,auki,aura,aurora,ausd,auto,ava,avaai,avail,avax,avc,avgob,avgoon,avgox,avici,avl,avnt,avt,avv,awe,awin,axis,axl,axs,axtib,azero,aznx,aztec,azur,b,b2,b3,b3x,babab,babaon,babi,baby,babydoge,babyshark,badger,baion,bake,bal,ban,banana,bananas31,band,bank,bar,bard,bas,basecat,based,basiscash,bat,batch,bay,bb,bbb,bbt,bcc,bccoin,bcd,bch,bchabc,bchdown,bchsv,bchup,bcn,bcut,bdca,bdg,bdt,bdx,bdxn,beam,beamx,bear,beat,beb,bee,bel,believe,bells,belong,benji,benqi,bera,bert,beta,beth,bf,bfc,bfg,bfusd,bgb,bgsc,bico,bid,bifi,bigtime,bill,bim,bio,birb,bitboard,bitcoin,bkn,bkrw,bld,blend,bless,blkdigon,blkgrwon,blkhion,blkon,bluai,blue,bluechip,blum,blur,blz,bmnrb,bmnron,bmnrx,bmt,bmx,bnb,bnbbear,bnbbull,bnbdown,bnbtiger,bnbup,bnc,bnc4,bncb,bncold,bnkr,bnsol,bnt,bnx,bob,boba,bobo,bold,bome,bond,bone,boner,bonk,booe,boop,bora,borg,bos,boson,botb,bounty,box,bp,bpt,br,brainon,brett,brev,bric,brise,brkbb,brkl,brl1,brn,broccoli,broccoli714,brtron,bsai,bsb,bspb,bst,bsv,bsw,btc,btcdown,btcst,btcup,btg,btgoon,btr,btrst,bts,btse,btt,bttc,btw,btx,bubble,bubi,buck,bull,bulla,burger,burn,busd,busy,buttcoin,buy,bxn,byn,bzrx,bzz,c,c98,ca,caga,cake,camp,cap,carat,cards,carv,cashcat,cat,cate,catecoin,cati,cats,caw,cbk,cbrsb,cc,ccd,cel,cell,celo,celr,cent,cere,cess,cet,cetus,cfg,cfx,cgn,cgo,cgpt,chatai,check,cheel,cheems,cheq,chess,chex,chillguy,chip,chirp,cho,chr,chz,city,ckb,clanker,clash,clnd,clo,clore,cloud,clv,cmcsax,cnpy,coai,cocos,codex,cohrb,coin,coinb,coindepo,coinon,coinx,col,collect,cols,combo,common,comp,cookie,coq,core,coreum,corn,cos,coti,cow,cp,cpool,cpr,crcl,crclb,crclon,crclx,crdob,cre,cream,credi,creo,crepe,creta,crf,crmb,cro,cross,crown,crts,cru,crv,crvusd,crwdb,crwdx,crwvb,cscoon,cscox,cspr,cst,ct,ctc,ctk,ctm,ctp,ctr,ctsi,ctx,ctxc,cudis,cult,cummies,cusd,cvc,cvp,cvx,cvxon,cwar,cweb,cwif,cws,cxt,cyber,cyc,cyphb,cys,d,d2t,daddy,dag,dai,dao,dar,dash,data,dbc,dbr,dcr,debit,deep,deepseek,defi,degen,dego,delabs,dellb,dent,deod,dep,deso,desu,deus,dexe,dext,df,dfdvx,dfg,dgai,dgb,dgma,dhn,dhrx,dhv,dia,diam,diem,dimo,din,divi,djed,dji6930,djtb,dka,dl,dmc,dmd,dmtr,dn,dna,dnt,dobo,dock,dodo,dog,doge,dogelonmars,doginme,dogs,dolo,dome,dood,dora,dos,dot,dotdown,dotup,dpr,dramb,dramon,drb,drep,dress,drift,drv,dsync,dtec,duck,durev,dusd,dusk,dxi,dydx,dym,dyor,eat,edel,eden,edge,edgex,edu,eemon,efaon,egame,egl1,egld,eigen,el,ela,elf,elg,elizaos,elon,elp,elsa,elx,emc,emt,ena,enj,ens,enso,eos,eosbear,eosbull,eosdown,eosup,epic,eps,ept,epx,eqb,eqty,era,erd,erg,ern,es,ese,esim,esp,esports,etc,eth,ethbear,ethbull,ethdown,ethdydx,ethfi,ethup,ethw,etn,eul,eurc,eurcv,euri,eurq,eurr,eusd,eusx,ev,evaa,ever,ewt,ewyb,ewyx,f,fai,far,farm,fartboy,fartcoin,fb,fct,fdusd,fearnot,feg,fei,fely,fet,ff,fhe,fida,fidd,fight,fil,fildown,filup,fio,fir,fire,firo,fis,fishw,fiwa,flip,flm,flncb,flock,floki,flow,flr,flt,fluid,flux,fly,fogo,fold,folks,fone,for,forest,forex,form,fort,forth,fourcoin,fox,foxsy,foxy,frax,frong,front,frxusd,ft,ftm,ftrb,ftt,fuel,ful,fun,funtoken,fusd,fuse,fwdib,fwog,fxion,fxs,fyn,g,g3,gafi,gaib,gain,gal,gala,galeon,galo,game,games,gas,gat,gata,gato,gbyte,gcb,gcoin,gear,geg,gems,genius,geod,gevb,gf,gfal,gfi,gft,gho,ghst,ghx,giga,giggle,gitcoin,gldon,gldx,gleec,glm,glmr,glwb,gme,gmeb,gmee,gmmt,gmrx,gmt,gmwagmi,gmx,gnc,gno,gnot,gns,go4,goat,goated,goats,gods,gog,gohome,goldao,goldgr,gomining,googl,googlb,googlc,googlon,googlx,googon,gp,gprob,gps,gram,grass,griffain,grin,grnd,grok,grove,grow,grs,grt,grvt,gsb,gstock,gt,gtai,gtbtc,gtc,gteth,gua,gun,gusd,gwei,gxe,gxs,gyen,h,haedal,haha,hai,hamster,hana,hard,harold,hbar,hdg,hdn,hdx,heart,hegic,hei,hello,hemi,hero,hez,hft,hget,hgpt,hibs,hifi,high,himsb,himson,hint,hippo,hive,hln,hmnd,hmstr,hnb,hnt,hod,hold,holdstation,holo,home,honey,honx,hoodb,hoodon,hoodx,hook,hookr,hoppy,hopr,hord,hot,hp,hpeb,hpos10i,hpp,hsk,ht,htm,htr,htx,huma,hunt,hvlo,hype,hyper,iag,iauon,ibiton,ibmb,ibmon,ibs,icnt,icp,icx,id,idex,idia,idol,idos,idrt,iefaon,iemgon,ihc,ijhon,ika,ilv,ily,impt,imt,imu,imx,in,inc,index,init,inj,intcb,intcon,intcx,inter,intwb,inv,inx,io,iost,iota,iotx,iq,ir,irenb,iris,iron,irys,isikc,isk,island,islm,isp,ita,ithaca,itoton,ivvon,iwfon,iwmon,iwnon,ixs,izi,jager,janet,jasmy,jct,jeanphil,jellyjelly,jfi,jitosol,jlp,joc,joe,jpmb,jpmon,jsm,jst,jto,juc,jup,juv,kaia,kaio,kaito,kan,kas,kat,kava,kcs,kct,kda,kdk,keep,kekius,kernel,ket,key,keycat,kgen,kgst,kii,kilo,kishu,kite,kiteai,klay,klk,klv,kmd,kmno,knc,kntq,koge,koma,konet,koon,kor,korub,kox,kp3r,kpol,krl,ksm,kstrb,kt,kta,kton,kub,kyo,kyve,kzen,l3,la,lab,labubu,ladys,lair,laptop,lat,lava,layer,lazio,lbt,lcx,ldo,legion,lend,leo,lever,lf,light,ligo,like,lime,lina,linea,lingo,link,linkdown,linkup,lion,liquidium,lista,lisusd,lit,liteb,litex,ll,llyb,llyon,llyx,lm,lmton,lmts,lmwr,ln,lnq,loa,loan,lobo,locus,lofi,logt,logx,loka,lon,loom,lot,loulou,lpt,lq,lqr,lqty,lrc,lrds,lrn,lsk,ltc,ltcdown,ltcup,lto,luca,lucic,lumia,luna,lunc,lunrx,lusd,lv,lvly,lvva,lwp,lyn,lyp,lyx,m,m87,ma,mag7ssi,mag7xon,magic,magma,majo,major,mak,mamo,man,mana,mana3,manifest,manta,mantra,manyu,maon,mapo,marscoin,mart,mask,mat,match,math,mav,mavia,max,may,mbg,mbl,mbox,mbx,mc,mcat,mcb,mcdon,mcdull,mcdx,mcm,mcn,mcoin,mctp,mdbb,mdf,mdt,mdx,me,med,mega,melania,meld,meme,mengo,mepad,merl,met,meta,metab,metac,metadao,metan,metaon,metax,metfi,metis,meto,mev,mew,mey,mezo,mf,mft,mgkl,mgo,mha,miladycult,milo,mim,min,mina,mir,mira,mith,mito,mkr,ml,mlc,mlk,mln,mmpro,mmt,mmui,mnde,mngo,mnsry,mnt,mntx,mob,mobile,moc,moca,mode,mog,mon,mona,moodeng,mooney,moov,mori,morpho,move,movr,mow,mpc,mplx,mrnab,mrvlb,mrvlon,mrvlx,msftb,msfton,msftx,msol,msp,msq,mstr,mstrb,mstron,mstrx,mtl,mtv,mtx,mu,mub,mubarak,mug,multi,muon,musd,musebook,muub,mux,mvc,mvl,mvllb,mwxt,mx,my,myro,myst,myx,naft,naka,nano,naoris,nap,natix,navi,navx,naws,nbisb,nbison,nblu,nbot,nbs,nbt,nc,ncn,nct,near,nebl,neet,neiro,neirocto,neko,neo,neon,nero,nes,ness,net,nett,netx,neural,neuro,newt,nex,nexa,nexi,nexo,nfe,nflxb,nflxon,nflxx,nfp,nft,nibi,night,niko,nil,nila,nim,niulai,niza,nkn,nmc,nmr,nock,node,nodl,nokb,nom,noot,nos,not,npc,npxs,ns,nsdx,nst,ntrn,nu,nuls,num,numi,nuts,nux,nvda,nvdab,nvdac,nvdaon,nvdax,nvoon,nxa,nxpc,nxt,nyan,nym,o,o4dx,oas,oax,obi,obol,obsr,obt,ocean,octa,ofc,og,ogn,ogpu,ogy,oho,okb,oksol,ol,olas,ole,om,omg,omi,omikami,omni,on,ondo,one,ong,ont,ooki,oort,op,open,openai,opg,opn,orai,orbio,orbr,orbs,orca,orclb,orclon,orclx,order,ordi,ore,orion,orn,oro,ort,osak,osmo,otk,ousd,ovl,ovo,ovr,owb,owl,own,oxt,p2p,paal,pace,pack,pact,pal,palm,pando,panwon,paparazzi,part,parti,pax,paxg,payai,pbron,pbtc35a,pci,pda,pddb,pddon,pdt,peaq,pearl,peipei,pell,pendle,pengb,pengu,penguin,people,peoplefb,pep,pepe,pepecoin,pepon,pepx,perl,perp,pfeon,pgon,pgx,pha,phb,phnix,pi,pieverse,piggy,pika,pin,pine,pingo,pipe,pipedog,pippin,pirate,pit,pivx,pixel,pla,plai,planet,play,plspad,pltr,pltrb,pltron,pltrx,plume,pm,pmt,pmx,png,pnk,pnt,pnut,pod,pokt,pol,polis,pols,poly,polyx,pond,ponke,pons,pool,pop,popcat,popmtx,por,pork,pornrocket,port,port3,portal,porto,power,powr,ppc,ppoly,ppt,prai,prcl,predict,prespcx,prime,prl,pro,prom,prompt,propc,props,pros,prosper,prove,psg,psi,ptb,public,puffer,pump,pumpbtc,pundiai,pundix,pups,purr,puss,pybobo,pym,pyplb,pyr,pyth,pyusd,pzm,pzp,q,qait,qanx,qbx,qcomb,qcomon,qfi,qi,qka,qkc,qnt,qntb,qorpo,qqq,qqqb,qqqon,qqqx,qtum,quai,qubic,quick,quid,r2,raca,rad,rai,rail,rain,rally,ramp,rare,rari,rats,rave,ravgo,ray,rbc,rbnt,rcrcl,rddtb,rdnt,re,react,ready,real,recall,rect,red,redo,redstone,reef,ref,rei,reign,rekt,rektcoin,render,rep,reppo,req,resolv,revu,rez,rfc,rfrm,rgoogl,rgt,rhea,rif,ring,rintc,rio,rion,rite,ritual,river,riz,rize,rjv,rklbb,rlb,rlc,rls,rlusd,rmrvl,rmu,rnbw,rndr,rnvda,roa,roam,robo,rog,roll,ron,ronin,roobee,root,rose,rpl,rqqq,rsc,rsndk,rsoxl,rsoxs,rspcx,rspy,rsr,rss3,rtf,rtqqq,rtsla,rtsm,rtx,ruji,rune,rvn,rvv,rwa,rwainc,rwusd,rzto,s,safe,saga,sahara,sai,saito,sand,santos,sapien,saros,sats,sauber,sauce,save,sbd,sbeton,sbuxon,sc,scam,scarcity,scihub,scor,scr,scrt,sct,sd,sdex,seczb,sei,send,senso,sent,sentis,serv,sfi,sfp,sgovon,sgr,share,shazb,shdw,shell,shfl,shft,shib,shiro,shldx,shm,shping,shr,shx,si,sign,simonscat,sin,siren,sis,six,skate,skddb,skhy,skhyb,skhyg,skhyon,skhyx,skl,skop,skr,skuub,sky,skya,skyai,slc,slerf,slf,slp,slrs,slt,slvon,slx,smart,smb,smcib,smhb,smx,sn3,sn4,sn44,sn5,sn56,sn62,sn9,snc,sndkb,sndkc,sndkon,sndkx,snek,snpt,sns,snt,sntr,snx,snxxb,sofion,sogni,soil,sol,solv,somi,sonic,soon,soph,soso,soul,soxlb,soxlx,soxsb,spa,space,spacex,sparklet,spcm,spcx,spcxb,spcxc,spcxon,spcxx,spectre,spell,spellfire,spk,spo,sps,spurs,spx,spy,spyb,spyon,spyx,sqd,sqgrow,sqqqb,sqr,srm,srx,ssg,ssv,st,stable,star,stay,stbl,stc,steem,steth,stg,stik,stix,stmx,sto,stoc,stonk,stonkbroker,storj,stpt,strat,strax,strcon,strcx,stream,strike,strk,strm,strx,stt,stx,stxb,sui,suku,sun,sundog,supe,super,superform,supra,susd,sushi,sushidown,sushiup,sut,svl,swan,swap,swarm,swarms,swash,sway,swch,swell,swftc,swgt,sxp,sxpdown,sxpup,sxt,symm,syn,syrup,sys,t,ta,tac,tag,tai,taiko,take,talent,tao,taobot,tapprotocol,tart,taur,tbc,tbk,tcom,tct,tdrop,tea,ted,tel,tendies,tet,teva,tfuel,tgbp,tgc,the,theta,thq,tia,tibbir,tipon,tit,titn,tko,tlm,tlos,tlton,tmfb,tmon,tmx,tnk,tnsr,tokamak,toke,token,tolly,ton,torn,toshi,tower,town,towns,tpt,tqqqb,tqqqon,tqqqx,tra,trac,trade,tradoor,trb,trcl,treat,tree,tria,tribe,trio,troll,troy,tru,truf,trump,trust,truth,trvl,trwa,trx,trxdown,trxup,tsla,tslab,tslac,tslaon,tslax,tsmb,tsmon,tsmx,tst,tstbsc,tt,tune,turbo,turbos,turt,turtle,tusd,tut,tvk,twt,tx,txc,tycoon,u,u2u,uai,ub,ubt,ucn,udao,uds,ufd,uft,ultima,uma,umia,umxm,unfi,unhon,unhx,uni,unidown,union,unit0,uniup,unn,unp,uos,up,upc,uqc,uranus,us,usarb,usat,usd0,usd1,usdai,usdc,usdcv,usdd,usde,usdeb,usdf,usdg,usdgo,usdh,usdk,usdm,usdon,usdp,usdpt,usdq,usdr,usds,usdsui,usdt,usdv,usdy,useless,usoon,ust,ustc,usual,usx,utk,uvxyb,uxlink,vai,val,vam,vana,vanry,vanta,vara,vatreni,vbusd,vc,vchf,vcnt,vdai,velo,velodrome,velvet,vemp,ven,venom,verona,vert,vest,vet,vfy,vgx,vib,vic,vidt,vine,vinu,virtual,vite,vlink,vltc,vlx,vmt,vnxau,von,vooi,vow,voxel,vpr,vr,vsn,vstb,vsx,vsys,vt,vtc,vtho,vtix,vvs,vvv,vxt,w,w3gg,wai,wal,wallet,wam,ward,waves,waxp,wbai,wbeth,wbtc,wct,wdcb,we,wecan,weeth,wefi,well,well3,wemix,wen,wenb,wet,wfi,white,whuf,whypad,wif,wild,win,wing,wkc,wl,wld,wlfi,wmton,wmtx,wncg,wnxm,wod,wojak,wolf,wom,woo,would,wpay,wrt,wrx,wsb,wspp,wtc,wusd,wxt,wxtm,wzrd,x,xaaoi,xaapl,xabbv,xacn,xadbe,xadi,xaehr,xai,xalab,xamat,xamc,xamgn,xamzn,xan,xapld,xapp,xarm,xasml,xasts,xaum,xaut,xaut0,xava,xavgo,xaxti,xbac,xbb,xbe,xbmnr,xbx,xcbrs,xceg,xcgnx,xch,xcien,xcn,xcoin,xcost,xcp,xcrdo,xcrm,xcrwd,xcrwv,xcsco,xcvna,xcx,xdb,xdc,xddog,xdell,xdkng,xdp,xec,xels,xem,xewj,xewt,xewy,xewz,xfc,xflex,xflnc,xfly,xge,xgev,xgild,xgme,xgn,xgoogl,xgpro,xgs,xgtlb,xhims,xhood,xhpe,xhut,xiaox,xibkr,xibm,xintc,xionq,xiren,xisrg,xiwm,xjnj,xjpm,xklac,xko,xkoru,xl1,xlite,xlly,xlm,xlrcx,xlunr,xmara,xmcd,xmeta,xmn,xmp,xmpwr,xmr,xmrk,xmrna,xmsft,xmstr,xmu,xna,xnbis,xnet,xnflx,xnke,xnl,xno,xnvda,xny,xoklo,xokta,xon,xorcl,xoscr,xoust,xp,xpeng,xpin,xpl,xpla,xpltr,xpoet,xpr,xprt,xpypl,xqcom,xqqq,xr,xrd,xrddt,xrdw,xriot,xrivn,xrklb,xrp,xseed,xshop,xsimo,xsmci,xsmh,xsndk,xsnow,xsony,xsoxl,xsoxs,xspcx,xspy,xsqqq,xstrc,xswap,xt,xtag,xteam,xtem,xter,xtmf,xtqqq,xtsem,xtsla,xtsll,xtsm,xtta,xttmi,xttwo,xtwlo,xtxn,xtz,xtzup,xu3o8,xunh,xurnm,xusar,xusd,xuvxy,xv,xvg,xvicr,xvrt,xvs,xwc,xwdc,xwen,xwmt,xxbi,xxle,xxom,xym,xyo,xzm,y8u,yb,ybdbd,yct,yec,yee,yellow,yfi,yfidown,yfii,yfiup,ygg,yld5on,yld8on,yng,yom,yzy,zama,zano,zbcn,zbt,zcat,zchf,zcl,zec,zen,zent,zerebro,zest,zeta,zeum,zeus,zfi,zig,zil,zix,zk,zkc,zkj,zkl,zkp,zlw,zmb,zoon,zora,zpay,zrc,zro,zrx,zsc,ztc,zulu,zyra";
 const LOCAL_CRYPTO_EXTRA = {"aart":"/logos/crypto/aart.jpg","fxnw":"/logos/crypto/fxnw.jpg","xcv":"/logos/crypto/xcv.jpg"};
-const LOCAL_FLAG_CODES = new Set(["ae","af","am","au","az","bh","br","ca","ch","cn","dk","gb","ge","hk","in","iq","ir","jp","kg","kr","kw","kz","my","no","nz","om","qa","ru","sa","se","sg","th","tj","tm","tr","us","uz"]);
+const LOCAL_FLAG_CODES = new Set(["ae","af","am","au","az","bh","br","ca","ch","cn","dk","eu","gb","ge","hk","in","iq","ir","jp","kg","kr","kw","kz","my","no","nz","om","qa","ru","sa","se","sg","th","tj","tm","tr","us","uz"]);
 /* @LOCAL_ICONS_END */
 
 const CRYPTO_FULL_NAMES = {
@@ -6924,10 +6961,13 @@ function softRender(){
   paintLivePrices();
 }
 function applyPrices(items){let n=0,added=0,sig=0;const now=Math.floor(Date.now()/1000);
-  for(const [id,i] of Object.entries(items||{})){
+  const incomingObj = items || {};
+  const incomingEntries = Object.entries(incomingObj);
+  const incomingCryptoCount = incomingEntries.filter(([, v]) => v && v.kind === 'crypto').length;
+  for(const [id,i] of incomingEntries){
     if(!/^[a-z0-9]{1,20}$/.test(id)||!(i.price>0))continue;
-    const itemTs = i.sourceTimestamp || i.updatedAt || i.receivedAt || now;
-    sig+=i.price+itemTs;
+    const itemTs = Number(i.sourceTimestamp || i.updatedAt || i.receivedAt || 0);
+    sig+=i.price+(itemTs||0);
     let a=assets.find(x=>x.id===id);
     if(!a&&(i.kind==='crypto'||i.kind==='domestic')){
       const sy=String(i.symbol||id),dom=i.kind==='domestic';
@@ -6953,7 +6993,7 @@ function applyPrices(items){let n=0,added=0,sig=0;const now=Math.floor(Date.now(
         a.en = cleanDisplayName(sy, a.en);
       }
       const existingTs = a.sourceTimestamp || a.updatedAt || 0;
-      if(a.cat==='crypto'&&a.id!=='usdt'&&(i.currency||'IRT')==='USDT'&&existingTs>itemTs)continue;
+      if(a.cat==='crypto'&&a.id!=='usdt'&&(i.currency||'IRT')==='USDT'&&existingTs>itemTs&&itemTs>0)continue;
       const nextChange = (Number.isFinite(i.change) && (i.change !== 0 || a.price !== i.price || !Number.isFinite(a.change)))
         ? i.change
         : (Number.isFinite(a.change) ? a.change : i.change);
@@ -6963,8 +7003,8 @@ function applyPrices(items){let n=0,added=0,sig=0;const now=Math.floor(Date.now(
         currency:i.currency||'IRT',
         updatedAt:itemTs,
         sourceTimestamp:Number(i.sourceTimestamp)>0?Number(i.sourceTimestamp):null,
-        receivedAt:i.receivedAt||now,
-        checkedAt:i.checkedAt||now,
+        receivedAt:Number(i.receivedAt)>0?Number(i.receivedAt):null,
+        checkedAt:Number(i.checkedAt)>0?Number(i.checkedAt):now,
         priceType:i.priceType||'quoted',
         method:i.method||null,
         stale:!!i.stale,
@@ -6974,6 +7014,14 @@ function applyPrices(items){let n=0,added=0,sig=0;const now=Math.floor(Date.now(
       });
       a.stale = isStale(a);
       n++;
+    }
+  }
+  if (incomingCryptoCount >= 15) {
+    for (const a of assets) {
+      if (a.cat === 'crypto' && a.id !== 'usdt' && !Object.prototype.hasOwnProperty.call(incomingObj, a.id)) {
+        a.stale = true;
+        if (!a.source || a.source === 'live') a.source = 'stale_snapshot';
+      }
     }
   }
   if (added) assets = sortAssetsStandard(assets);
@@ -6989,7 +7037,8 @@ function savePriceCache(items){
           ? i.change
           : (Array.isArray(prevArr) && prevArr[0] === i.price && Number.isFinite(prevArr[1]) && prevArr[1] !== 0 ? prevArr[1] : i.change);
         const hasRealSrcTs = Number(i.sourceTimestamp) > 0;
-        const ts = hasRealSrcTs ? Number(i.sourceTimestamp) : (i.updatedAt || i.receivedAt || Math.floor(Date.now() / 1000));
+        const ts = hasRealSrcTs ? Number(i.sourceTimestamp) : (Number(i.updatedAt || i.receivedAt) || 0);
+        if (!(ts > 0)) continue;
         o[id] = [i.price, chg, ts, i.currency, i.kind, i.name, i.symbol, i.cat, i.volume, i.pair, i.priceType || 'quoted', i.source || 'cache', hasRealSrcTs ? 1 : 0];
       }
     }
@@ -7136,14 +7185,31 @@ function validateClientHistory(rawPoints, range, a) {
 
   const minRatio = isDomestic ? 0.25 : 0.05;
   const maxRatio = isDomestic ? 4.0 : 20.0;
-  const filtered = [deduped[0]];
+  const ratioFiltered = [deduped[0]];
   for (let i = 1; i < deduped.length; i++) {
-    const prev = filtered[filtered.length - 1][1];
+    const prev = ratioFiltered[ratioFiltered.length - 1][1];
     const cur = deduped[i][1];
     const ratio = cur / prev;
     if (ratio >= minRatio && ratio <= maxRatio) {
-      filtered.push(deduped[i]);
+      ratioFiltered.push(deduped[i]);
     }
+  }
+  const spikeNeighborTol = isDomestic ? 0.08 : 0.14;
+  const spikeUp = isDomestic ? 1.18 : 1.30;
+  const spikeDown = isDomestic ? 0.84 : 0.74;
+  const filtered = ratioFiltered.length >= 3 ? [ratioFiltered[0]] : ratioFiltered;
+  if (ratioFiltered.length >= 3) {
+    for (let i = 1; i < ratioFiltered.length - 1; i++) {
+      const prev = filtered[filtered.length - 1][1];
+      const cur = ratioFiltered[i][1];
+      const next = ratioFiltered[i + 1][1];
+      if (Math.abs(next - prev) / Math.max(prev, next, 1e-12) <= spikeNeighborTol) {
+        const rMid = cur / ((prev + next) / 2);
+        if (rMid >= spikeUp || rMid <= spikeDown) continue;
+      }
+      filtered.push(ratioFiltered[i]);
+    }
+    filtered.push(ratioFiltered[ratioFiltered.length - 1]);
   }
   if (filtered.length < 2) return [];
 
@@ -7276,7 +7342,7 @@ function drawDetail(){
   const rangePct=firstPrice>0?((lastPrice-firstPrice)/firstPrice)*100:0;
   const chartColor=rangePct>=0?'#16865b':'#d84b55';
   const isDailyTooltip = range === '1M' || range === '1Y' || (isDomestic && range !== '1D' && range !== '1H');
-  paintChart(box,pts,chartColor,n=>quote(a,n),{isDaily:isDailyTooltip});
+  paintChart(box,pts,chartColor,n=>quote(a,n),{isDaily:isDailyTooltip,range,isDomestic});
   if(hdrChange){
     hdrChange.textContent=(rangePct>=0?'↗ +':'↘ ')+pct.format(Math.abs(rangePct))+'٪ ('+(RANGE_LABEL[range]||range)+')';
     hdrChange.className='change '+(rangePct>=0?'up':'down');
@@ -7330,7 +7396,10 @@ async function getHistory(id,range='1D'){
       histories.delete(key);
     }
     return points;
-  }).catch(()=>[]).finally(()=>historyBusy.delete(key));
+  }).catch((err)=>{
+    if(err&&err.status===429){sparkBackoffUntil=Date.now()+15000;}
+    return [];
+  }).finally(()=>historyBusy.delete(key));
   historyBusy.set(key,job);
   return job;
 }
@@ -7353,7 +7422,7 @@ function withCurrent(points, a, range = '1D') {
   }
   return valid;
 }
-let sparkActive=0;const sparkQueue=[];const sparkSeen=new Set();
+let sparkActive=0,sparkBackoffUntil=0,sparkTimer=0;const sparkQueue=[];const sparkSeen=new Set();
 function enqueueSpark(id){
   if(!id||sparkSeen.has(id))return;
   const meta=sparkSvgMeta.get(id);
@@ -7361,10 +7430,20 @@ function enqueueSpark(id){
   sparkSeen.add(id);
   sparkQueue.push(id);
 }
+function scheduleDrainSparks(delayMs=80){
+  if(sparkTimer||!sparkQueue.length)return;
+  const wait=Math.max(delayMs,sparkBackoffUntil-Date.now());
+  sparkTimer=setTimeout(()=>{sparkTimer=0;drainSparks();},Math.max(0,wait));
+}
 function drainSparks(){
   if(detailChartInFlight>0)return;
-  while(sparkActive<4&&sparkQueue.length){
-    if(detailChartInFlight>0)return;
+  const now=Date.now();
+  if(now<sparkBackoffUntil){
+    scheduleDrainSparks(sparkBackoffUntil-now+100);
+    return;
+  }
+  while(sparkActive<2&&sparkQueue.length){
+    if(detailChartInFlight>0||Date.now()<sparkBackoffUntil)return;
     const id=sparkQueue.shift();
     sparkActive++;
     const a=asset(id);
@@ -7378,7 +7457,7 @@ function drainSparks(){
       let usedRange=targetRange;
       let curA=asset(id);
       let p=withCurrent(points,curA,usedRange);
-      if(p.length<2){
+      if(p.length<2 && curA && curA.cat!=='crypto' && Array.isArray(state.featured) && state.featured.includes(id) && Date.now()>=sparkBackoffUntil){
         usedRange='1W';
         const fallbackPts=await getHistory(id,'1W');
         curA=asset(id);
@@ -7392,14 +7471,16 @@ function drainSparks(){
     }).finally(()=>{
       sparkActive--;
       sparkSeen.delete(id);
-      drainSparks();
+      if(sparkQueue.length){
+        scheduleDrainSparks(Date.now()<sparkBackoffUntil?(sparkBackoffUntil-Date.now()+100):75);
+      }
     });
   }
 }
 const sparkObserver=new IntersectionObserver(entries=>{
   for(const e of entries)if(e.isIntersecting){sparkObserver.unobserve(e.target);enqueueSpark(e.target.dataset.spark);}
   drainSparks();
-},{rootMargin:'1600px 0px'});
+},{rootMargin:'220px 0px'});
 const preloadedIconUrls = new Set();
 const iconPreloadQueue = [];
 let iconPreloadActive = 0;
@@ -7438,18 +7519,19 @@ function drainIconPreloads() {
 }
 function prefetchUpcomingAssets() {
   const vh = window.innerHeight || 800;
-  document.querySelectorAll('[data-spark]').forEach(el => {
+  const activeScope = document.querySelector('.page.active') || document;
+  activeScope.querySelectorAll('[data-spark]').forEach(el => {
     const id = el.dataset.spark;
     if (!id || sparkSvgCache.has(id) || sparkSeen.has(id)) return;
     const r = el.getBoundingClientRect();
-    if (r.top < vh + 900 && r.bottom > -400) {
+    if (r.width > 0 && r.height > 0 && r.top < vh + 240 && r.bottom > -200) {
       sparkObserver.unobserve(el);
       enqueueSpark(id);
     }
   });
-  document.querySelectorAll('[data-detail]').forEach(card => {
+  activeScope.querySelectorAll('[data-detail]').forEach(card => {
     const r = card.getBoundingClientRect();
-    if (r.top < vh + 1200 && r.bottom > -400) {
+    if (r.width > 0 && r.height > 0 && r.top < vh + 600 && r.bottom > -200) {
       const a = asset(card.dataset.detail);
       const u = assetIconUrl(a);
       if (u) enqueuePreloadIcon(u);
@@ -7459,7 +7541,6 @@ function prefetchUpcomingAssets() {
     const upcomingSlice = lastFilteredMarket.slice(marketLimit, marketLimit + 12);
     for (const a of upcomingSlice) {
       if (!a?.id) continue;
-      enqueueSpark(a.id);
       const u = assetIconUrl(a);
       if (u) enqueuePreloadIcon(u);
     }
@@ -7601,7 +7682,7 @@ function convAssetData(id) {
       name: 'تومان ایران',
       symbol: 'تومان',
       cat: 'domestic',
-      iconHtml: `<span class="asset-icon asset-icon-flag"><img src="https://cdn.jsdelivr.net/gh/HatScripts/circle-flags@gh-pages/flags/ir.svg" alt="تومان ایران" class="country-flag-img"></span>`
+      iconHtml: `<span class="asset-icon asset-icon-flag"><img src="/logos/flags/ir.svg" alt="تومان ایران" class="country-flag-img" data-fb="تومان"></span>`
     };
   }
   if (id === 'rial') {
@@ -7610,7 +7691,7 @@ function convAssetData(id) {
       name: 'ریال ایران',
       symbol: 'ریال',
       cat: 'domestic',
-      iconHtml: `<span class="asset-icon asset-icon-flag"><img src="https://cdn.jsdelivr.net/gh/HatScripts/circle-flags@gh-pages/flags/ir.svg" alt="ریال ایران" class="country-flag-img"></span>`
+      iconHtml: `<span class="asset-icon asset-icon-flag"><img src="/logos/flags/ir.svg" alt="ریال ایران" class="country-flag-img" data-fb="ریال"></span>`
     };
   }
   const found = assets.find(x => x.id === id);
@@ -8249,7 +8330,28 @@ async function renderAdmin() {
     $('#adminQuickClearCache')?.addEventListener('click', async () => {
       try {
         await api('/api/admin/clear-cache', { method: 'POST' });
-        toast('کش موقت قیمت‌ها با موفقیت پاکسازی شد');
+        histories.clear();
+        historyBusy.clear();
+        if (typeof portfolioHistoryCache !== 'undefined') portfolioHistoryCache.clear();
+        sparkSvgCache.clear();
+        sparkSvgMeta.clear();
+        sparkSeen.clear();
+        lastPriceSig = -1;
+        hasFreshPricesLoaded = false;
+        window._cryptoIconsLoaded = false;
+        try {
+          localStorage.removeItem('darayi-prices-v3');
+          localStorage.removeItem('darayi-prices-v4');
+          localStorage.removeItem('darayi-crypto-icons-v6');
+        } catch {}
+        try {
+          if (navigator.serviceWorker?.controller) {
+            navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_RUNTIME_CACHE' });
+          }
+        } catch {}
+        await loadPrices(true);
+        renderAll();
+        toast('تمام لایه‌های کش (سرور، لبه، مرورگر و آیکون) با موفقیت پاکسازی و نوسازی شد');
       } catch (err) {
         toast('خطا: ' + err.message);
       }

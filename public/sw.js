@@ -1,5 +1,5 @@
 // Service Worker for Darayi PWA
-const CACHE_NAME = 'darayi-shell-v12';
+const CACHE_NAME = 'darayi-shell-v13';
 const STATIC_ASSETS = [
   '/',
   '/manifest.webmanifest',
@@ -28,6 +28,12 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('message', (event) => {
   if (event.data && (event.data.type === 'SKIP_WAITING' || event.data === 'skipWaiting')) {
     self.skipWaiting();
+  } else if (event.data && event.data.type === 'CLEAR_RUNTIME_CACHE') {
+    event.waitUntil(
+      caches.keys().then((keys) => Promise.all(
+        keys.filter((k) => k.startsWith('darayi-shell-')).map((k) => caches.delete(k))
+      )).catch(() => {})
+    );
   }
 });
 
