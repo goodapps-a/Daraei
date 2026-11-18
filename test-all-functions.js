@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import vm from 'node:vm';
 import { DatabaseSync } from 'node:sqlite';
 import {
   cleanData,
@@ -32,6 +33,7 @@ import {
   getStaleThresholdSec,
   isPriceItemStale,
   parseBonbastPayload,
+  preservePricePrecision,
   normalizeCandleOpenTimeSec,
   parseBinanceKlineEntry,
   filterPointsStrictlyInRange,
@@ -2058,12 +2060,12 @@ test('wrangler.toml sets keep_vars = true and dark mode viewport styling + SW v1
   assert.ok(html.includes('<meta name="color-scheme" id="colorSchemeMeta" content="light">'));
   assert.ok(html.includes(':root[data-theme=dark],html[data-theme=dark]'));
   assert.ok(html.includes('document.body.style.backgroundColor'));
-  assert.ok(html.includes('/sw.js?v=13'));
+  assert.ok(html.includes('/sw.js?v=14'));
 
   const swFile = fs.readFileSync(new URL('./public/sw.js', import.meta.url), 'utf8');
-  assert.ok(swFile.includes("darayi-shell-v13"));
+  assert.ok(swFile.includes("darayi-shell-v14"));
   const workerSrc = fs.readFileSync(new URL('./src/worker.js', import.meta.url), 'utf8');
-  assert.ok(workerSrc.includes("darayi-shell-v13"));
+  assert.ok(workerSrc.includes("darayi-shell-v14"));
 });
 
 test('shared Promises eliminated in worker.js while concurrent refreshPrices still coalesces without cross-request Promise sharing', async () => {
@@ -3083,11 +3085,442 @@ test('All local crypto logos, 38 fiat SVG flags, and PWA manifest maskable paths
   assert.equal(/\bon(?:error|submit|click|load|change|input)\s*=\s*["']/.test(html), false, 'Inline on*= attribute violates strict CSP');
 });
 
+test('Admin API feed priority changes persist across isolates, control upstream fetch order, and report timerLimited vs real pingMs', async () => {
+  __resetWorkerStateForTests();
+  const now = Math.floor(Date.now() / 1000);
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
 
+  const adminEmail = 'feed-admin@example.com';
+  const env = {
+    DB,
+    ADMIN_EMAIL: adminEmail,
+    ADMIN_PASSWORD: 'FeedAdminPass!123',
+    AUTH_SECRET: 'test-auth-secret-key-minimum-32-chars!!'
+  };
+  const passHash = await hashPassword('FeedAdminPass!123', env);
+  db.prepare('INSERT INTO users(id,email,name,password_hash,created_at) VALUES(?,?,?,?,?)')
+    .run('u_feed_adm', adminEmail, 'FeedAdmin', passHash, now - 100);
 
+  const callApi = (path, { method = 'GET', body, token } = {}) =>
+    worker.fetch(
+      new Request(`https://darayi.example${path}`, {
+        method,
+        headers: {
+          origin: 'https://darayi.example',
+          ...(body ? { 'content-type': 'application/json' } : {}),
+          'x-requested-with': 'XMLHttpRequest',
+          ...(token ? { authorization: `Bearer ${token}` } : {})
+        },
+        ...(body ? { body: JSON.stringify(body) } : {})
+      }),
+      env
+    );
 
+  const login = await (await callApi('/api/auth/login', {
+    method: 'POST',
+    body: { email: adminEmail, password: 'FeedAdminPass!123' }
+  })).json();
+  assert.ok(login.token);
 
+  // Move f_okx up twice so it sits ahead of f_kucoin in crypto priority
+  let r1 = await (await callApi('/api/admin/feeds/f_okx/move-up', { method: 'POST', token: login.token })).json();
+  assert.equal(r1.ok, true);
+  r1 = await (await callApi('/api/admin/feeds/f_okx/move-up', { method: 'POST', token: login.token })).json();
+  assert.equal(r1.ok, true);
 
+  // Move f_bonbast above f_nerkhara in domestic priority
+  const bonbastIdx = r1.feeds.findIndex(f => f.id === 'f_bonbast');
+  const nerkharaIdx = r1.feeds.findIndex(f => f.id === 'f_nerkhara');
+  assert.ok(bonbastIdx > nerkharaIdx);
+  for (let s = bonbastIdx; s > nerkharaIdx; s--) {
+    await callApi('/api/admin/feeds/f_bonbast/move-up', { method: 'POST', token: login.token });
+  }
 
+  // Simulate cold worker isolate reading persisted system_feeds from D1
+  __resetWorkerStateForTests();
+  const afterCold = await (await callApi('/api/admin/feeds', { token: login.token })).json();
+  const okxRank = afterCold.feeds.findIndex(f => f.id === 'f_okx');
+  const kucoinRank = afterCold.feeds.findIndex(f => f.id === 'f_kucoin');
+  const bonRank = afterCold.feeds.findIndex(f => f.id === 'f_bonbast');
+  const nerkhRank = afterCold.feeds.findIndex(f => f.id === 'f_nerkhara');
+  assert.ok(okxRank < kucoinRank, `Expected OKX (${okxRank}) ahead of KuCoin (${kucoinRank}) after D1 reload`);
+  assert.ok(bonRank < nerkhRank, `Expected Bonbast (${bonRank}) ahead of NerkhAra (${nerkhRank}) after D1 reload`);
+
+  // Verify refreshPrices consults OKX first (succeeds without hitting KuCoin) and prefers Bonbast over NerkhAra for USD when Bonbast has higher admin priority
+  const calledUrls = [];
+  const origFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const u = typeof input === 'string' ? input : input?.url || '';
+    calledUrls.push(u);
+    if (u.includes('nerkhara.com')) {
+      const iso = new Date(now * 1000).toISOString();
+      return new Response(JSON.stringify({
+        stale: false,
+        generated_utc: iso,
+        items: [
+          { id: 'usd', price: 85000, unit: 'IRT', updated_utc: iso },
+          { id: 'eur', price: 92000, unit: 'IRT', updated_utc: iso }
+        ]
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (u.includes('bonbast.com/json')) {
+      return new Response(JSON.stringify({ usd1: 89100, eur1: 96000, gbp1: 112000, try1: 2550 }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    if (u.includes('bonbast.com')) {
+      return new Response('<script>var param = "mock_bonbast_param";</script>', {
+        status: 200,
+        headers: { 'content-type': 'text/html' }
+      });
+    }
+    if (u.includes('okx.com/api/v5/market/tickers')) {
+      const data = Array.from({ length: 16 }, (_, i) => ({
+        instId: i === 0 ? 'BTC-USDT' : `OKX${i}-USDT`,
+        last: String(93000 + i),
+        open24h: String(92000 + i),
+        volCcy24h: '1200000'
+      }));
+      return new Response(JSON.stringify({ code: '0', data }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' }
+      });
+    }
+    return new Response('{}', { status: 404 });
+  };
+
+  try {
+    const refRes = await refreshPrices(env, true, true);
+    assert.equal(refRes.items.btc.price, 93000);
+    assert.equal(refRes.items.btc.src, 'okx');
+    assert.ok(calledUrls.some(u => u.includes('okx.com')), 'Expected OKX to be fetched first');
+    assert.equal(calledUrls.some(u => u.includes('kucoin.com')), false, 'KuCoin should not be called when higher-priority OKX succeeds');
+    assert.ok(calledUrls.some(u => u.includes('bonbast.com')), 'Expected Bonbast to be queried');
+    assert.equal(refRes.items.usd.src, 'bonbast', 'Expected USD to use Bonbast price when Bonbast is prioritized above NerkhAra');
+    assert.equal(refRes.items.usd.price, 89100);
+
+    // Ping test with simulated real delay (>0ms) reports accurate pingMs and saves it
+    const origPerfNow = performance.now;
+    let fakeNow = 1000;
+    performance.now = () => fakeNow;
+    globalThis.fetch = async () => {
+      fakeNow += 42;
+      return new Response('{"code":"0"}', { status: 200 });
+    };
+    const realPingRes = await (await callApi('/api/admin/feeds/f_okx/test', { method: 'POST', token: login.token })).json();
+    assert.equal(realPingRes.ok, true);
+    assert.equal(realPingRes.pingMs, 42);
+    assert.equal(realPingRes.timerLimited, false);
+
+    // Ping test when runtime freezes clock (0ms delta) returns pingMs: null & timerLimited: true (never fake 1 ms!)
+    globalThis.fetch = async () => new Response('{"code":"0"}', { status: 200 });
+    const zeroPingRes = await (await callApi('/api/admin/feeds/f_okx/test', { method: 'POST', token: login.token })).json();
+    assert.equal(zeroPingRes.ok, true);
+    assert.equal(zeroPingRes.pingMs, null);
+    assert.equal(zeroPingRes.timerLimited, true);
+    performance.now = origPerfNow;
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
+test('Portfolio gray pre-purchase chart split, clean converter naming, centered #editFeatured icon, and scroll preload are properly wired', () => {
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+
+  // 1. Centered 3-dot SVG icon for #editFeatured
+  assert.match(html, /<button class="icon-btn" id="editFeatured"[^>]*><svg[^>]*viewBox="0 0 24 24"/);
+  assert.doesNotMatch(html, /id="editFeatured"[^>]*>⋮<\/button>/);
+
+  // 2. Converter uses clean displayName and does NOT append targetUnit twice inside #convValue
+  assert.ok(html.includes('function convDisplayName('));
+  assert.ok(html.includes('valEl.textContent = formatEnPrice(targetVal, isDomesticTarget ? 0 : undefined);'));
+  assert.doesNotMatch(html, /valEl\.textContent\s*=\s*formatEnPrice\([^)]+\)\s*\+\s*' '\s*\+\s*targetUnit/);
+
+  // 3. Portfolio chart defines positionsAtTimeStrict, splitTs pre/post separation, and renders gray + colored SVG phases
+  assert.ok(html.includes('function positionsAtTimeStrict('));
+  assert.ok(html.includes('data-chart-phase="pre"'));
+  assert.ok(html.includes('data-chart-phase="post"'));
+  assert.ok(html.includes('#94a3b8'));
+
+  // 4. Ahead-of-scroll sparkline preloading restored cleanly
+  assert.ok(html.includes("rootMargin:'900px 0px'"));
+  assert.ok(html.includes('r.top < vh + 950'));
+  assert.ok(html.includes('while(sparkActive<3&&sparkQueue.length)'));
+});
+
+test('IQD fractional history precision, chartGeometry vertical scaling on 177-178 (0.56%), and dynamic isDomestic detection work accurately', async () => {
+  __resetWorkerStateForTests();
+
+  // 1. Decimal precision helper preserves fractional domestic rates without IEEE noise
+  assert.equal(preservePricePrecision(177.25), 177.25);
+  assert.equal(preservePricePrecision(1774 / 10), 177.4);
+  assert.equal(preservePricePrecision(89500), 89500);
+
+  // 2. recordD1DomesticHistory & /api/history preserve decimal prices in D1 without rewriting existing rows
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+  const now = Math.floor(Date.now() / 1000);
+  const legacyTs = now - 85000;
+  const ts1 = now - 3600;
+  const ts2 = now - 1800;
+
+  // Seed legacy row — must never be altered or rewritten
+  db.prepare('INSERT INTO price_history_v2 (asset_id, t, price) VALUES (?, ?, ?)').run('iqd', legacyTs, 177);
+
+  const kvStore = new Map();
+  const mockKv = {
+    async get(k, opts) {
+      const raw = kvStore.get(k);
+      return raw && opts?.type === 'json' ? JSON.parse(raw) : raw;
+    },
+    async put(k, v) {
+      kvStore.set(k, typeof v === 'string' ? v : JSON.stringify(v));
+    }
+  };
+
+  const env = { DB, PRICES_KV: mockKv };
+  await recordD1DomesticHistory(env, {
+    iqd: { price: 177.25, unit: 'IRT', kind: 'domestic', t: ts1, sourceTimestamp: ts1, receivedAt: ts1 }
+  }, ts1, true);
+  await recordD1DomesticHistory(env, {
+    iqd: { price: 177.8, unit: 'IRT', kind: 'domestic', t: ts2, sourceTimestamp: ts2, receivedAt: ts2 }
+  }, ts2, true);
+
+  const d1Rows = db.prepare('SELECT t, price FROM price_history_v2 WHERE asset_id = ? ORDER BY t ASC').all('iqd');
+  assert.equal(d1Rows.length, 3);
+  assert.deepEqual(d1Rows.map(r => [r.t, r.price]), [
+    [legacyTs, 177],
+    [ts1, 177.25],
+    [ts2, 177.8]
+  ]);
+
+  kvStore.set(KV_SNAPSHOT_KEY, JSON.stringify({
+    version: 1,
+    updatedAt: ts2,
+    checkedAt: now - 5,
+    items: {
+      iqd: { price: 177.8, unit: 'IRT', kind: 'domestic', sym: 'IQD', name: 'دینار عراق', src: 'bonbast', t: ts2, sourceTimestamp: ts2, receivedAt: now - 5 }
+    },
+    feeds: {}
+  }));
+
+  const histRes = await history(env, new URL('https://darayi.example/api/history?id=iqd&range=1D'), { waitUntil() {} });
+  const histJson = await histRes.json();
+  assert.equal(histRes.status, 200);
+  assert.equal(histJson.isDomestic, true);
+  assert.deepEqual(histJson.points, [
+    [legacyTs, 177],
+    [ts1, 177.25],
+    [ts2, 177.8]
+  ]);
+
+  // 3. Evaluate actual chart functions from src/index.html for IQD 177 & 178 (0.56% move)
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+  assert.doesNotMatch(html, /paintChart\(box,\s*pts,\s*chartColor,\s*valFormatter,\s*\{\s*isDaily:\s*res\.isDaily,\s*range:\s*res\.apiRange \|\| range,\s*isDomestic:\s*false/);
+  assert.ok(html.includes('paintChart(box,pts,chartColor,(n,dec)=>quote(a,n,dec),{isDaily:isDailyTooltip,range,isDomestic});'));
+
+  const fnStart = html.indexOf('function isDomesticMarketAsset(');
+  const fnEnd = html.indexOf('function paintChart(');
+  assert.ok(fnStart > 0 && fnEnd > fnStart);
+  const fmtStart = html.indexOf('function countDecimals(');
+  const fmtEnd = html.indexOf('function quoteUnit(');
+  assert.ok(fmtStart > 0 && fmtEnd > fmtStart);
+
+  let seq = 0;
+  const ctx = {
+    Number, Math, Array, Boolean, Infinity,
+    uid: () => String(++seq),
+    histories: new Map(),
+    asset: (id) => id === 'iqd' ? { id: 'iqd', cat: 'currency', currency: 'IRT' } : { id, cat: 'crypto', currency: 'USDT' },
+    withCurrent: (p) => p,
+    escapeHtml: (s) => String(s),
+    document: { querySelectorAll: () => [] }
+  };
+  vm.createContext(ctx);
+  vm.runInContext(html.slice(fmtStart, fmtEnd) + '\n' + html.slice(fnStart, fnEnd), ctx);
+
+  // Flat price (0% move) stays strictly horizontal line
+  const flatGeom = ctx.chartGeometry([[now - 3600, 177], [now - 1800, 177], [now, 177]]);
+  assert.equal(Math.max(...flatGeom.map(p => p[1])) - Math.min(...flatGeom.map(p => p[1])), 0);
+
+  // Restored original chartGeometry & sparkline scaling map [min..max] cleanly across active height without artificial flattening or extra grid/y-label overlays
+  const iqdPts = [
+    [now - 3600 * 4, 177],
+    [now - 3600 * 3, 178],
+    [now - 3600 * 2, 177],
+    [now - 3600 * 1, 178]
+  ];
+  const geomIqd = ctx.chartGeometry(iqdPts);
+  const ysIqd = geomIqd.map(pt => pt[1]);
+  assert.equal(Math.max(...ysIqd) - Math.min(...ysIqd), 140);
+  const rawPct = ((178 - 177) / 177) * 100;
+  assert.ok(Math.abs(rawPct - 0.56497) < 0.001);
+
+  const detailSvg = ctx.chartSVG(iqdPts, '#10b981', true, false, '1D', true);
+  assert.equal(detailSvg.includes('class="chart-grid"'), false);
+  assert.equal(detailSvg.includes('class="chart-baseline"'), false);
+
+  const sparkSvg = ctx.chartSVG(iqdPts, '#10b981', true, true, '1D', true);
+  const pathMatch = /<path d="M([^"]+)" fill="none"/.exec(sparkSvg);
+  assert.ok(pathMatch, 'Expected sparkline stroke path in SVG');
+  const sparkYs = pathMatch[1].split(' L').map(pair => Number(pair.split(',')[1])).filter(Number.isFinite);
+  assert.equal(Math.max(...sparkYs) - Math.min(...sparkYs), 34);
+
+  // Unsorted / duplicate / invalid points are normalized deterministically
+  const messyNorm = ctx.normalizeChartPoints([[now - 100, 178], [now - 200, 177], [now - 100, 177.6], [now - 50, -5], [now - 30, NaN]]);
+  assert.deepEqual(Array.from(messyNorm, p => [p[0], p[1]]), [[now - 200, 177], [now - 100, 177.6]]);
+
+  // Asset-type detection & gap thresholds
+  assert.equal(ctx.isDomesticMarketAsset({ id: 'iqd', cat: 'currency', currency: 'IRT' }), true);
+  assert.equal(ctx.isDomesticMarketAsset({ id: 'gold18', cat: 'gold', currency: 'IRT' }), true);
+  assert.equal(ctx.isDomesticMarketAsset({ id: 'btc', cat: 'crypto', currency: 'USDT' }), false);
+  assert.equal(ctx.isDomesticMarketAsset({ id: 'usdt', cat: 'crypto', currency: 'IRT' }, { isDomestic: true }), false);
+  assert.equal(ctx.isDomesticMarketAsset({ id: 'custom', cat: 'crypto' }, { isDomestic: true }), true);
+  // 14h overnight Tehran gap stays connected for domestic (18h threshold), splits for crypto (2h threshold)
+  const overnightPts = [[now - 15 * 3600, 177], [now - 14 * 3600, 177.2], [now, 177.8]];
+  assert.equal(ctx.splitClientChartGapSegments(overnightPts, '1D', true).length, 1);
+  assert.equal(ctx.splitClientChartGapSegments(overnightPts, '1D', false).length, 2);
+
+  // Format helper preserves exact decimals when dec is passed (Tooltip) while rounding when maxDec=0 (Card display)
+  assert.equal(ctx.formatEnPrice(177.45, 2), '177.45');
+  assert.equal(ctx.formatEnPrice(177, 2), '177');
+  assert.equal(ctx.formatEnPrice(177.45, 0), '177');
+});
+
+test('Logo system: cached symbol counts, lazy-by-default 30x30 icons, progressive pickers, SWR cache headers, and <=50KB crypto logos', () => {
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+  const headersTxt = fs.readFileSync(new URL('./public/_headers', import.meta.url), 'utf8');
+  const serverTxt = fs.readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+
+  // 1. /logos/* headers use stale-while-revalidate (no immutable on mutable filenames)
+  assert.match(headersTxt, /\/logos\/\*\r?\n\s+Cache-Control:\s*public,\s*max-age=86400,\s*stale-while-revalidate=604800/);
+  assert.doesNotMatch(headersTxt, /\/logos\/\*\r?\n[^\n]*immutable/);
+  assert.equal(serverTxt.includes("app.use('/logos'") && serverTxt.includes('immutable: true'), false);
+  assert.ok(serverTxt.includes('public, max-age=86400, stale-while-revalidate=604800'));
+
+  // 2. All files in public/logos/crypto are <= 50KB and have valid magic bytes matching extension
+  const cryptoDir = new URL('./public/logos/crypto/', import.meta.url);
+  for (const name of fs.readdirSync(cryptoDir)) {
+    const p = new URL(name, cryptoDir);
+    const stat = fs.statSync(p);
+    assert.ok(stat.size <= 50 * 1024, `Crypto logo exceeds 50KB budget: ${name} (${stat.size} bytes)`);
+    const buf = fs.readFileSync(p);
+    const ext = name.split('.').pop().toLowerCase();
+    if (ext === 'png') {
+      assert.ok(buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4E && buf[3] === 0x47, `Invalid PNG magic bytes: ${name}`);
+    } else if (ext === 'jpg') {
+      assert.ok(buf[0] === 0xFF && buf[1] === 0xD8 && buf[2] === 0xFF, `Invalid JPG magic bytes: ${name}`);
+    }
+  }
+
+  // 3. Extract icon helper + converter + picker code cleanly and verify via VM
+  const iconSliceStart = html.indexOf('function normalizeClientCryptoIconName(');
+  const iconSliceEnd = html.indexOf('const AUTH_TOKEN_KEY=');
+  assert.ok(iconSliceStart > 0 && iconSliceEnd > iconSliceStart);
+
+  const convStart = html.indexOf('function convDisplayName(');
+  const convEnd = html.indexOf('function calculateConversion(');
+  assert.ok(convStart > 0 && convEnd > convStart);
+
+  const pickerStart = html.indexOf('function renderAssetPickerRow(');
+  const pickerEnd = html.indexOf('function buyForm(');
+  assert.ok(pickerStart > 0 && pickerEnd > pickerStart);
+
+  const syntheticAssets = [
+    { id: 'usd', name: 'دلار آمریکا', symbol: 'USD', cat: 'currency', price: 90000, currency: 'IRT' },
+    { id: 'gold18', name: 'طلای ۱۸ عیار', symbol: 'GOLD18', cat: 'gold', price: 6500000, currency: 'IRT' },
+    ...Array.from({ length: 140 }, (_, i) => ({
+      id: i === 130 ? 'doge' : `coin${i}`,
+      name: i === 130 ? 'دوج کوین' : `Coin ${i}`,
+      en: i === 130 ? 'Dogecoin' : `Coin ${i}`,
+      symbol: i === 130 ? 'DOGE' : `C${i}`,
+      cat: 'crypto',
+      price: 1 + i,
+      currency: 'USDT',
+      vol: 100000 - i
+    }))
+  ];
+
+  const sandbox = {
+    window: {},
+    document: { querySelectorAll: () => [] },
+    LOCAL_CRYPTO_ICONS: { btc: '/logos/crypto/btc.png', doge: '/logos/crypto/doge.png', coin0: '/logos/crypto/btc.png' },
+    ARZ_DIGITAL_ICONS: {},
+    cryptoIcons: { btc: '/logos/crypto/btc.png', doge: '/logos/crypto/doge.png', coin0: '/logos/crypto/btc.png' },
+    LOCAL_FLAG_CODES: new Set(['us', 'ir', 'tr', 'gb']),
+    REAL_X_CRYPTOS_CLIENT: new Set(['xrp']),
+    PORTFOLIO_UNIT_NAMES: {},
+    FA_COIN: {},
+    assets: syntheticAssets,
+    state: { featured: ['usd', 'gold18'] },
+    fd: null,
+    fmt: new Intl.NumberFormat('en-US', { maximumFractionDigits: 2 }),
+    pct: new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
+    escapeHtml: (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
+    safeImgUrl: (u) => (/^https:\/\//i.test(String(u || '')) || String(u || '').startsWith('/')) ? String(u) : '',
+    safeColor: (c, def = '#7357ff') => String(c || def),
+    getBadgeColors: () => ['#3b82f6', '#1d4ed8'],
+    assetTitles: (a) => ({ title: a.symbol || a.name, sub: a.name, isCrypto: a.cat === 'crypto' }),
+    getCryptoFullName: (a) => a.en || a.name || '',
+    cleanDisplayName: (_s, n) => n,
+    normFa: (s) => String(s || '').toLowerCase().replace(/\s+/g, ''),
+    sortAssetsStandard: (arr) => arr.slice(),
+    quote: () => '100',
+    spark: () => '',
+    isAdminUser: () => false,
+    quality: () => 'live',
+    $: () => null,
+    $$: () => [],
+    openModal: () => {},
+    closeModal: () => {},
+    toast: () => {},
+    persist: () => {},
+    Set, Map, Array, String, Number, Object, Boolean, Math
+  };
+  sandbox.window.cryptoIcons = sandbox.cryptoIcons;
+  vm.createContext(sandbox);
+
+  const prefix = html.slice(iconSliceStart, iconSliceEnd)
+    + '\n' + html.slice(convStart, convEnd)
+    + '\n' + html.slice(pickerStart, pickerEnd);
+  vm.runInContext(prefix, sandbox);
+
+  // A. Cached symbol counts memoize across calls and recompute when assets change
+  const c1 = sandbox.getClientCryptoSymbolCounts();
+  const c2 = sandbox.getClientCryptoSymbolCounts();
+  assert.equal(c1, c2, 'Expected memoized object identity while assets array unchanged');
+  assert.equal(c1.doge, 1);
+
+  sandbox.assets.push({ id: 'doge2', name: 'Fake Doge', symbol: 'DOGE', cat: 'crypto', price: 0.1, currency: 'USDT' });
+  const c3 = sandbox.getClientCryptoSymbolCounts();
+  assert.notEqual(c3, c1, 'Expected recomputation when assets length changes');
+  assert.equal(c3.doge, 2);
+
+  // B. assetIcon defaults to loading="lazy" + width="30" height="30" + decoding="async", and supports eager override
+  const lazyCryptoImg = sandbox.assetIcon({ id: 'doge', symbol: 'DOGE', name: 'Dogecoin', cat: 'crypto' });
+  assert.ok(lazyCryptoImg.includes('loading="lazy"'));
+  assert.ok(lazyCryptoImg.includes('width="30" height="30"'));
+  assert.ok(lazyCryptoImg.includes('decoding="async"'));
+  const eagerFlagImg = sandbox.assetIcon({ id: 'usd', symbol: 'USD', name: 'دلار', cat: 'currency' }, { loading: 'eager' });
+  assert.ok(eagerFlagImg.includes('loading="eager"'));
+  assert.ok(eagerFlagImg.includes('width="30" height="30"'));
+
+  // C. Converter uses getCountryFlag cleanly for toman/rial with width/height/loading
+  const tomanData = sandbox.convAssetData('toman');
+  assert.ok(tomanData.iconHtml.includes('/logos/flags/ir.svg'));
+  assert.ok(tomanData.iconHtml.includes('width="30" height="30"'));
+  assert.ok(tomanData.iconHtml.includes('loading="lazy"'));
+
+  // D. assetPicker renders only initial batch (<= 61 rows) while still including deep selected item beyond index 60
+  const pickerHtml = sandbox.assetPicker('doge', 'alertAsset');
+  const renderedButtons = (pickerHtml.match(/data-pick-asset=/g) || []).length;
+  assert.equal(renderedButtons, 61, `Expected 60 batch items + 1 deep selected item, got ${renderedButtons}`);
+  assert.ok(pickerHtml.includes('aria-checked="true" data-pick-asset="doge"'));
+  assert.equal(pickerHtml.includes('loading="eager"'), false, 'Picker rows must never use eager image loading');
+});
 
 

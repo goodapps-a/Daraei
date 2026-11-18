@@ -21,7 +21,7 @@
  * | hasActiveAlertsCache          | D1 (alerts WHERE triggered_at NULL)| 30m (1800s) | جلوگیری از اسکن جدول هشدارها در صورت نبود هشدار فعال  |
  * ============================================================================
  */
-import { NERKHARA_MAP, BONBAST_MAP, parseBonbastPayload, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale, normalizeCandleOpenTimeSec, parseBinanceKlineEntry, buildHistoryMetadata, resolveCryptoIconByAssetId, filterIsolatedHistorySpikes, pruneStaleCryptoItems, setBoundedMapEntry } from './modules/market-core.js';
+import { NERKHARA_MAP, BONBAST_MAP, parseBonbastPayload, preservePricePrecision, DOMESTIC_META, ALL_DOMESTIC_IDS, D1_HISTORY_ASSET_IDS, KV_SNAPSHOT_KEY, KV_SNAPSHOT_VERSION, parseUtcTimestamp, isTehranMarketOpen, getStaleThresholdSec, isPriceItemStale, normalizeCandleOpenTimeSec, parseBinanceKlineEntry, buildHistoryMetadata, resolveCryptoIconByAssetId, filterIsolatedHistorySpikes, pruneStaleCryptoItems, setBoundedMapEntry } from './modules/market-core.js';
 import { enc, SEC_HEADERS, PROD_CSP, buildHtmlCsp, b64u, b64uDec, teq, sha256, hmacB64u, createMemoryRateLimiter, cleanEmail, isEmail, okPass, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, getConfiguredAdminPassword, getAdminSecret, PBKDF2_DEFAULT, iterOf, pbkdf2, parsePbkdf2Hash, hashPassword, verifyPassword, isSafePublicUrl, cleanData, validateTransactions } from './modules/security.js';
 import { buildLocalCryptoIconsMap } from './modules/local-icons.js';
 export { cleanData, validateTransactions, isSafePublicUrl, hashPassword, verifyPassword, normCode, getAdminEmails, getPrimaryAdminEmail, isEmailAdmin, parseBonbastPayload, getAdminSecret };
@@ -1893,7 +1893,7 @@ function serializeLastHistoryMap(existing = {}) {
   const out = { ...(existing && typeof existing === 'object' ? existing : {}) };
   for (const [id, entry] of lastD1RecordedMap.entries()) {
     if (entry && Number(entry.price) > 0 && Number(entry.t) > 0) {
-      out[id] = [Math.round(Number(entry.price)), Math.floor(Number(entry.t))];
+      out[id] = [preservePricePrecision(entry.price), Math.floor(Number(entry.t))];
     }
   }
   return out;
@@ -1906,9 +1906,9 @@ function hydrateLastHistoryFromSnapshot(snap) {
     for (const [id, val] of Object.entries(lh)) {
       if (lastD1RecordedMap.has(id)) continue;
       if (Array.isArray(val) && Number(val[0]) > 0 && Number(val[1]) > 0) {
-        lastD1RecordedMap.set(id, { price: Math.round(Number(val[0])), t: Math.floor(Number(val[1])) });
+        lastD1RecordedMap.set(id, { price: preservePricePrecision(val[0]), t: Math.floor(Number(val[1])) });
       } else if (val && typeof val === 'object' && Number(val.price) > 0 && Number(val.t) > 0) {
-        lastD1RecordedMap.set(id, { price: Math.round(Number(val.price)), t: Math.floor(Number(val.t)) });
+        lastD1RecordedMap.set(id, { price: preservePricePrecision(val.price), t: Math.floor(Number(val.t)) });
       }
     }
   }
@@ -2387,18 +2387,19 @@ const domesticIntradayTicks = new Map();
 
 function recordDomesticTick(id, ts, price) {
   if (!id || !(price > 0) || !(ts > 1600000000)) return;
+  const exactPrice = preservePricePrecision(price);
+  if (!(exactPrice > 0)) return;
   let arr = domesticIntradayTicks.get(id);
   if (!arr) {
     arr = [];
     domesticIntradayTicks.set(id, arr);
   }
-  const rounded = Math.round(price);
   const last = arr[arr.length - 1];
-  if (!last || (ts - last[0] >= 180) || last[1] !== rounded) {
+  if (!last || (ts - last[0] >= 180) || last[1] !== exactPrice) {
     if (last && last[0] === ts) {
-      last[1] = rounded;
+      last[1] = exactPrice;
     } else if (!last || ts > last[0]) {
-      arr.push([ts, rounded]);
+      arr.push([ts, exactPrice]);
     }
     const cutoff = ts - 172800; // 48h in memory
     if (arr.length > 360 || (arr[0] && arr[0][0] < cutoff)) {
@@ -2459,7 +2460,8 @@ export async function recordD1DomesticHistory(env, items, now = nowS(), forceCro
       const it = items[id];
       if (!it || !(Number(it.price) > 0)) continue;
       if (isPriceItemStale(it, id, now)) continue;
-      const price = Math.round(Number(it.price));
+      const price = preservePricePrecision(it.price);
+      if (!(price > 0)) continue;
       const srcTs = Number(it.sourceTimestamp) > 0 ? Math.floor(Number(it.sourceTimestamp)) : 0;
       const itemT = Number(it.t) > 1500000000 ? Math.floor(Number(it.t)) : 0;
       // هرگز قیمت قدیمی یا بدون تغییر را با زمان فعلی (now) ثبت نکن؛ زمان معتبر منبع یا t واقعی داده حفظ می‌شود
@@ -2501,7 +2503,7 @@ async function queryD1DomesticHistory(env, id, sinceTs) {
     ).bind(id, Math.floor(sinceTs)).all();
     return (res?.results || [])
       .filter(r => Number(r.t) > 1500000000 && Number(r.price) > 0)
-      .map(r => [Math.floor(Number(r.t)), Math.round(Number(r.price))]);
+      .map(r => [Math.floor(Number(r.t)), preservePricePrecision(r.price)]);
   } catch (e) {
     console.error('queryD1DomesticHistory error:', e?.message);
     return [];
@@ -2631,14 +2633,27 @@ async function refreshPricesLocal(env, force = false, skipSideEffects = false, c
     const domestic = async () => {
       if (!force && t - (feeds.domestic?.checkedAt || 0) < 15 && feeds.domestic?.ok && feeds.tether?.ok) return;
 
+      let sysFeeds = [];
       let feedActiveMap = new Map();
+      let feedPriorityMap = new Map();
       try {
-        const sysFeeds = await getSystemFeeds(env);
+        sysFeeds = await getSystemFeeds(env, true);
         feedActiveMap = new Map(sysFeeds.map((f) => [f.id, f.status === 'active']));
+        feedPriorityMap = new Map(sysFeeds.map((f, idx) => [f.id, Number(f.priority) || (idx + 1)]));
       } catch {}
       const isFeedOn = (id) => (feedActiveMap.has(id) ? feedActiveMap.get(id) : true);
+      const feedPrio = (id, fallbackPrio) => (feedPriorityMap.has(id) ? feedPriorityMap.get(id) : fallbackPrio);
 
-      // واکشی هم‌زمان منابع داخلی: نرخ‌آرا (اول)، بن‌بست (دوم) و ایران‌مارکت (سوم)
+      // واکشی هم‌زمان منابع داخلی فعال بر اساس اولویت مدیریت
+      const domesticFeedOrder = [
+        { key: 'nerkhara', id: 'f_nerkhara', prio: feedPrio('f_nerkhara', 5) },
+        { key: 'bonbast', id: 'f_bonbast', prio: feedPrio('f_bonbast', 6) },
+        { key: 'iran_market', id: 'f_nerkh', prio: feedPrio('f_nerkh', 7) }
+      ]
+        .filter((x) => isFeedOn(x.id))
+        .sort((a, b) => a.prio - b.prio)
+        .map((x) => x.key);
+
       const [imResult, naResult, bbResult] = await Promise.allSettled([
         isFeedOn('f_nerkh') ? fetchJSON('https://iran-market.github.io/data/latest-toman.json', 5) : Promise.resolve(null),
         isFeedOn('f_nerkhara') ? fetchJSON('https://nerkhara.com/api/v1/latest.json', 5) : Promise.resolve(null),
@@ -2801,7 +2816,7 @@ async function refreshPricesLocal(env, force = false, skipSideEffects = false, c
         let chosen = null;
         const buildNerkhara = (item) => ({
           src: 'nerkhara',
-          price: Math.round(Number(item.price)),
+          price: preservePricePrecision(item.price),
           rawChg: item.change_pct,
           ts: item.srcTs,
           extra: {
@@ -2813,39 +2828,53 @@ async function refreshPricesLocal(env, force = false, skipSideEffects = false, c
         });
         const buildBonbast = (item) => ({
           src: 'bonbast',
-          price: Number(item.price),
+          price: preservePricePrecision(item.price),
           rawChg: null,
           ts: item.srcTs,
           extra: { priceType: 'sell' }
         });
         const buildIranMarket = (item) => ({
           src: 'iran_market',
-          price: Math.round(Number(item.price)),
+          price: preservePricePrecision(item.price),
           rawChg: item.change_pct,
           ts: item.srcTs,
           extra: { priceType: 'last' }
         });
 
+        const builders = {
+          nerkhara: naItem ? () => buildNerkhara(naItem) : null,
+          bonbast: bbItem ? () => buildBonbast(bbItem) : null,
+          iran_market: imItem ? () => buildIranMarket(imItem) : null
+        };
+        const usdEurReady = {
+          nerkhara: nerkharaHasUsdEur,
+          bonbast: bonbastHasUsdEur,
+          iran_market: iranMarketHasUsdEur
+        };
+        const effectiveOrder = domesticFeedOrder.length ? domesticFeedOrder : ['nerkhara', 'bonbast', 'iran_market'];
+
         if (id === 'usd' || id === 'eur') {
-          if (nerkharaHasUsdEur && naItem) {
-            chosen = buildNerkhara(naItem);
-          } else if (bonbastHasUsdEur && bbItem) {
-            chosen = buildBonbast(bbItem);
-          } else if (iranMarketHasUsdEur && imItem) {
-            chosen = buildIranMarket(imItem);
-          } else if (naItem) {
-            chosen = buildNerkhara(naItem);
-          } else if (bbItem) {
-            chosen = buildBonbast(bbItem);
-          } else if (imItem) {
-            chosen = buildIranMarket(imItem);
+          for (const srcKey of effectiveOrder) {
+            if (usdEurReady[srcKey] && builders[srcKey]) {
+              chosen = builders[srcKey]();
+              break;
+            }
           }
-        } else if (naItem) {
-          chosen = buildNerkhara(naItem);
-        } else if (bbItem) {
-          chosen = buildBonbast(bbItem);
-        } else if (imItem) {
-          chosen = buildIranMarket(imItem);
+          if (!chosen) {
+            for (const srcKey of effectiveOrder) {
+              if (builders[srcKey]) {
+                chosen = builders[srcKey]();
+                break;
+              }
+            }
+          }
+        } else {
+          for (const srcKey of effectiveOrder) {
+            if (builders[srcKey]) {
+              chosen = builders[srcKey]();
+              break;
+            }
+          }
         }
 
         if (chosen && chosen.price > 0) {
@@ -2871,7 +2900,7 @@ async function refreshPricesLocal(env, force = false, skipSideEffects = false, c
             const keys = NERKH[id] || (DOMESTIC_EXTRA[id] ? [DOMESTIC_EXTRA[id][0]] : []);
             const k = keys.find(key => Number(j?.rates?.[key]) > 0);
             if (k) {
-              const v = Math.round(Number(j.rates[k]));
+              const v = preservePricePrecision(j.rates[k]);
               const chg = resolveDomesticChange(id, v, j?.change?.[k], prevClosesMap, prev.items?.[id]);
               if (put(id, v, chg, 'nerkhsanj', nsTs, 'IRT', {
                 kind: 'domestic', name: meta.name, sym: meta.sym, cat: meta.cat, priceType: 'published'
@@ -2932,10 +2961,31 @@ async function refreshPricesLocal(env, force = false, skipSideEffects = false, c
       }
     };
 
-    // ۲. دریافت رمزارزها از صرافی‌های معتبر با اولویت KuCoin و OKX و Gate
+    // ۲. دریافت رمزارزها بر اساس اولویت و وضعیت فعال فیدهای تنظیم‌شده در پنل مدیریت
     const cryptoFeed = async () => {
       if (!force && t - (feeds.crypto?.checkedAt || 0) < 15 && feeds.crypto?.ok && hasCryptoNow) return;
-      const order = [...new Set([feeds.crypto?.source, 'kucoin', 'okx', 'gate', 'binance'].filter(Boolean))];
+      let order = [];
+      try {
+        const sysFeeds = await getSystemFeeds(env, true);
+        const mapFeedToSource = (fid) => {
+          if (fid === 'f_kucoin') return 'kucoin';
+          if (fid === 'f_okx') return 'okx';
+          if (fid === 'f_gate') return 'gate';
+          if (fid === 'f_binance_rest' || fid === 'f_binance') return 'binance';
+          const stripped = String(fid || '').replace(/^f_/, '');
+          return SOURCES[stripped] ? stripped : null;
+        };
+        order = sysFeeds
+          .filter((f) => f && f.type === 'crypto' && f.status === 'active')
+          .sort((a, b) => (Number(a.priority) || 999) - (Number(b.priority) || 999))
+          .map((f) => mapFeedToSource(f.id))
+          .filter(Boolean);
+      } catch {}
+      if (!order.length) {
+        order = ['kucoin', 'okx', 'gate', 'binance'];
+      } else {
+        order = [...new Set(order)];
+      }
       const errors = [], cap = Math.max(50, Number(env && env.MAX_COINS) || 350);
       for (const name of order) {
         if (!SOURCES[name]) continue;
@@ -3394,7 +3444,7 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
   const minTs = now - span;
   const maxSlice = range === '3D' ? 10 : range === '1W' ? 18 : range === '1M' ? 45 : 400;
   const curPrice = (liveItem && Number(liveItem.price) > 0 && !isPriceItemStale(liveItem, id, now))
-    ? Math.round(Number(liveItem.price))
+    ? preservePricePrecision(liveItem.price)
     : 0;
   const curTs = Number(liveItem?.sourceTimestamp) > 0
     ? Math.floor(Number(liveItem.sourceTimestamp))
@@ -3443,8 +3493,8 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
           for (const rec of recent) {
             const startTs = parseArchiveRecTs(rec);
             if (!startTs) continue;
-            const openVal = Number(rec.open) > 0 ? Math.round(Number(rec.open) / div) : 0;
-            const closeVal = Number(rec.close) > 0 ? Math.round(Number(rec.close) / div) : 0;
+            const openVal = Number(rec.open) > 0 ? preservePricePrecision(Number(rec.open) / div) : 0;
+            const closeVal = Number(rec.close) > 0 ? preservePricePrecision(Number(rec.close) / div) : 0;
             if (startTs <= windowStart && (closeVal > 0 || openVal > 0)) {
               prevCloseForWindow = closeVal || openVal;
             }
@@ -3476,7 +3526,7 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
           for (const row of recentNa) {
             if (!Array.isArray(row) || row.length < 2) continue;
             const dStr = String(row[0] || '').trim();
-            const v = Math.round(Number(row[1]));
+            const v = preservePricePrecision(row[1]);
             if (!/^\d{4}-\d{2}-\d{2}$/.test(dStr) || !(v > 0)) continue;
             const ts = Math.floor(Date.parse(`${dStr}T12:00:00Z`) / 1000);
             if (ts <= windowStart + 43200) bestVal = v;
@@ -3531,7 +3581,7 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
         for (const rec of records) {
           const closeRaw = Number(rec.close);
           if (!(closeRaw > 0)) continue;
-          const closeToman = Math.round(closeRaw / div);
+          const closeToman = preservePricePrecision(closeRaw / div);
           const baseTs = parseArchiveRecTs(rec);
           if (baseTs >= minTs && baseTs <= now + 3600) {
             parsedOut.push([baseTs, closeToman]);
@@ -3556,7 +3606,7 @@ async function archiveHistory(id, range, liveItem = null, env = null) {
         for (const row of pts) {
           if (!Array.isArray(row) || row.length < 2) continue;
           const dateStr = String(row[0] || '').trim();
-          const val = Math.round(Number(row[1]));
+          const val = preservePricePrecision(row[1]);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !(val > 0)) continue;
           const ts = Math.floor(Date.parse(`${dateStr}T12:00:00Z`) / 1000);
           if (Number.isFinite(ts) && ts >= minTs && ts <= now + 3600) {
@@ -4473,38 +4523,80 @@ const DEFAULT_SYSTEM_FEEDS = [
 ];
 
 let inMemorySystemFeeds = null;
+let inMemorySystemFeedsTime = 0;
 
-async function getSystemFeeds(env) {
-  if (inMemorySystemFeeds && inMemorySystemFeeds.length) return inMemorySystemFeeds;
-  if (env.DB) {
+function normalizeSystemFeeds(list) {
+  const seen = new Set();
+  const clean = [];
+  for (const raw of (Array.isArray(list) ? list : [])) {
+    if (!raw || !raw.id || raw.id === 'f_binance_ws' || seen.has(raw.id)) continue;
+    seen.add(raw.id);
+    clean.push({ ...raw });
+  }
+  for (const def of DEFAULT_SYSTEM_FEEDS) {
+    if (!seen.has(def.id)) {
+      seen.add(def.id);
+      clean.push({ ...def });
+    }
+  }
+  clean.sort((a, b) => (Number(a.priority) || 9999) - (Number(b.priority) || 9999));
+  clean.forEach((f, idx) => { f.priority = idx + 1; });
+  return clean;
+}
+
+async function getSystemFeeds(env, forceDb = false) {
+  const t = nowS();
+  if (!forceDb && inMemorySystemFeeds && inMemorySystemFeeds.length && (t - inMemorySystemFeedsTime < 5)) {
+    return inMemorySystemFeeds;
+  }
+  if (env && env.DB) {
     try {
       const row = await env.DB.prepare("SELECT v FROM kv WHERE k = 'system_feeds'").first();
       if (row && row.v) {
         const parsed = JSON.parse(row.v);
         if (Array.isArray(parsed) && parsed.length) {
-          const filtered = parsed.filter((f) => f && f.id !== 'f_binance_ws');
-          const seenIds = new Set(filtered.map((f) => f && f.id).filter(Boolean));
-          const merged = [...filtered];
-          for (const def of DEFAULT_SYSTEM_FEEDS) {
-            if (!seenIds.has(def.id)) merged.push({ ...def });
-          }
-          inMemorySystemFeeds = merged;
+          inMemorySystemFeeds = normalizeSystemFeeds(parsed);
+          inMemorySystemFeedsTime = t;
           return inMemorySystemFeeds;
         }
       }
     } catch {}
   }
-  inMemorySystemFeeds = DEFAULT_SYSTEM_FEEDS.map(f => ({ ...f }));
+  if (inMemorySystemFeeds && inMemorySystemFeeds.length) {
+    inMemorySystemFeeds = normalizeSystemFeeds(inMemorySystemFeeds);
+    inMemorySystemFeedsTime = t;
+    return inMemorySystemFeeds;
+  }
+  inMemorySystemFeeds = normalizeSystemFeeds(DEFAULT_SYSTEM_FEEDS.map(f => ({ ...f })));
+  inMemorySystemFeedsTime = t;
   return inMemorySystemFeeds;
 }
 
 async function saveSystemFeeds(env, feeds) {
-  inMemorySystemFeeds = feeds;
-  if (env.DB) {
+  const normalized = normalizeSystemFeeds(feeds);
+  inMemorySystemFeeds = normalized;
+  inMemorySystemFeedsTime = nowS();
+  if (env && env.DB) {
     try {
-      await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('system_feeds',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify(feeds), nowS()).run();
+      await env.DB.prepare("INSERT INTO kv(k,v,updated_at) VALUES('system_feeds',?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v, updated_at=excluded.updated_at").bind(JSON.stringify(normalized), nowS()).run();
     } catch {}
   }
+  return normalized;
+}
+
+async function invalidatePricesCacheForFeeds(env, ctx) {
+  inMemoryPricesTime = 0;
+  inMemoryPricesLoadedAt = 0;
+  if (inMemoryPrices) {
+    inMemoryPrices.checkedAt = 0;
+  }
+  try {
+    if (typeof caches !== 'undefined' && caches.default) {
+      const p = caches.default.delete(PRICES_EDGE_CACHE_KEY);
+      if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(p);
+      else await p;
+    }
+  } catch {}
 }
 
 function formatFeed(f) {
@@ -4904,7 +4996,7 @@ async function route(req, env, url, ctx) {
   }
 
   if (p === '/api/history' && m === 'GET') {
-    await rateLimit(env, 'hist:' + clientIp(req), 90, 60);
+    await rateLimit(env, 'hist:' + clientIp(req), 450, 60);
     return await history(env, url, ctx);
   }
 
@@ -5122,7 +5214,7 @@ async function route(req, env, url, ctx) {
           inMemoryBroadcastTime = now;
         }
       }
-      const sysFeeds = await getSystemFeeds(env);
+      const sysFeeds = await getSystemFeeds(env, true);
       const curItems = inMemoryPrices?.items || {};
       const totalCrypto = Object.values(curItems).filter(i => i.crypto).length;
       const totalDomestic = Object.values(curItems).filter(i => i.kind === 'domestic').length;
@@ -5233,23 +5325,38 @@ async function route(req, env, url, ctx) {
     }
 
     if (p === '/api/admin/feeds' && m === 'GET') {
-      const feeds = await getSystemFeeds(env);
+      const feeds = await getSystemFeeds(env, true);
       const sorted = [...feeds].sort((a, b) => (a.priority || 0) - (b.priority || 0)).map(formatFeed);
       return json({ ok: true, feeds: sorted });
     }
 
     if (p.startsWith('/api/admin/feeds/') && p.endsWith('/test') && m === 'POST') {
-      const id = p.split('/')[4];
-      const feeds = await getSystemFeeds(env);
+      const id = decodeURIComponent(p.split('/')[4] || '');
+      const feeds = await getSystemFeeds(env, true);
       const f = feeds.find(x => x.id === id);
       if (!f) return json({ ok: false, error: 'فید یافت نشد.' }, 404);
-      const start = Date.now();
+      const getNowMs = () => (typeof performance !== 'undefined' && typeof performance.now === 'function') ? performance.now() : Date.now();
+      const start = getNowMs();
       let ok = false, httpStatus = 0;
       if (f.url && f.url.startsWith('https://') && isSafePublicUrl(f.url)) {
         try {
-          const resp = await fetch(f.url, { signal: AbortSignal.timeout(4000), redirect: 'error' });
+          const resp = await fetch(f.url, {
+            method: 'GET',
+            cache: 'no-store',
+            cf: { cacheTtl: 0, cacheEverything: false },
+            headers: { 'cache-control': 'no-cache', 'pragma': 'no-cache' },
+            signal: AbortSignal.timeout(4500),
+            redirect: 'error'
+          });
           httpStatus = resp.status;
           ok = resp.ok;
+          try {
+            const reader = resp.body?.getReader?.();
+            if (reader) {
+              await reader.read();
+              await reader.cancel().catch(() => {});
+            }
+          } catch {}
         } catch {
           ok = false;
           httpStatus = 0;
@@ -5258,57 +5365,60 @@ async function route(req, env, url, ctx) {
         ok = true;
         httpStatus = 101;
       }
-      return json({ ok, pingMs: Math.max(1, Date.now() - start), httpStatus });
+      const rawElapsed = Math.round(getNowMs() - start);
+      const timerLimited = rawElapsed <= 0;
+      const measuredPing = rawElapsed > 0 ? rawElapsed : null;
+      if (measuredPing !== null) {
+        f.pingMs = measuredPing;
+        await saveSystemFeeds(env, feeds);
+      }
+      return json({ ok, pingMs: measuredPing, timerLimited, httpStatus });
     }
     if (p.startsWith('/api/admin/feeds/') && p.endsWith('/toggle') && m === 'POST') {
-      const id = p.split('/')[4];
-      const feeds = await getSystemFeeds(env);
+      const id = decodeURIComponent(p.split('/')[4] || '');
+      const feeds = await getSystemFeeds(env, true);
       const f = feeds.find(x => x.id === id);
       if (f) {
         f.status = f.status === 'active' ? 'inactive' : 'active';
-        await saveSystemFeeds(env, feeds);
-        return json({ ok: true, feed: formatFeed(f) });
+        const saved = await saveSystemFeeds(env, feeds);
+        await invalidatePricesCacheForFeeds(env, ctx);
+        return json({ ok: true, feed: formatFeed(f), feeds: saved.map(formatFeed) });
       }
       return json({ ok: false, error: 'Feed not found' }, 404);
     }
     if (p.startsWith('/api/admin/feeds/') && p.endsWith('/move-up') && m === 'POST') {
-      const id = p.split('/')[4];
-      const feeds = await getSystemFeeds(env);
-      feeds.sort((a, b) => (a.priority || 0) - (b.priority || 0));
+      const id = decodeURIComponent(p.split('/')[4] || '');
+      const feeds = [...(await getSystemFeeds(env, true))].sort((a, b) => (a.priority || 0) - (b.priority || 0));
       const idx = feeds.findIndex(x => x.id === id);
       if (idx > 0) {
-        const prev = feeds[idx - 1];
-        const curr = feeds[idx];
-        const temp = prev.priority;
-        prev.priority = curr.priority;
-        curr.priority = temp;
-        await saveSystemFeeds(env, feeds);
+        [feeds[idx - 1], feeds[idx]] = [feeds[idx], feeds[idx - 1]];
+        feeds.forEach((item, i) => { item.priority = i + 1; });
+        const saved = await saveSystemFeeds(env, feeds);
+        await invalidatePricesCacheForFeeds(env, ctx);
+        return json({ ok: true, feeds: saved.map(formatFeed) });
       }
-      feeds.sort((a, b) => (a.priority || 0) - (b.priority || 0));
       return json({ ok: true, feeds: feeds.map(formatFeed) });
     }
     if (p.startsWith('/api/admin/feeds/') && p.endsWith('/move-down') && m === 'POST') {
-      const id = p.split('/')[4];
-      const feeds = await getSystemFeeds(env);
-      feeds.sort((a, b) => (a.priority || 0) - (b.priority || 0));
+      const id = decodeURIComponent(p.split('/')[4] || '');
+      const feeds = [...(await getSystemFeeds(env, true))].sort((a, b) => (a.priority || 0) - (b.priority || 0));
       const idx = feeds.findIndex(x => x.id === id);
       if (idx !== -1 && idx < feeds.length - 1) {
-        const next = feeds[idx + 1];
-        const curr = feeds[idx];
-        const temp = next.priority;
-        next.priority = curr.priority;
-        curr.priority = temp;
-        await saveSystemFeeds(env, feeds);
+        [feeds[idx], feeds[idx + 1]] = [feeds[idx + 1], feeds[idx]];
+        feeds.forEach((item, i) => { item.priority = i + 1; });
+        const saved = await saveSystemFeeds(env, feeds);
+        await invalidatePricesCacheForFeeds(env, ctx);
+        return json({ ok: true, feeds: saved.map(formatFeed) });
       }
-      feeds.sort((a, b) => (a.priority || 0) - (b.priority || 0));
       return json({ ok: true, feeds: feeds.map(formatFeed) });
     }
     if (p.startsWith('/api/admin/feeds/') && m === 'DELETE') {
-      const id = p.split('/')[4];
-      let feeds = await getSystemFeeds(env);
+      const id = decodeURIComponent(p.split('/')[4] || '');
+      let feeds = await getSystemFeeds(env, true);
       feeds = feeds.filter(x => x.id !== id);
-      await saveSystemFeeds(env, feeds);
-      return json({ ok: true });
+      const saved = await saveSystemFeeds(env, feeds);
+      await invalidatePricesCacheForFeeds(env, ctx);
+      return json({ ok: true, feeds: saved.map(formatFeed) });
     }
     if (p === '/api/admin/feeds/add' && m === 'POST') {
       const b = await readJson(req);
@@ -5316,7 +5426,7 @@ async function route(req, env, url, ctx) {
       const feedUrl = String(b.url || '').trim().slice(0, 300);
       if (!feedName || !feedUrl) throw new HttpError(400, 'نام و آدرس ایندپوینت الزامی است.');
       if (!isSafePublicUrl(feedUrl)) throw new HttpError(400, 'فقط آدرس‌های عمومی و امن (https:// یا wss:// روی پورت استاندارد) مجاز هستند.');
-      const feeds = await getSystemFeeds(env);
+      const feeds = await getSystemFeeds(env, true);
       if (feeds.length >= 30) throw new HttpError(400, 'حداکثر تعداد مجاز فیدها تکمیل شده است.');
       const maxPriority = feeds.reduce((max, f) => Math.max(max, f.priority || 0), 0);
       const newFeed = {
@@ -5331,8 +5441,8 @@ async function route(req, env, url, ctx) {
         custom: true
       };
       feeds.push(newFeed);
-      await saveSystemFeeds(env, feeds);
-      return json({ ok: true, feed: formatFeed(newFeed) });
+      const saved = await saveSystemFeeds(env, feeds);
+      return json({ ok: true, feed: formatFeed(newFeed), feeds: saved.map(formatFeed) });
     }
 
     if (p === '/api/admin/users' && m === 'GET') {
@@ -5786,7 +5896,7 @@ const MANIFEST = {
     { src: '/icons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
   ]
 };
-const SW_JS = `const V='darayi-shell-v13';
+const SW_JS = `const V='darayi-shell-v14';
 self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(V).then(c=>c.addAll(['/','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png','/coin-face.png','/coin-splash.js'])).catch(()=>{}))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==V).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
 self.addEventListener('message',e=>{if(e.data&&(e.data.type==='SKIP_WAITING'||e.data==='skipWaiting')){self.skipWaiting()}else if(e.data&&e.data.type==='CLEAR_RUNTIME_CACHE'){e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x.startsWith('darayi-shell-')).map(x=>caches.delete(x)))).catch(()=>{}))}});

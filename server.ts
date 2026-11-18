@@ -8,6 +8,7 @@ import {
   NERKHARA_MAP,
   BONBAST_MAP,
   parseBonbastPayload,
+  preservePricePrecision,
   DOMESTIC_META,
   ALL_DOMESTIC_IDS,
   D1_HISTORY_ASSET_IDS,
@@ -475,7 +476,7 @@ try {
         if (Array.isArray(pts)) {
           const valid = pts
             .filter((p: any) => Array.isArray(p) && p.length === 2 && Number(p[0]) >= cutoff && Number(p[1]) > 0)
-            .map((p: any) => [Math.floor(Number(p[0])), Math.round(Number(p[1]))] as [number, number]);
+            .map((p: any) => [Math.floor(Number(p[0])), preservePricePrecision(p[1])] as [number, number]);
           if (valid.length) domesticIntradayTicks.set(id, valid);
         }
       }
@@ -485,20 +486,21 @@ try {
 
 function recordDomesticTick(id: string, ts: number, price: number) {
   if (!(price > 0) || !Number.isFinite(ts) || ts <= 1500000000) return;
+  const exactPrice = preservePricePrecision(price);
+  if (!(exactPrice > 0)) return;
   let arr = domesticIntradayTicks.get(id);
   if (!arr) {
     arr = [];
     domesticIntradayTicks.set(id, arr);
   }
-  const rounded = Math.round(price);
   const cutoff = ts - 7 * 86400;
   while (arr.length && arr[0][0] < cutoff) arr.shift();
   const last = arr[arr.length - 1];
-  if (!last || (ts - last[0] >= 180) || last[1] !== rounded) {
+  if (!last || (ts - last[0] >= 180) || last[1] !== exactPrice) {
     if (last && last[0] === ts) {
-      last[1] = rounded;
+      last[1] = exactPrice;
     } else if (!last || ts > last[0]) {
-      arr.push([ts, rounded]);
+      arr.push([ts, exactPrice]);
     }
     if (arr.length > 600) arr.shift();
   }
@@ -611,7 +613,17 @@ async function updateAllPrices(force = false) {
     // 1. Independent Tether & Per-Asset Domestic Rates (NerkhAra -> Bonbast -> IranMarket -> Nerkhsanj -> PersianToolbox)
     const domesticTask = async () => {
       const feedActiveMap = new Map(systemFeeds.map((f) => [f.id, f.status === 'active']));
+      const feedPriorityMap = new Map(systemFeeds.map((f, idx) => [f.id, Number(f.priority) || (idx + 1)]));
       const isFeedOn = (id: string) => (feedActiveMap.has(id) ? feedActiveMap.get(id) : true);
+      const feedPrio = (id: string, fallbackPrio: number) => (feedPriorityMap.has(id) ? (feedPriorityMap.get(id) as number) : fallbackPrio);
+      const domesticFeedOrder = [
+        { key: 'nerkhara', id: 'f_nerkhara', prio: feedPrio('f_nerkhara', 5) },
+        { key: 'bonbast', id: 'f_bonbast', prio: feedPrio('f_bonbast', 6) },
+        { key: 'iran_market', id: 'f_nerkh', prio: feedPrio('f_nerkh', 7) }
+      ]
+        .filter((x) => isFeedOn(x.id))
+        .sort((a, b) => a.prio - b.prio)
+        .map((x) => x.key);
 
       const [imResult, naResult, bbResult] = await Promise.allSettled([
         isFeedOn('f_nerkh') ? fetchJSON('https://iran-market.github.io/data/latest-toman.json', 5) : Promise.resolve(null),
@@ -761,7 +773,7 @@ async function updateAllPrices(force = false) {
 
         const buildNerkhara = (item: any) => ({
           src: 'nerkhara',
-          price: Math.round(Number(item.price)),
+          price: preservePricePrecision(item.price),
           rawChg: item.change_pct,
           ts: item.srcTs,
           extra: {
@@ -773,40 +785,54 @@ async function updateAllPrices(force = false) {
         });
         const buildBonbast = (item: any) => ({
           src: 'bonbast',
-          price: Number(item.price),
+          price: preservePricePrecision(item.price),
           rawChg: null,
           ts: item.srcTs,
           extra: { priceType: 'sell' }
         });
         const buildIranMarket = (item: any) => ({
           src: 'iran_market',
-          price: Math.round(Number(item.price)),
+          price: preservePricePrecision(item.price),
           rawChg: item.change_pct,
           ts: item.srcTs,
           extra: { priceType: 'last' }
         });
 
+        const builders: Record<string, (() => any) | null> = {
+          nerkhara: naItem ? () => buildNerkhara(naItem) : null,
+          bonbast: bbItem ? () => buildBonbast(bbItem) : null,
+          iran_market: imItem ? () => buildIranMarket(imItem) : null
+        };
+        const usdEurReady: Record<string, boolean> = {
+          nerkhara: nerkharaHasUsdEur,
+          bonbast: bonbastHasUsdEur,
+          iran_market: iranMarketHasUsdEur
+        };
+        const effectiveOrder = domesticFeedOrder.length ? domesticFeedOrder : ['nerkhara', 'bonbast', 'iran_market'];
+
         let chosen: any = null;
         if (id === 'usd' || id === 'eur') {
-          if (nerkharaHasUsdEur && naItem) {
-            chosen = buildNerkhara(naItem);
-          } else if (bonbastHasUsdEur && bbItem) {
-            chosen = buildBonbast(bbItem);
-          } else if (iranMarketHasUsdEur && imItem) {
-            chosen = buildIranMarket(imItem);
-          } else if (naItem) {
-            chosen = buildNerkhara(naItem);
-          } else if (bbItem) {
-            chosen = buildBonbast(bbItem);
-          } else if (imItem) {
-            chosen = buildIranMarket(imItem);
+          for (const srcKey of effectiveOrder) {
+            if (usdEurReady[srcKey] && builders[srcKey]) {
+              chosen = builders[srcKey]!();
+              break;
+            }
           }
-        } else if (naItem) {
-          chosen = buildNerkhara(naItem);
-        } else if (bbItem) {
-          chosen = buildBonbast(bbItem);
-        } else if (imItem) {
-          chosen = buildIranMarket(imItem);
+          if (!chosen) {
+            for (const srcKey of effectiveOrder) {
+              if (builders[srcKey]) {
+                chosen = builders[srcKey]!();
+                break;
+              }
+            }
+          }
+        } else {
+          for (const srcKey of effectiveOrder) {
+            if (builders[srcKey]) {
+              chosen = builders[srcKey]!();
+              break;
+            }
+          }
         }
 
         if (chosen && chosen.price > 0) {
@@ -831,7 +857,7 @@ async function updateAllPrices(force = false) {
             const keys = NERKH[id] || (DOMESTIC_EXTRA[id] ? [DOMESTIC_EXTRA[id][0]] : []);
             const k = keys.find((key: string) => Number(j?.rates?.[key]) > 0);
             if (k) {
-              const v = Math.round(Number(j.rates[k]));
+              const v = preservePricePrecision(j.rates[k]);
               const chg = resolveDomesticChange(id, v, j?.change?.[k], prevClosesMap, cachedPrices.items?.[id]);
               if (put(id, v, chg, 'nerkhsanj', nsTs, 'IRT', {
                 kind: 'domestic', name: meta.name, sym: meta.sym, cat: meta.cat, priceType: 'published'
@@ -882,12 +908,21 @@ async function updateAllPrices(force = false) {
 
     // 2. Crypto Rates according to active feeds and prioritized order
     const cryptoTask = async () => {
-      const order = systemFeeds
-        .filter(f => f.type === 'crypto' && f.status === 'active')
-        .sort((a, b) => a.priority - b.priority)
-        .map(f => f.id.replace('f_', ''))
-        .filter(id => EXCHANGE_SOURCES[id]);
-      if (!order.length) order.push('kucoin', 'okx', 'gate');
+      const mapFeedId = (fid: string) => {
+        if (fid === 'f_kucoin') return 'kucoin';
+        if (fid === 'f_okx') return 'okx';
+        if (fid === 'f_gate') return 'gate';
+        if (fid === 'f_binance_rest' || fid === 'f_binance') return 'binance';
+        return fid.replace(/^f_/, '');
+      };
+      const order = [...new Set(
+        systemFeeds
+          .filter(f => f.type === 'crypto' && f.status === 'active')
+          .sort((a, b) => a.priority - b.priority)
+          .map(f => mapFeedId(f.id))
+          .filter(id => EXCHANGE_SOURCES[id])
+      )];
+      if (!order.length) order.push('kucoin', 'okx', 'gate', 'binance');
       const errors: string[] = [];
       for (const name of order) {
         try {
@@ -1217,7 +1252,7 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
   const minTs = now - span;
   const maxSlice = range === '3D' ? 10 : range === '1W' ? 18 : range === '1M' ? 45 : 400;
   const curPrice = (liveItem && Number(liveItem.price) > 0 && !isPriceItemStale(liveItem, id, now))
-    ? Math.round(Number(liveItem.price))
+    ? preservePricePrecision(liveItem.price)
     : 0;
   const curTs = Number(liveItem?.sourceTimestamp) > 0
     ? Math.floor(Number(liveItem.sourceTimestamp))
@@ -1264,8 +1299,8 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
           for (const rec of recent) {
             const startTs = parseArchiveRecTs(rec);
             if (!startTs) continue;
-            const openVal = Number(rec.open) > 0 ? Math.round(Number(rec.open) / div) : 0;
-            const closeVal = Number(rec.close) > 0 ? Math.round(Number(rec.close) / div) : 0;
+            const openVal = Number(rec.open) > 0 ? preservePricePrecision(Number(rec.open) / div) : 0;
+            const closeVal = Number(rec.close) > 0 ? preservePricePrecision(Number(rec.close) / div) : 0;
             if (startTs <= windowStart && (closeVal > 0 || openVal > 0)) {
               prevCloseForWindow = closeVal || openVal;
             }
@@ -1297,7 +1332,7 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
           for (const row of recentNa) {
             if (!Array.isArray(row) || row.length < 2) continue;
             const dStr = String(row[0] || '').trim();
-            const v = Math.round(Number(row[1]));
+            const v = preservePricePrecision(row[1]);
             if (!/^\d{4}-\d{2}-\d{2}$/.test(dStr) || !(v > 0)) continue;
             const ts = Math.floor(Date.parse(`${dStr}T12:00:00Z`) / 1000);
             if (ts <= windowStart + 43200) bestVal = v;
@@ -1356,7 +1391,7 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
         for (const rec of records) {
           const closeRaw = Number(rec.close);
           if (!(closeRaw > 0)) continue;
-          const closeToman = Math.round(closeRaw / div);
+          const closeToman = preservePricePrecision(closeRaw / div);
           const baseTs = parseArchiveRecTs(rec);
           if (baseTs >= minTs && baseTs <= now + 3600) {
             parsedOut.push([baseTs, closeToman]);
@@ -1382,7 +1417,7 @@ async function archiveHistory(id: string, range: string, liveItem: any = null): 
         for (const row of pts) {
           if (!Array.isArray(row) || row.length < 2) continue;
           const dateStr = String(row[0] || '').trim();
-          const val = Math.round(Number(row[1]));
+          const val = preservePricePrecision(row[1]);
           if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr) || !(val > 0)) continue;
           const ts = Math.floor(Date.parse(`${dateStr}T12:00:00Z`) / 1000);
           if (Number.isFinite(ts) && ts >= minTs && ts <= now + 3600) {
@@ -1488,7 +1523,7 @@ async function wallexHistory(symbol: string, range: string, refPrice = 0): Promi
 
 // Fast klines & historical archive (Real verified data only — zero synthetic charts)
 app.get('/api/history', async (req, res) => {
-  if (!checkRateLimit('hist:' + getClientIp(req), 120, 60)) {
+  if (!checkRateLimit('hist:' + getClientIp(req), 450, 60)) {
     return res.status(429).json({ error: 'تعداد درخواست‌های نمودار بیش از حد مجاز است.' });
   }
   const id = String(req.query.id || '');
@@ -2172,8 +2207,14 @@ app.get('/api/admin/overview', (_req, res) => {
   });
 });
 
+const normalizeServerFeeds = () => {
+  systemFeeds.sort((a, b) => a.priority - b.priority);
+  systemFeeds.forEach((f, idx) => { f.priority = idx + 1; });
+};
+
 app.get('/api/admin/feeds', (req, res) => {
-  const sorted = [...systemFeeds].sort((a, b) => a.priority - b.priority).map(formatFeedResponse);
+  normalizeServerFeeds();
+  const sorted = [...systemFeeds].map(formatFeedResponse);
   res.json({ ok: true, feeds: sorted });
 });
 
@@ -2182,6 +2223,7 @@ app.post('/api/admin/feeds/add', (req, res) => {
   const type = req.body?.type || req.body?.protocol || 'crypto';
   if (!name || !url) return res.status(400).json({ error: 'نام و آدرس ایندپوینت الزامی است.' });
   if (!isSafePublicUrl(String(url))) return res.status(400).json({ error: 'فقط آدرس‌های عمومی و امن (https:// یا wss://) مجاز هستند.' });
+  normalizeServerFeeds();
   const maxPriority = systemFeeds.reduce((max, f) => Math.max(max, f.priority), 0);
   const newFeed: SystemFeed = {
     id: 'f_' + Date.now(),
@@ -2195,65 +2237,67 @@ app.post('/api/admin/feeds/add', (req, res) => {
     custom: true
   };
   systemFeeds.push(newFeed);
+  normalizeServerFeeds();
   systemAuditLogs.unshift({
     id: Date.now(),
     time: 'هم‌اکنون',
     type: 'admin',
     msg: `فید وب‌سرویس جدید ${newFeed.name} با اولویت ${newFeed.priority} اضافه گردید.`
   });
-  res.json({ ok: true, feed: formatFeedResponse(newFeed) });
+  res.json({ ok: true, feed: formatFeedResponse(newFeed), feeds: systemFeeds.map(formatFeedResponse) });
 });
 
 app.post('/api/admin/feeds/:id/toggle', (req, res) => {
+  normalizeServerFeeds();
   const f = systemFeeds.find(x => x.id === req.params.id);
   if (!f) return res.status(404).json({ error: 'فید یافت نشد.' });
   f.status = f.status === 'active' ? 'inactive' : 'active';
+  lastFetchTime = 0;
+  if (cachedPrices) cachedPrices.checkedAt = 0;
   systemAuditLogs.unshift({
     id: Date.now(),
     time: 'هم‌اکنون',
     type: 'admin',
     msg: `وضعیت وب‌سرویس ${f.name} به ${f.status === 'active' ? 'فعال' : 'غیرفعال'} تغییر یافت.`
   });
-  res.json({ ok: true, feed: formatFeedResponse(f) });
+  res.json({ ok: true, feed: formatFeedResponse(f), feeds: systemFeeds.map(formatFeedResponse) });
 });
 
 app.post('/api/admin/feeds/:id/move-up', (req, res) => {
-  const sorted = [...systemFeeds].sort((a, b) => a.priority - b.priority);
-  const idx = sorted.findIndex(x => x.id === req.params.id);
+  normalizeServerFeeds();
+  const idx = systemFeeds.findIndex(x => x.id === req.params.id);
   if (idx > 0) {
-    const prev = sorted[idx - 1];
-    const curr = sorted[idx];
-    const temp = prev.priority;
-    prev.priority = curr.priority;
-    curr.priority = temp;
+    [systemFeeds[idx - 1], systemFeeds[idx]] = [systemFeeds[idx], systemFeeds[idx - 1]];
+    normalizeServerFeeds();
+    lastFetchTime = 0;
+    if (cachedPrices) cachedPrices.checkedAt = 0;
     systemAuditLogs.unshift({
       id: Date.now(),
       time: 'هم‌اکنون',
       type: 'admin',
-      msg: `اولویت فید ${curr.name} به رتبه ${curr.priority} ارتقا یافت.`
+      msg: `اولویت فید ${systemFeeds[idx - 1].name} به رتبه ${systemFeeds[idx - 1].priority} ارتقا یافت.`
     });
   }
-  const result = [...systemFeeds].sort((a, b) => a.priority - b.priority).map(formatFeedResponse);
+  const result = systemFeeds.map(formatFeedResponse);
   res.json({ ok: true, feeds: result });
 });
 
 app.post('/api/admin/feeds/:id/move-down', (req, res) => {
-  const sorted = [...systemFeeds].sort((a, b) => a.priority - b.priority);
-  const idx = sorted.findIndex(x => x.id === req.params.id);
-  if (idx !== -1 && idx < sorted.length - 1) {
-    const next = sorted[idx + 1];
-    const curr = sorted[idx];
-    const temp = next.priority;
-    next.priority = curr.priority;
-    curr.priority = temp;
+  normalizeServerFeeds();
+  const idx = systemFeeds.findIndex(x => x.id === req.params.id);
+  if (idx !== -1 && idx < systemFeeds.length - 1) {
+    [systemFeeds[idx], systemFeeds[idx + 1]] = [systemFeeds[idx + 1], systemFeeds[idx]];
+    normalizeServerFeeds();
+    lastFetchTime = 0;
+    if (cachedPrices) cachedPrices.checkedAt = 0;
     systemAuditLogs.unshift({
       id: Date.now(),
       time: 'هم‌اکنون',
       type: 'admin',
-      msg: `اولویت فید ${curr.name} به رتبه ${curr.priority} تنزل یافت.`
+      msg: `اولویت فید ${systemFeeds[idx + 1].name} به رتبه ${systemFeeds[idx + 1].priority} تنزل یافت.`
     });
   }
-  const result = [...systemFeeds].sort((a, b) => a.priority - b.priority).map(formatFeedResponse);
+  const result = systemFeeds.map(formatFeedResponse);
   res.json({ ok: true, feeds: result });
 });
 
@@ -2261,13 +2305,16 @@ app.delete('/api/admin/feeds/:id', (req, res) => {
   const idx = systemFeeds.findIndex(x => x.id === req.params.id);
   if (idx === -1) return res.status(404).json({ error: 'فید یافت نشد.' });
   const [removed] = systemFeeds.splice(idx, 1);
+  normalizeServerFeeds();
+  lastFetchTime = 0;
+  if (cachedPrices) cachedPrices.checkedAt = 0;
   systemAuditLogs.unshift({
     id: Date.now(),
     time: 'هم‌اکنون',
     type: 'admin',
     msg: `فید وب‌سرویس ${removed.name} توسط مدیر حذف شد.`
   });
-  res.json({ ok: true });
+  res.json({ ok: true, feeds: systemFeeds.map(formatFeedResponse) });
 });
 
 app.post('/api/admin/feeds/:id/test', async (req, res) => {
@@ -2281,17 +2328,31 @@ app.post('/api/admin/feeds/:id/test', async (req, res) => {
   let status = 200;
   try {
     if (f.url.startsWith('https://')) {
-      const resp = await fetch(f.url, { redirect: 'error', signal: AbortSignal.timeout(4000) });
+      const resp = await fetch(f.url, {
+        cache: 'no-store',
+        headers: { 'cache-control': 'no-cache', 'pragma': 'no-cache' },
+        redirect: 'error',
+        signal: AbortSignal.timeout(4500)
+      });
       status = resp.status;
       ok = resp.ok;
+      try {
+        const reader = resp.body?.getReader?.();
+        if (reader) {
+          await reader.read();
+          await reader.cancel().catch(() => {});
+        }
+      } catch {}
     }
   } catch {
     ok = false;
     status = 0;
   }
-  const ping = Math.round(performance.now() - start);
-  f.pingMs = ping;
-  res.json({ ok, pingMs: ping, httpStatus: status });
+  const rawPing = Math.round(performance.now() - start);
+  const timerLimited = rawPing <= 0;
+  const ping = rawPing > 0 ? rawPing : null;
+  if (ping !== null) f.pingMs = ping;
+  res.json({ ok, pingMs: ping, timerLimited, httpStatus: status });
 });
 
 function sanitizeUserForAdmin(u: StoredUser) {
@@ -3768,7 +3829,12 @@ app.get(['/', '/index.html'], (req, res) => {
 });
 
 // Serve public static files only (never expose /src directory)
-app.use('/logos', express.static(path.join(__dirname, 'public', 'logos'), { maxAge: '30d', immutable: true }));
+app.use('/logos', express.static(path.join(__dirname, 'public', 'logos'), {
+  maxAge: '1d',
+  setHeaders: (res) => {
+    res.setHeader('Cache-Control', 'public, max-age=86400, stale-while-revalidate=604800');
+  }
+}));
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0, etag: false }));
 
 // Global error handler — never expose internal stack traces

@@ -125,8 +125,12 @@ async function main() {
   await runPool(COUNTRY_CODES, 15, async (code) => {
     const target = path.join(flagsDir, `${code}.svg`);
     if (fs.existsSync(target) && fs.statSync(target).size > 32) {
-      flagCount++;
-      return;
+      try {
+        if (detectImageExt(fs.readFileSync(target)) === 'svg') {
+          flagCount++;
+          return;
+        }
+      } catch {}
     }
     const remoteCode = code === 'eu' ? 'european_union' : code;
     const img = await downloadImage(`https://cdn.jsdelivr.net/gh/HatScripts/circle-flags@gh-pages/flags/${remoteCode}.svg`, 5000);
@@ -285,10 +289,15 @@ async function main() {
     const existing = existingFiles.get(sym);
     if (existing) {
       const p = path.join(cryptoDir, existing);
+      const expectedExt = path.extname(existing).slice(1).toLowerCase();
       if (fs.statSync(p).size > 32) {
-        iconManifest[sym] = `/logos/crypto/${existing}`;
-        reused++;
-        return;
+        try {
+          if (detectImageExt(fs.readFileSync(p)) === expectedExt) {
+            iconManifest[sym] = `/logos/crypto/${existing}`;
+            reused++;
+            return;
+          }
+        } catch {}
       }
     }
     for (const url of candidates) {

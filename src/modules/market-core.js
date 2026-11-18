@@ -58,6 +58,12 @@ export const BONBAST_MAP = {
   gramcoin: ['azadi1g', 1]
 };
 
+export function preservePricePrecision(rawVal) {
+  const num = Number(rawVal);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return num < 1 ? Number(num.toFixed(8)) : Number(num.toFixed(4));
+}
+
 export function parseBonbastPayload(data, nowSec = Math.floor(Date.now() / 1000)) {
   if (!data || typeof data !== 'object' || data.reset) {
     return { dict: {}, ts: null };
@@ -73,7 +79,7 @@ export function parseBonbastPayload(data, nowSec = Math.floor(Date.now() / 1000)
   for (const [id, [key, scale]] of Object.entries(BONBAST_MAP)) {
     const raw = Number(String(data[key] ?? '').replace(/,/g, ''));
     if (!Number.isFinite(raw) || raw <= 0) continue;
-    const price = scale > 1 ? Number((raw / scale).toFixed(2)) : Math.round(raw);
+    const price = scale > 1 ? preservePricePrecision(raw / scale) : preservePricePrecision(raw);
     if (Number.isFinite(price) && price > 0) {
       dict[id] = { price, srcTs: ts };
     }
@@ -287,7 +293,8 @@ export function buildHistoryMetadata({ id, range, source, points, liveItem, nowS
     priceSource,
     lastDataAt,
     resolution,
-    dataStatus
+    dataStatus,
+    isDomestic: !!isDomestic
   };
 }
 

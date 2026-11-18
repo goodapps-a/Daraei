@@ -9,7 +9,7 @@
 <script>
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', function() {
-    navigator.serviceWorker.register('/sw.js?v=13').then(function(reg) {
+    navigator.serviceWorker.register('/sw.js?v=14').then(function(reg) {
       reg.update().catch(function() {});
       if (reg.waiting) {
         reg.waiting.postMessage({ type: 'SKIP_WAITING' });
@@ -3527,6 +3527,18 @@ body:has(.modal-backdrop.open) .bottom-nav {
   border: 1px solid rgba(255, 255, 255, 0.14);
   box-shadow: 0 14px 36px rgba(0, 0, 0, 0.6);
 }
+#editFeatured, #themeBtn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  padding: 0 !important;
+  line-height: 0 !important;
+}
+.conv-asset-btn > span:not(.conv-btn-icon) {
+  max-width: 115px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 </style></head><body>
 <div id="coin-splash" style="position:fixed;inset:0;background:#fff;z-index:99999"></div><script>try{var _sp=document.getElementById('coin-splash');if(sessionStorage.getItem('darayi_splashed')){if(_sp)_sp.remove();}else if(_sp){_sp.style.background=document.documentElement.dataset.theme==='dark'?'#000':'#fff';}}catch(e){}</script>
 <div id="ptrIndicator" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg><span class="ptr-label">برای بروزرسانی بکشید</span></div>
@@ -3561,7 +3573,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
     <div class="top-actions" id="homeTopActions">
       <button class="login-btn" id="loginBtn" type="button">ورود</button>
       <button class="icon-btn" id="themeBtn" type="button" aria-label="حالت تیره / روشن">☾</button>
-      <button class="icon-btn" id="editFeatured" type="button" aria-label="مدیریت ارزها" title="مدیریت ارزها" style="font-size:19px">⋮</button>
+      <button class="icon-btn" id="editFeatured" type="button" aria-label="مدیریت ارزها" title="مدیریت ارزها"><svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" style="display:block" aria-hidden="true"><circle cx="12" cy="5" r="1.9"/><circle cx="12" cy="12" r="1.9"/><circle cx="12" cy="19" r="1.9"/></svg></button>
     </div>
   </header>
 
@@ -3683,7 +3695,7 @@ body:has(.modal-backdrop.open) .bottom-nav {
         <input id="convAmount" inputmode="decimal" value="1" placeholder="مقدار" class="conv-amount-input">
         <button type="button" class="conv-asset-btn" id="convFromBtn" title="تغییر ارز مبدأ">
           <span id="convFromIcon" class="conv-btn-icon"></span>
-          <span id="convFromSymbol">USDT</span>
+          <span id="convFromSymbol">تتر</span>
           <svg class="conv-chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>
         </button>
       </div>
@@ -4343,6 +4355,14 @@ function instantiateSparkSvg(svgTemplate) {
   if (!svgTemplate) return '';
   return svgTemplate.replace(/__SGID__/g, 'sg_' + (++sparkSvgSeq));
 }
+function isDomesticMarketAsset(a, meta = null) {
+  if (a?.id === 'usdt') return false;
+  if (meta && typeof meta.isDomestic === 'boolean') return meta.isDomestic;
+  if (meta && (meta.currency === 'IRT' || meta.source === 'd1_intraday' || meta.source === 'iran_market' || meta.source === 'nerkhara' || meta.source === 'nerkhsanj')) {
+    return true;
+  }
+  return Boolean(a && a.cat !== 'crypto');
+}
 function renderSparkFromPoints(id, rawPts, usedRange = '1D') {
   if (!id) return '';
   const curA = asset(id);
@@ -4352,7 +4372,8 @@ function renderSparkFromPoints(id, rawPts, usedRange = '1D') {
     ? ((p.at(-1)[1] - p[0][1]) / p[0][1]) * 100
     : (Number.isFinite(curA?.change) ? curA.change : 0);
   const isUp = sparkPct >= 0;
-  const svg = chartSVG(p, isUp ? '#10b981' : '#f43f5e', true, true, usedRange, Boolean(curA && curA.cat !== 'crypto' && curA.id !== 'usdt'));
+  const cachedMeta = histories.get(id + ':' + usedRange)?.meta || null;
+  const svg = chartSVG(p, isUp ? '#10b981' : '#f43f5e', true, true, usedRange, isDomesticMarketAsset(curA, cachedMeta));
   sparkSvgCache.set(id, svg);
   sparkSvgMeta.set(id, { at: Date.now(), range: usedRange });
   document.querySelectorAll('[data-spark="' + id + '"]').forEach(el => { el.innerHTML = instantiateSparkSvg(svg); });
@@ -4369,7 +4390,36 @@ function spark(a){
   return `<span data-spark="${escapeHtml(a.id)}" aria-label="${escapeHtml(label)}"></span>`;
 }
 function lineChart(values,color='#d7ff61',fill=true){return chartSVG(values.map((v,i)=>[i,v]),color,fill)}
-function chartGeometry(points){const n=points.length,min=Math.min(...points.map(p=>p[1])),max=Math.max(...points.map(p=>p[1])),span=(max-min)||Math.max(Math.abs(min)*.01,1),t0=points[0][0],t1=points.at(-1)[0];return points.map((p,i)=>[8+(p[0]-t0)/(t1-t0||1)*624,168-(p[1]-min+span*.05)/(span*1.1)*140])}
+function normalizeChartPoints(rawPoints) {
+  if (!Array.isArray(rawPoints) || !rawPoints.length) return [];
+  const cleaned = [];
+  for (let i = 0; i < rawPoints.length; i++) {
+    const pt = rawPoints[i];
+    if (!Array.isArray(pt) || pt.length < 2) continue;
+    const ts = Number(pt[0]);
+    const val = Number(pt[1]);
+    if (Number.isFinite(ts) && Number.isFinite(val) && val > 0) {
+      cleaned.push([ts, val]);
+    }
+  }
+  if (!cleaned.length) return [];
+  cleaned.sort((a, b) => a[0] - b[0]);
+  const deduped = [cleaned[0]];
+  for (let i = 1; i < cleaned.length; i++) {
+    if (cleaned[i][0] === deduped[deduped.length - 1][0]) {
+      deduped[deduped.length - 1] = cleaned[i];
+    } else {
+      deduped.push(cleaned[i]);
+    }
+  }
+  return deduped;
+}
+function chartGeometry(points) {
+  const pts = normalizeChartPoints(points);
+  if (!pts.length) return [];
+  const vals = pts.map(p => p[1]), min = Math.min(...vals), max = Math.max(...vals), span = max - min || (min * 0.01 || 1), t0 = pts[0][0], t1 = pts.at(-1)[0];
+  return pts.map(p => [8 + ((p[0] - t0) / (t1 - t0 || 1)) * 624, 168 - ((p[1] - min) / span) * 140]);
+}
 function getClientGapThresholdSec(range='1D',isDomestic=false){
   if(range==='1H')return 900;
   if(range==='1D')return isDomestic?64800:7200;
@@ -4397,12 +4447,13 @@ function splitClientChartGapSegments(points,range='1D',isDomestic=false){
   return segs;
 }
 function smoothPath(p){if(p.length<2)return '';let d=`M${p[0][0]},${p[0][1]}`;for(let i=1;i<p.length;i++){d+=` L${p[i][0]},${p[i][1]}`}return d}
-function chartSVG(points,color,fill=true,sparkMode=false,range='1D',isDomestic=false){
+function chartSVG(points,color,fill=true,sparkMode=false,range='1D',isDomestic=false,splitTs=null){
+  points=normalizeChartPoints(points);
   if(points.length<2)return '';
   const rawSegs=splitClientChartGapSegments(points,range,isDomestic);
   if(sparkMode){
-    const min=Math.min(...points.map(p=>p[1])),max=Math.max(...points.map(p=>p[1])),span=(max-min)||Math.max(Math.abs(min)*.01,1),t0=points[0][0],t1=points.at(-1)[0];
-    const sp=points.map(p=>[4+(p[0]-t0)/(t1-t0||1)*115,41-(p[1]-min+span*.08)/(span*1.16)*34]);
+    const vals=points.map(p=>p[1]),min=Math.min(...vals),max=Math.max(...vals),span=max-min||(min*0.01||1),t0=points[0][0],t1=points.at(-1)[0];
+    const sp=points.map(p=>[4+((p[0]-t0)/(t1-t0||1))*115,41-((p[1]-min)/span)*34]);
     const geomSegs=rawSegs.map(seg=>seg.map(([,idx])=>sp[idx])).filter(seg=>seg.length>=2);
     const useSparseFallback = geomSegs.length === 0;
     const drawSegs = useSparseFallback ? [sp] : geomSegs;
@@ -4413,14 +4464,58 @@ function chartSVG(points,color,fill=true,sparkMode=false,range='1D',isDomestic=f
     return `<svg style="direction:ltr;overflow:visible" viewBox="0 0 128 48" preserveAspectRatio="xMidYMid meet" role="img" aria-label="نمودار روند قیمت"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop stop-color="${color}" stop-opacity=".34"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${areaPaths}${strokeD?`<path d="${strokeD}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"${dashAttr}/>`:''}<circle class="spark-dot-halo" cx="${last[0]}" cy="${last[1]}" r="5.2" fill="${color}"/><circle class="spark-dot-core" cx="${last[0]}" cy="${last[1]}" r="2.5" fill="${color}" stroke="var(--paper, #ffffff)" stroke-width="0.9"/></svg>`;
   }
   const p=chartGeometry(points),gid='chart-'+uid();
-  const geomSegs=rawSegs.map(seg=>seg.map(([,idx])=>p[idx]));
-  const areaPaths=fill?geomSegs.filter(seg=>seg.length>=2).map(seg=>{const d=smoothPath(seg);return `<path d="${d} L${seg[seg.length-1][0]},180 L${seg[0][0]},180 Z" fill="url(#${gid})"/>`;}).join(''):'';
-  const strokeD=geomSegs.filter(seg=>seg.length>=2).map(smoothPath).join(' ');
-  const singleDots=geomSegs.filter(seg=>seg.length===1).map(seg=>`<circle cx="${seg[0][0]}" cy="${seg[0][1]}" r="3" fill="${color}" stroke="var(--paper, #ffffff)" stroke-width="1.2"/>`).join('');
-  return `<svg style="direction:ltr" viewBox="0 0 640 180" preserveAspectRatio="none" role="img" aria-label="تاریخچه واقعی قیمت؛ زمان از چپ به راست"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop stop-color="${color}" stop-opacity=".28"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${areaPaths}${strokeD?`<path d="${strokeD}" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`:''}${singleDots}<g class="crosshair" visibility="hidden"><line y1="0" y2="180" stroke="${color}" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/></g></svg>`;
+  const hasPreSplit=Number.isFinite(splitTs)&&splitTs>points[0][0]&&splitTs<points[points.length-1][0];
+  if(!hasPreSplit){
+    const geomSegs=rawSegs.map(seg=>seg.map(([,idx])=>p[idx]));
+    const areaPaths=fill?geomSegs.filter(seg=>seg.length>=2).map(seg=>{const d=smoothPath(seg);return `<path d="${d} L${seg[seg.length-1][0]},180 L${seg[0][0]},180 Z" fill="url(#${gid})"/>`;}).join(''):'';
+    const strokeD=geomSegs.filter(seg=>seg.length>=2).map(smoothPath).join(' ');
+    const singleDots=geomSegs.filter(seg=>seg.length===1).map(seg=>`<circle cx="${seg[0][0]}" cy="${seg[0][1]}" r="3" fill="${color}" stroke="var(--paper, #ffffff)" stroke-width="1.2"/>`).join('');
+    return `<svg style="direction:ltr" viewBox="0 0 640 180" preserveAspectRatio="none" role="img" aria-label="تاریخچه واقعی قیمت؛ زمان از چپ به راست"><defs><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop stop-color="${color}" stop-opacity=".28"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${areaPaths}${strokeD?`<path d="${strokeD}" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`:''}${singleDots}<g class="crosshair" visibility="hidden"><line y1="0" y2="180" stroke="${color}" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/></g></svg>`;
+  }
+  const preColor='#94a3b8';
+  const preSegs=[],postSegs=[];
+  let splitMarkerCoord=null;
+  for(const seg of rawSegs){
+    const pre=[],post=[];
+    for(let k=0;k<seg.length;k++){
+      const [pt,idx]=seg[k];
+      const ts=pt[0];
+      const coord=p[idx];
+      if(ts<splitTs){
+        pre.push(coord);
+        if(k+1<seg.length){
+          const nextTs=seg[k+1][0][0];
+          const nextCoord=p[seg[k+1][1]];
+          if(nextTs===splitTs){
+            pre.push(nextCoord);
+            splitMarkerCoord=nextCoord;
+          }else if(nextTs>splitTs){
+            const ratio=(splitTs-ts)/(nextTs-ts||1);
+            const mid=[coord[0]+(nextCoord[0]-coord[0])*ratio,coord[1]+(nextCoord[1]-coord[1])*ratio];
+            pre.push(mid);
+            post.push(mid);
+            splitMarkerCoord=mid;
+          }
+        }
+      }else{
+        if(ts===splitTs&&!splitMarkerCoord)splitMarkerCoord=coord;
+        post.push(coord);
+      }
+    }
+    if(pre.length)preSegs.push(pre);
+    if(post.length)postSegs.push(post);
+  }
+  const preAreas=fill?preSegs.filter(s=>s.length>=2).map(s=>`<path d="${smoothPath(s)} L${s[s.length-1][0]},180 L${s[0][0]},180 Z" fill="url(#${gid}-pre)"/>`).join(''):'';
+  const preStrokeD=preSegs.filter(s=>s.length>=2).map(smoothPath).join(' ');
+  const postAreas=fill?postSegs.filter(s=>s.length>=2).map(s=>`<path d="${smoothPath(s)} L${s[s.length-1][0]},180 L${s[0][0]},180 Z" fill="url(#${gid})"/>`).join(''):'';
+  const postStrokeD=postSegs.filter(s=>s.length>=2).map(smoothPath).join(' ');
+  const singlePreDots=preSegs.filter(s=>s.length===1).map(s=>`<circle cx="${s[0][0]}" cy="${s[0][1]}" r="2.6" fill="${preColor}" stroke="var(--paper, #ffffff)" stroke-width="1"/>`).join('');
+  const singlePostDots=postSegs.filter(s=>s.length===1).map(s=>`<circle cx="${s[0][0]}" cy="${s[0][1]}" r="3" fill="${color}" stroke="var(--paper, #ffffff)" stroke-width="1.2"/>`).join('');
+  const splitDot=splitMarkerCoord?`<circle cx="${splitMarkerCoord[0]}" cy="${splitMarkerCoord[1]}" r="3.2" fill="${color}" stroke="${preColor}" stroke-width="1.4" vector-effect="non-scaling-stroke"/>`:'';
+  return `<svg style="direction:ltr" viewBox="0 0 640 180" preserveAspectRatio="none" role="img" aria-label="تاریخچه واقعی قیمت؛ بخش خاکستری پیش از خرید و بخش رنگی دوره نگهداری"><defs><linearGradient id="${gid}-pre" x1="0" x2="0" y1="0" y2="1"><stop stop-color="${preColor}" stop-opacity=".18"/><stop offset="1" stop-color="${preColor}" stop-opacity="0"/></linearGradient><linearGradient id="${gid}" x1="0" x2="0" y1="0" y2="1"><stop stop-color="${color}" stop-opacity=".28"/><stop offset="1" stop-color="${color}" stop-opacity="0"/></linearGradient></defs>${preAreas}${preStrokeD?`<path data-chart-phase="pre" d="${preStrokeD}" fill="none" stroke="${preColor}" stroke-width="2" stroke-opacity="0.85" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`:''}${postAreas}${postStrokeD?`<path data-chart-phase="post" d="${postStrokeD}" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`:''}${singlePreDots}${singlePostDots}${splitDot}<g class="crosshair" visibility="hidden"><line y1="0" y2="180" stroke="${color}" stroke-dasharray="3 4" vector-effect="non-scaling-stroke"/></g></svg>`;
 }
 function paintChart(box, points, color, formatter, opts = {}) {
-  points = points.filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]) && p[1] > 0).sort((a, b) => a[0] - b[0]);
+  points = normalizeChartPoints(points);
   box.style.position = 'relative';
   box.style.direction = 'ltr';
   if (points.length < 2) {
@@ -4431,7 +4526,8 @@ function paintChart(box, points, color, formatter, opts = {}) {
   let tip = box.querySelector(':scope > .chart-tooltip');
   let glowDot = box.querySelector(':scope > .chart-glow-dot');
   const existingSvg = box.querySelector(':scope > svg');
-  const svgMarkup = chartSVG(points, color, true, false, opts.range || '1D', !!opts.isDomestic);
+  const splitTs = Number.isFinite(opts.splitTs) && opts.splitTs > 0 ? opts.splitTs : null;
+  const svgMarkup = chartSVG(points, color, true, false, opts.range || '1D', !!opts.isDomestic, splitTs);
 
   if (existingSvg && tip && glowDot) {
     const tmp = document.createElement('div');
@@ -4498,6 +4594,7 @@ function paintChart(box, points, color, formatter, opts = {}) {
 
     const isDailyPoint = !!opts.isDaily && bestIdx < points.length - 1;
     const { time, date } = formatChartTooltipDateTime(curTime, isDailyPoint);
+    const isPrePurchase = Boolean(splitTs && curTime < splitTs);
 
     const maxDataDec = countDecimals(curVal);
     let allowedDecimals = 0;
@@ -4513,7 +4610,7 @@ function paintChart(box, points, color, formatter, opts = {}) {
     const valFormatted = Math.round(curVal * factor) / factor;
     const priceStr = formatter(valFormatted, allowedDecimals);
 
-    tip.innerHTML = '<span class="tip-time">' + escapeHtml(time) + '</span><span class="tip-date">' + escapeHtml(date) + '</span>';
+    tip.innerHTML = '<span class="tip-time">' + escapeHtml(time) + '</span><span class="tip-date">' + escapeHtml(date + (isPrePurchase ? ' · پیش از خرید' : '')) + '</span>';
     tip.hidden = false;
 
     const rect = svg.getBoundingClientRect();
@@ -4598,26 +4695,46 @@ let snapshots=loadSnapshotsFor(state.ownerEmail);
 function snapshot(){const positions=safeLedger().positions;if(!positions.length||positions.some(p=>!(asset(p.assetId).price>0)||isStale(asset(p.assetId))||asset(p.assetId).currency!=='IRT'&&(!(asset('usdt').price>0)||isStale(asset('usdt')))))return;const t=Math.floor(Date.now()/1000);if(snapshots.length&&t-snapshots.at(-1)[0]<60)return;snapshots.push([t,totalValue()]);snapshots=snapshots.filter(p=>t-p[0]<366*86400).slice(-5000);saveSnapshotsFor(state.ownerEmail,snapshots)}
 function parseHoldingTimeSec(h) {
   if (!h) return null;
+  let createdSec = null;
+  if (Number.isFinite(h.createdAt) && h.createdAt > 0) {
+    createdSec = h.createdAt > 1e11 ? Math.floor(h.createdAt / 1000) : Math.floor(h.createdAt);
+  }
   if (h.date) {
     const parts = String(h.date).split('-');
-    if (parts.length === 3) {
+    let dateSec = null;
+    if (parts.length === 3 && Number(parts[0]) > 1900) {
       const d = new Date(Number(parts[0]), Number(parts[1]) - 1, Number(parts[2]), 0, 0, 0);
       const t = Math.floor(d.getTime() / 1000);
-      if (Number.isFinite(t) && t > 0) return t;
+      if (Number.isFinite(t) && t > 0) dateSec = t;
+    } else {
+      const t = Math.floor(new Date(h.date).getTime() / 1000);
+      if (Number.isFinite(t) && t > 0) dateSec = t;
     }
-    const t = Math.floor(new Date(h.date).getTime() / 1000);
-    if (Number.isFinite(t) && t > 0) return t;
+    if (dateSec) {
+      if (createdSec && createdSec >= dateSec && createdSec < dateSec + 86400) {
+        return createdSec;
+      }
+      return dateSec;
+    }
   }
-  if (Number.isFinite(h.createdAt) && h.createdAt > 0) {
-    return h.createdAt > 1e11 ? Math.floor(h.createdAt / 1000) : Math.floor(h.createdAt);
-  }
-  return null;
+  return createdSec;
 }
 
 function getOldestHoldingTime() {
   if (!state.holdings.length) return null;
   const times = state.holdings.map(parseHoldingTimeSec).filter(Boolean);
   return times.length ? Math.min(...times) : null;
+}
+
+function positionsAtTimeStrict(records, ts) {
+  if (!Array.isArray(records) || !records.length) return [];
+  const activeRecords = records.filter(h => (parseHoldingTimeSec(h) || 0) <= ts);
+  if (!activeRecords.length) return [];
+  try {
+    return ledger(activeRecords).positions;
+  } catch {
+    return safeLedger().positions;
+  }
 }
 
 function positionsAtTime(records, ts, windowStartTs) {
@@ -4627,7 +4744,6 @@ function positionsAtTime(records, ts, windowStartTs) {
   if (!validTimes.length) return safeLedger().positions;
   const minT = Math.min(...validTimes);
   const maxT = Math.max(...validTimes);
-  // اگر همه دارایی‌ها در یک تاریخ واحد ثبت شده‌اند یا همگی پیش از شروع بازه نمودار بوده‌اند، ترکیب فعلی سبد در کل بازه برقرار است
   if (minT === maxT || maxT <= windowStartTs) {
     return safeLedger().positions;
   }
@@ -4824,10 +4940,7 @@ async function computePortfolioHistoryPoints(range, unitId = 'toman') {
   const tOldest = getOldestHoldingTime();
 
   const allAssetIds = [...new Set([...currentPositions.map(p => p.assetId), ...state.holdings.map(h => h.assetId).filter(Boolean)])];
-  const hasDomestic = allAssetIds.some(id => {
-    const a = asset(id);
-    return a && a.cat !== 'crypto' && a.id !== 'usdt';
-  });
+  const hasDomestic = allAssetIds.some(id => isDomesticMarketAsset(asset(id), histories.get(id + ':' + range)?.meta || null));
 
   let apiRange = range;
   if (range === 'ALL' || !range) {
@@ -4931,9 +5044,9 @@ async function computePortfolioHistoryPoints(range, unitId = 'toman') {
       const fallbackPct = (range === 'ALL' || !range)
         ? calcAllTimeReturnPct()
         : (snapOut[0][1] > 0 ? ((snapOut.at(-1)[1] - snapOut[0][1]) / snapOut[0][1]) * 100 : 0);
-      return { status: 'ok', points: snapOut, apiRange, isDaily: false, returnPct: fallbackPct };
+      return { status: 'ok', points: snapOut, apiRange, isDaily: false, isDomestic: hasDomestic, returnPct: fallbackPct, splitTs: null };
     }
-    return { status: 'unavailable', points: [], apiRange, returnPct: 0 };
+    return { status: 'unavailable', points: [], apiRange, isDomestic: hasDomestic, returnPct: 0, splitTs: null };
   }
 
   const tsSet = new Set();
@@ -4954,9 +5067,21 @@ async function computePortfolioHistoryPoints(range, unitId = 'toman') {
     if (clipped.length >= 2) allTs = clipped;
   }
 
+  // مشخص کردن مرز دقیق زمان خرید (splitTs):
+  // نقاط پیش از splitTs به رنگ خاکستری (نمای بازار پیش از خرید) و نقاط از splitTs به بعد به رنگ سود/زیان نمایش داده می‌شوند.
+  const firstWindowTs = allTs.length ? allTs[0] : windowStartTs;
+  const splitTs = (tOldest && tOldest > firstWindowTs && tOldest < now)
+    ? Math.min(tOldest, now - 1)
+    : null;
+
+  if (splitTs !== null && !allTs.includes(splitTs)) {
+    allTs.push(splitTs);
+    allTs.sort((a, b) => a - b);
+  }
+
   if (allTs.length > 180) {
     const step = Math.ceil(allTs.length / 180);
-    allTs = allTs.filter((_, idx) => idx % step === 0 || idx === allTs.length - 1);
+    allTs = allTs.filter((ts, idx) => idx === 0 || idx % step === 0 || idx === allTs.length - 1 || (splitTs !== null && ts === splitTs));
   }
 
   const valuePositionsAtTs = (positionsList, ts) => {
@@ -4975,10 +5100,16 @@ async function computePortfolioHistoryPoints(range, unitId = 'toman') {
     return sumToman;
   };
 
+  const baselinePositions = splitTs !== null
+    ? (positionsAtTimeStrict(state.holdings, splitTs).length ? positionsAtTimeStrict(state.holdings, splitTs) : currentPositions)
+    : currentPositions;
+
   const out = [];
   const evalRecords = [];
   for (const ts of allTs) {
-    const activePositions = positionsAtTime(state.holdings, ts, windowStartTs);
+    const activePositions = (splitTs !== null && ts < splitTs)
+      ? baselinePositions
+      : (positionsAtTimeStrict(state.holdings, ts).length ? positionsAtTimeStrict(state.holdings, ts) : baselinePositions);
     if (!activePositions.length) continue;
     const sumToman = valuePositionsAtTs(activePositions, ts);
     if (sumToman !== null && sumToman > 0) {
@@ -5002,46 +5133,52 @@ async function computePortfolioHistoryPoints(range, unitId = 'toman') {
     }
   }
 
-  if (out.length < 2) return { status: 'unavailable', points: [], apiRange, returnPct: 0 };
+  if (out.length < 2) return { status: 'unavailable', points: [], apiRange, returnPct: 0, splitTs: null };
 
-  // محاسبه دقیق درصد سود بدون لحاظ کردن سرمایه جدید (واریز/خرید جدید) به‌عنوان سود
+  // محاسبه دقیق درصد سود فقط روی دوره نگهداری واقعی (از زمان خرید به بعد؛ بدون اثر بخش خاکستری پیش از خرید و واریز جدید)
   let returnPct = 0;
   if (range === 'ALL' || !range) {
     returnPct = calcAllTimeReturnPct();
   } else {
-    const t0 = evalRecords[0].ts;
-    const tEnd = evalRecords[evalRecords.length - 1].ts;
-    const totalWindow = Math.max(1, tEnd - t0);
-    const vStart = evalRecords[0].val;
-    const vEnd = evalRecords[evalRecords.length - 1].val;
-    let netFlows = 0;
-    let weightedFlows = 0;
+    const activeRecords = splitTs !== null
+      ? evalRecords.filter(r => r.ts >= splitTs)
+      : evalRecords;
+    if (activeRecords.length >= 2) {
+      const t0 = activeRecords[0].ts;
+      const tEnd = activeRecords[activeRecords.length - 1].ts;
+      const totalWindow = Math.max(1, tEnd - t0);
+      const vStart = activeRecords[0].val;
+      const vEnd = activeRecords[activeRecords.length - 1].val;
+      let netFlows = 0;
+      let weightedFlows = 0;
 
-    const sigOf = (list) => list.map(p => p.assetId + ':' + p.qty.toFixed(10)).sort().join('|');
-    for (let i = 1; i < evalRecords.length; i++) {
-      const prev = evalRecords[i - 1];
-      const cur = evalRecords[i];
-      if (sigOf(prev.positions) !== sigOf(cur.positions)) {
-        // ارزش سبد قبلی با قیمت لحظه جدید
-        const prevValAtCurToman = cur.ts === now
-          ? prev.positions.reduce((s, p) => s + p.qty * quoteToman(asset(p.assetId)), 0)
-          : valuePositionsAtTs(prev.positions, cur.ts);
-        if (prevValAtCurToman !== null && prevValAtCurToman >= 0) {
-          const div = cur.ts === now ? uInfo.tomanPerUnit : unitDivisorAtTs(cur.ts);
-          const prevValAtCur = div > 0 ? (prevValAtCurToman / div) : cur.val;
-          const flow = cur.val - prevValAtCur;
-          netFlows += flow;
-          weightedFlows += flow * ((tEnd - cur.ts) / totalWindow);
+      const sigOf = (list) => list.map(p => p.assetId + ':' + p.qty.toFixed(10)).sort().join('|');
+      for (let i = 1; i < activeRecords.length; i++) {
+        const prev = activeRecords[i - 1];
+        const cur = activeRecords[i];
+        if (sigOf(prev.positions) !== sigOf(cur.positions)) {
+          const prevValAtCurToman = cur.ts === now
+            ? prev.positions.reduce((s, p) => s + p.qty * quoteToman(asset(p.assetId)), 0)
+            : valuePositionsAtTs(prev.positions, cur.ts);
+          if (prevValAtCurToman !== null && prevValAtCurToman >= 0) {
+            const div = cur.ts === now ? uInfo.tomanPerUnit : unitDivisorAtTs(cur.ts);
+            const prevValAtCur = div > 0 ? (prevValAtCurToman / div) : cur.val;
+            const flow = cur.val - prevValAtCur;
+            netFlows += flow;
+            weightedFlows += flow * ((tEnd - cur.ts) / totalWindow);
+          }
         }
       }
+      const pureGain = (vEnd - vStart) - netFlows;
+      const avgCapital = vStart + weightedFlows;
+      returnPct = avgCapital > 0 && Number.isFinite(pureGain) ? (pureGain / avgCapital) * 100 : calcAllTimeReturnPct();
+    } else {
+      returnPct = calcAllTimeReturnPct();
     }
-    const pureGain = (vEnd - vStart) - netFlows;
-    const avgCapital = vStart + weightedFlows;
-    returnPct = avgCapital > 0 && Number.isFinite(pureGain) ? (pureGain / avgCapital) * 100 : calcAllTimeReturnPct();
   }
 
   const isDaily = apiRange === '1M' || apiRange === '1Y' || (hasDomestic && apiRange !== '1D' && apiRange !== '1H');
-  return { status: 'ok', points: out, apiRange, isDaily, returnPct };
+  return { status: 'ok', points: out, apiRange, isDaily, isDomestic: hasDomestic, returnPct, splitTs };
 }
 
 const portfolioHistoryCache = new Map();
@@ -5107,7 +5244,15 @@ function renderSnapshots(box, range) {
     const valFormatter = box.id === 'portfolioHistoryChart'
       ? (n => formatPortfolioUnitValue(n, uInfo))
       : money;
-    paintChart(box, pts, chartColor, valFormatter, { isDaily: res.isDaily, range: res.apiRange || range, isDomestic: false });
+    const detectedDomestic = typeof res.isDomestic === 'boolean'
+      ? res.isDomestic
+      : safeLedger().positions.some(p => isDomesticMarketAsset(asset(p.assetId)));
+    paintChart(box, pts, chartColor, valFormatter, {
+      isDaily: res.isDaily,
+      range: res.apiRange || range,
+      isDomestic: detectedDomestic,
+      splitTs: res.splitTs || null
+    });
     if (box.id === 'portfolioHistoryChart') {
       const pCh = $('#portfolioChartChange');
       if (pCh) {
@@ -5359,7 +5504,7 @@ const CRYPTO_SLUGS = {
 // Official ArzDigital slugs are preserved in CRYPTO_SLUGS for slug-based image fallback
 const ARZ_DIGITAL_ICONS = {};
 /* @LOCAL_ICONS_START */
-const LOCAL_CRYPTO_PNG_LIST = "4,0g,1000cat,1000cheems,1000sats,10set,1inch,1inchdown,1inchup,1mbabydoge,2z,3kds,3ull,4ever,4stock,9bit,a,a2z,a47,a8,aaoib,aapl,aaplb,aaplc,aaplon,aaplx,aark,aave,aavedown,aaveup,ab,abbc,abbvx,abel,abey,abt,abton,abtx,aca,ace,ach,acm,acn,acnon,acnx,acp,acs,act,acu,acx,ada,adadown,adapad,adaup,adbeb,adi,adp,ads,adx,ae,aeon,aergo,aero,aevo,afc,aggon,agi,agix,agld,agpub,agrs,agt,aht,ai,ai16z,aia,aiat,aic,aidoge,aigensyn,ain,aio,aion,aiot,aioz,air,airdrop,aiv,aix9,aixbt,ake,akita,akro,akt,ala,alabb,alch,alcx,ale,aleo,aleph,alex,algo,ali,alice,align,alkimi,allo,alpa,alpaca,alph,alpha,alpine,alt,altszn,alu,amatb,amb,amcb,amdb,amdon,amdx,amo,amp,ampl,amzn,amznb,amznon,amznx,anc,andy,andyeth,anime,ankr,anoa,anon,ansem,ansemcat,ant,antfun,anthropic,any,anyone,ao,aog,aop,ape,apepe,apex,api3,apm,appb,apr,apt,aptm,apu,apx,aqa,ar,arara,arb,arc,arch,ardr,arena,arg,argus,aria,ark,arkm,armb,arpa,arrr,art,artfi,artx,arw,arx,ask,asm,asmlb,asmlon,asp,asr,asset,ast,aster,asteroid,astr,astra,astsb,astson,at,ata,ath,atlas,atm,atom,atos,atr,ats,atwo,auction,audd,audf,audio,audm,auki,aura,aurora,ausd,auto,ava,avaai,avail,avax,avc,avgob,avgoon,avgox,avici,avl,avnt,avt,avv,awe,awin,axis,axl,axs,axtib,azero,aznx,aztec,azur,b,b2,b3,b3x,babab,babaon,babi,baby,babydoge,babyshark,badger,baion,bake,bal,ban,banana,bananas31,band,bank,bar,bard,bas,basecat,based,basiscash,bat,batch,bay,bb,bbb,bbt,bcc,bccoin,bcd,bch,bchabc,bchdown,bchsv,bchup,bcn,bcut,bdca,bdg,bdt,bdx,bdxn,beam,beamx,bear,beat,beb,bee,bel,believe,bells,belong,benji,benqi,bera,bert,beta,beth,bf,bfc,bfg,bfusd,bgb,bgsc,bico,bid,bifi,bigtime,bill,bim,bio,birb,bitboard,bitcoin,bkn,bkrw,bld,blend,bless,blkdigon,blkgrwon,blkhion,blkon,bluai,blue,bluechip,blum,blur,blz,bmnrb,bmnron,bmnrx,bmt,bmx,bnb,bnbbear,bnbbull,bnbdown,bnbtiger,bnbup,bnc,bnc4,bncb,bncold,bnkr,bnsol,bnt,bnx,bob,boba,bobo,bold,bome,bond,bone,boner,bonk,booe,boop,bora,borg,bos,boson,botb,bounty,box,bp,bpt,br,brainon,brett,brev,bric,brise,brkbb,brkl,brl1,brn,broccoli,broccoli714,brtron,bsai,bsb,bspb,bst,bsv,bsw,btc,btcdown,btcst,btcup,btg,btgoon,btr,btrst,bts,btse,btt,bttc,btw,btx,bubble,bubi,buck,bull,bulla,burger,burn,busd,busy,buttcoin,buy,bxn,byn,bzrx,bzz,c,c98,ca,caga,cake,camp,cap,carat,cards,carv,cashcat,cat,cate,catecoin,cati,cats,caw,cbk,cbrsb,cc,ccd,cel,cell,celo,celr,cent,cere,cess,cet,cetus,cfg,cfx,cgn,cgo,cgpt,chatai,check,cheel,cheems,cheq,chess,chex,chillguy,chip,chirp,cho,chr,chz,city,ckb,clanker,clash,clnd,clo,clore,cloud,clv,cmcsax,cnpy,coai,cocos,codex,cohrb,coin,coinb,coindepo,coinon,coinx,col,collect,cols,combo,common,comp,cookie,coq,core,coreum,corn,cos,coti,cow,cp,cpool,cpr,crcl,crclb,crclon,crclx,crdob,cre,cream,credi,creo,crepe,creta,crf,crmb,cro,cross,crown,crts,cru,crv,crvusd,crwdb,crwdx,crwvb,cscoon,cscox,cspr,cst,ct,ctc,ctk,ctm,ctp,ctr,ctsi,ctx,ctxc,cudis,cult,cummies,cusd,cvc,cvp,cvx,cvxon,cwar,cweb,cwif,cws,cxt,cyber,cyc,cyphb,cys,d,d2t,daddy,dag,dai,dao,dar,dash,data,dbc,dbr,dcr,debit,deep,deepseek,defi,degen,dego,delabs,dellb,dent,deod,dep,deso,desu,deus,dexe,dext,df,dfdvx,dfg,dgai,dgb,dgma,dhn,dhrx,dhv,dia,diam,diem,dimo,din,divi,djed,dji6930,djtb,dka,dl,dmc,dmd,dmtr,dn,dna,dnt,dobo,dock,dodo,dog,doge,dogelonmars,doginme,dogs,dolo,dome,dood,dora,dos,dot,dotdown,dotup,dpr,dramb,dramon,drb,drep,dress,drift,drv,dsync,dtec,duck,durev,dusd,dusk,dxi,dydx,dym,dyor,eat,edel,eden,edge,edgex,edu,eemon,efaon,egame,egl1,egld,eigen,el,ela,elf,elg,elizaos,elon,elp,elsa,elx,emc,emt,ena,enj,ens,enso,eos,eosbear,eosbull,eosdown,eosup,epic,eps,ept,epx,eqb,eqty,era,erd,erg,ern,es,ese,esim,esp,esports,etc,eth,ethbear,ethbull,ethdown,ethdydx,ethfi,ethup,ethw,etn,eul,eurc,eurcv,euri,eurq,eurr,eusd,eusx,ev,evaa,ever,ewt,ewyb,ewyx,f,fai,far,farm,fartboy,fartcoin,fb,fct,fdusd,fearnot,feg,fei,fely,fet,ff,fhe,fida,fidd,fight,fil,fildown,filup,fio,fir,fire,firo,fis,fishw,fiwa,flip,flm,flncb,flock,floki,flow,flr,flt,fluid,flux,fly,fogo,fold,folks,fone,for,forest,forex,form,fort,forth,fourcoin,fox,foxsy,foxy,frax,frong,front,frxusd,ft,ftm,ftrb,ftt,fuel,ful,fun,funtoken,fusd,fuse,fwdib,fwog,fxion,fxs,fyn,g,g3,gafi,gaib,gain,gal,gala,galeon,galo,game,games,gas,gat,gata,gato,gbyte,gcb,gcoin,gear,geg,gems,genius,geod,gevb,gf,gfal,gfi,gft,gho,ghst,ghx,giga,giggle,gitcoin,gldon,gldx,gleec,glm,glmr,glwb,gme,gmeb,gmee,gmmt,gmrx,gmt,gmwagmi,gmx,gnc,gno,gnot,gns,go4,goat,goated,goats,gods,gog,gohome,goldao,goldgr,gomining,googl,googlb,googlc,googlon,googlx,googon,gp,gprob,gps,gram,grass,griffain,grin,grnd,grok,grove,grow,grs,grt,grvt,gsb,gstock,gt,gtai,gtbtc,gtc,gteth,gua,gun,gusd,gwei,gxe,gxs,gyen,h,haedal,haha,hai,hamster,hana,hard,harold,hbar,hdg,hdn,hdx,heart,hegic,hei,hello,hemi,hero,hez,hft,hget,hgpt,hibs,hifi,high,himsb,himson,hint,hippo,hive,hln,hmnd,hmstr,hnb,hnt,hod,hold,holdstation,holo,home,honey,honx,hoodb,hoodon,hoodx,hook,hookr,hoppy,hopr,hord,hot,hp,hpeb,hpos10i,hpp,hsk,ht,htm,htr,htx,huma,hunt,hvlo,hype,hyper,iag,iauon,ibiton,ibmb,ibmon,ibs,icnt,icp,icx,id,idex,idia,idol,idos,idrt,iefaon,iemgon,ihc,ijhon,ika,ilv,ily,impt,imt,imu,imx,in,inc,index,init,inj,intcb,intcon,intcx,inter,intwb,inv,inx,io,iost,iota,iotx,iq,ir,irenb,iris,iron,irys,isikc,isk,island,islm,isp,ita,ithaca,itoton,ivvon,iwfon,iwmon,iwnon,ixs,izi,jager,janet,jasmy,jct,jeanphil,jellyjelly,jfi,jitosol,jlp,joc,joe,jpmb,jpmon,jsm,jst,jto,juc,jup,juv,kaia,kaio,kaito,kan,kas,kat,kava,kcs,kct,kda,kdk,keep,kekius,kernel,ket,key,keycat,kgen,kgst,kii,kilo,kishu,kite,kiteai,klay,klk,klv,kmd,kmno,knc,kntq,koge,koma,konet,koon,kor,korub,kox,kp3r,kpol,krl,ksm,kstrb,kt,kta,kton,kub,kyo,kyve,kzen,l3,la,lab,labubu,ladys,lair,laptop,lat,lava,layer,lazio,lbt,lcx,ldo,legion,lend,leo,lever,lf,light,ligo,like,lime,lina,linea,lingo,link,linkdown,linkup,lion,liquidium,lista,lisusd,lit,liteb,litex,ll,llyb,llyon,llyx,lm,lmton,lmts,lmwr,ln,lnq,loa,loan,lobo,locus,lofi,logt,logx,loka,lon,loom,lot,loulou,lpt,lq,lqr,lqty,lrc,lrds,lrn,lsk,ltc,ltcdown,ltcup,lto,luca,lucic,lumia,luna,lunc,lunrx,lusd,lv,lvly,lvva,lwp,lyn,lyp,lyx,m,m87,ma,mag7ssi,mag7xon,magic,magma,majo,major,mak,mamo,man,mana,mana3,manifest,manta,mantra,manyu,maon,mapo,marscoin,mart,mask,mat,match,math,mav,mavia,max,may,mbg,mbl,mbox,mbx,mc,mcat,mcb,mcdon,mcdull,mcdx,mcm,mcn,mcoin,mctp,mdbb,mdf,mdt,mdx,me,med,mega,melania,meld,meme,mengo,mepad,merl,met,meta,metab,metac,metadao,metan,metaon,metax,metfi,metis,meto,mev,mew,mey,mezo,mf,mft,mgkl,mgo,mha,miladycult,milo,mim,min,mina,mir,mira,mith,mito,mkr,ml,mlc,mlk,mln,mmpro,mmt,mmui,mnde,mngo,mnsry,mnt,mntx,mob,mobile,moc,moca,mode,mog,mon,mona,moodeng,mooney,moov,mori,morpho,move,movr,mow,mpc,mplx,mrnab,mrvlb,mrvlon,mrvlx,msftb,msfton,msftx,msol,msp,msq,mstr,mstrb,mstron,mstrx,mtl,mtv,mtx,mu,mub,mubarak,mug,multi,muon,musd,musebook,muub,mux,mvc,mvl,mvllb,mwxt,mx,my,myro,myst,myx,naft,naka,nano,naoris,nap,natix,navi,navx,naws,nbisb,nbison,nblu,nbot,nbs,nbt,nc,ncn,nct,near,nebl,neet,neiro,neirocto,neko,neo,neon,nero,nes,ness,net,nett,netx,neural,neuro,newt,nex,nexa,nexi,nexo,nfe,nflxb,nflxon,nflxx,nfp,nft,nibi,night,niko,nil,nila,nim,niulai,niza,nkn,nmc,nmr,nock,node,nodl,nokb,nom,noot,nos,not,npc,npxs,ns,nsdx,nst,ntrn,nu,nuls,num,numi,nuts,nux,nvda,nvdab,nvdac,nvdaon,nvdax,nvoon,nxa,nxpc,nxt,nyan,nym,o,o4dx,oas,oax,obi,obol,obsr,obt,ocean,octa,ofc,og,ogn,ogpu,ogy,oho,okb,oksol,ol,olas,ole,om,omg,omi,omikami,omni,on,ondo,one,ong,ont,ooki,oort,op,open,openai,opg,opn,orai,orbio,orbr,orbs,orca,orclb,orclon,orclx,order,ordi,ore,orion,orn,oro,ort,osak,osmo,otk,ousd,ovl,ovo,ovr,owb,owl,own,oxt,p2p,paal,pace,pack,pact,pal,palm,pando,panwon,paparazzi,part,parti,pax,paxg,payai,pbron,pbtc35a,pci,pda,pddb,pddon,pdt,peaq,pearl,peipei,pell,pendle,pengb,pengu,penguin,people,peoplefb,pep,pepe,pepecoin,pepon,pepx,perl,perp,pfeon,pgon,pgx,pha,phb,phnix,pi,pieverse,piggy,pika,pin,pine,pingo,pipe,pipedog,pippin,pirate,pit,pivx,pixel,pla,plai,planet,play,plspad,pltr,pltrb,pltron,pltrx,plume,pm,pmt,pmx,png,pnk,pnt,pnut,pod,pokt,pol,polis,pols,poly,polyx,pond,ponke,pons,pool,pop,popcat,popmtx,por,pork,pornrocket,port,port3,portal,porto,power,powr,ppc,ppoly,ppt,prai,prcl,predict,prespcx,prime,prl,pro,prom,prompt,propc,props,pros,prosper,prove,psg,psi,ptb,public,puffer,pump,pumpbtc,pundiai,pundix,pups,purr,puss,pybobo,pym,pyplb,pyr,pyth,pyusd,pzm,pzp,q,qait,qanx,qbx,qcomb,qcomon,qfi,qi,qka,qkc,qnt,qntb,qorpo,qqq,qqqb,qqqon,qqqx,qtum,quai,qubic,quick,quid,r2,raca,rad,rai,rail,rain,rally,ramp,rare,rari,rats,rave,ravgo,ray,rbc,rbnt,rcrcl,rddtb,rdnt,re,react,ready,real,recall,rect,red,redo,redstone,reef,ref,rei,reign,rekt,rektcoin,render,rep,reppo,req,resolv,revu,rez,rfc,rfrm,rgoogl,rgt,rhea,rif,ring,rintc,rio,rion,rite,ritual,river,riz,rize,rjv,rklbb,rlb,rlc,rls,rlusd,rmrvl,rmu,rnbw,rndr,rnvda,roa,roam,robo,rog,roll,ron,ronin,roobee,root,rose,rpl,rqqq,rsc,rsndk,rsoxl,rsoxs,rspcx,rspy,rsr,rss3,rtf,rtqqq,rtsla,rtsm,rtx,ruji,rune,rvn,rvv,rwa,rwainc,rwusd,rzto,s,safe,saga,sahara,sai,saito,sand,santos,sapien,saros,sats,sauber,sauce,save,sbd,sbeton,sbuxon,sc,scam,scarcity,scihub,scor,scr,scrt,sct,sd,sdex,seczb,sei,send,senso,sent,sentis,serv,sfi,sfp,sgovon,sgr,share,shazb,shdw,shell,shfl,shft,shib,shiro,shldx,shm,shping,shr,shx,si,sign,simonscat,sin,siren,sis,six,skate,skddb,skhy,skhyb,skhyg,skhyon,skhyx,skl,skop,skr,skuub,sky,skya,skyai,slc,slerf,slf,slp,slrs,slt,slvon,slx,smart,smb,smcib,smhb,smx,sn3,sn4,sn44,sn5,sn56,sn62,sn9,snc,sndkb,sndkc,sndkon,sndkx,snek,snpt,sns,snt,sntr,snx,snxxb,sofion,sogni,soil,sol,solv,somi,sonic,soon,soph,soso,soul,soxlb,soxlx,soxsb,spa,space,spacex,sparklet,spcm,spcx,spcxb,spcxc,spcxon,spcxx,spectre,spell,spellfire,spk,spo,sps,spurs,spx,spy,spyb,spyon,spyx,sqd,sqgrow,sqqqb,sqr,srm,srx,ssg,ssv,st,stable,star,stay,stbl,stc,steem,steth,stg,stik,stix,stmx,sto,stoc,stonk,stonkbroker,storj,stpt,strat,strax,strcon,strcx,stream,strike,strk,strm,strx,stt,stx,stxb,sui,suku,sun,sundog,supe,super,superform,supra,susd,sushi,sushidown,sushiup,sut,svl,swan,swap,swarm,swarms,swash,sway,swch,swell,swftc,swgt,sxp,sxpdown,sxpup,sxt,symm,syn,syrup,sys,t,ta,tac,tag,tai,taiko,take,talent,tao,taobot,tapprotocol,tart,taur,tbc,tbk,tcom,tct,tdrop,tea,ted,tel,tendies,tet,teva,tfuel,tgbp,tgc,the,theta,thq,tia,tibbir,tipon,tit,titn,tko,tlm,tlos,tlton,tmfb,tmon,tmx,tnk,tnsr,tokamak,toke,token,tolly,ton,torn,toshi,tower,town,towns,tpt,tqqqb,tqqqon,tqqqx,tra,trac,trade,tradoor,trb,trcl,treat,tree,tria,tribe,trio,troll,troy,tru,truf,trump,trust,truth,trvl,trwa,trx,trxdown,trxup,tsla,tslab,tslac,tslaon,tslax,tsmb,tsmon,tsmx,tst,tstbsc,tt,tune,turbo,turbos,turt,turtle,tusd,tut,tvk,twt,tx,txc,tycoon,u,u2u,uai,ub,ubt,ucn,udao,uds,ufd,uft,ultima,uma,umia,umxm,unfi,unhon,unhx,uni,unidown,union,unit0,uniup,unn,unp,uos,up,upc,uqc,uranus,us,usarb,usat,usd0,usd1,usdai,usdc,usdcv,usdd,usde,usdeb,usdf,usdg,usdgo,usdh,usdk,usdm,usdon,usdp,usdpt,usdq,usdr,usds,usdsui,usdt,usdv,usdy,useless,usoon,ust,ustc,usual,usx,utk,uvxyb,uxlink,vai,val,vam,vana,vanry,vanta,vara,vatreni,vbusd,vc,vchf,vcnt,vdai,velo,velodrome,velvet,vemp,ven,venom,verona,vert,vest,vet,vfy,vgx,vib,vic,vidt,vine,vinu,virtual,vite,vlink,vltc,vlx,vmt,vnxau,von,vooi,vow,voxel,vpr,vr,vsn,vstb,vsx,vsys,vt,vtc,vtho,vtix,vvs,vvv,vxt,w,w3gg,wai,wal,wallet,wam,ward,waves,waxp,wbai,wbeth,wbtc,wct,wdcb,we,wecan,weeth,wefi,well,well3,wemix,wen,wenb,wet,wfi,white,whuf,whypad,wif,wild,win,wing,wkc,wl,wld,wlfi,wmton,wmtx,wncg,wnxm,wod,wojak,wolf,wom,woo,would,wpay,wrt,wrx,wsb,wspp,wtc,wusd,wxt,wxtm,wzrd,x,xaaoi,xaapl,xabbv,xacn,xadbe,xadi,xaehr,xai,xalab,xamat,xamc,xamgn,xamzn,xan,xapld,xapp,xarm,xasml,xasts,xaum,xaut,xaut0,xava,xavgo,xaxti,xbac,xbb,xbe,xbmnr,xbx,xcbrs,xceg,xcgnx,xch,xcien,xcn,xcoin,xcost,xcp,xcrdo,xcrm,xcrwd,xcrwv,xcsco,xcvna,xcx,xdb,xdc,xddog,xdell,xdkng,xdp,xec,xels,xem,xewj,xewt,xewy,xewz,xfc,xflex,xflnc,xfly,xge,xgev,xgild,xgme,xgn,xgoogl,xgpro,xgs,xgtlb,xhims,xhood,xhpe,xhut,xiaox,xibkr,xibm,xintc,xionq,xiren,xisrg,xiwm,xjnj,xjpm,xklac,xko,xkoru,xl1,xlite,xlly,xlm,xlrcx,xlunr,xmara,xmcd,xmeta,xmn,xmp,xmpwr,xmr,xmrk,xmrna,xmsft,xmstr,xmu,xna,xnbis,xnet,xnflx,xnke,xnl,xno,xnvda,xny,xoklo,xokta,xon,xorcl,xoscr,xoust,xp,xpeng,xpin,xpl,xpla,xpltr,xpoet,xpr,xprt,xpypl,xqcom,xqqq,xr,xrd,xrddt,xrdw,xriot,xrivn,xrklb,xrp,xseed,xshop,xsimo,xsmci,xsmh,xsndk,xsnow,xsony,xsoxl,xsoxs,xspcx,xspy,xsqqq,xstrc,xswap,xt,xtag,xteam,xtem,xter,xtmf,xtqqq,xtsem,xtsla,xtsll,xtsm,xtta,xttmi,xttwo,xtwlo,xtxn,xtz,xtzup,xu3o8,xunh,xurnm,xusar,xusd,xuvxy,xv,xvg,xvicr,xvrt,xvs,xwc,xwdc,xwen,xwmt,xxbi,xxle,xxom,xym,xyo,xzm,y8u,yb,ybdbd,yct,yec,yee,yellow,yfi,yfidown,yfii,yfiup,ygg,yld5on,yld8on,yng,yom,yzy,zama,zano,zbcn,zbt,zcat,zchf,zcl,zec,zen,zent,zerebro,zest,zeta,zeum,zeus,zfi,zig,zil,zix,zk,zkc,zkj,zkl,zkp,zlw,zmb,zoon,zora,zpay,zrc,zro,zrx,zsc,ztc,zulu,zyra";
+const LOCAL_CRYPTO_PNG_LIST = "4,0g,1000cat,1000cheems,1000sats,10set,1inch,1inchdown,1inchup,1mbabydoge,2z,3kds,3ull,4ever,4stock,9bit,a,a2z,a47,a8,aaoib,aapl,aaplb,aaplc,aaplon,aaplx,aark,aave,aavedown,aaveup,ab,abbc,abbvx,abel,abey,abt,abton,abtx,aca,ace,ach,acm,acn,acnon,acnx,acp,acs,act,acu,acx,ada,adadown,adapad,adaup,adbeb,adi,adp,ads,adx,ae,aeon,aergo,aero,aevo,afc,aggon,agi,agix,agld,agpub,agrs,agt,aht,ai,ai16z,aia,aiat,aic,aidoge,aigensyn,ain,aio,aion,aiot,aioz,air,airdrop,aiv,aix9,aixbt,ake,akita,akro,akt,ala,alabb,alch,alcx,ale,aleo,aleph,alex,algo,ali,alice,align,alkimi,allo,alpa,alpaca,alph,alpha,alpine,alt,altszn,alu,amatb,amb,amcb,amd,amdb,amdon,amdx,amo,amp,ampl,amzn,amznb,amznon,amznx,anc,andy,andyeth,anime,ankr,anoa,anon,ansem,ansemcat,ant,antfun,anthropic,any,anyone,ao,aog,aop,ape,apepe,apex,api3,apm,appb,apr,apt,aptm,apu,apx,aqa,ar,arara,arb,arc,arch,ardr,arena,arg,argus,aria,ark,arkm,armb,arpa,arrr,art,artfi,artx,arw,arx,ask,asm,asmlb,asmlon,asp,asr,asset,ast,aster,asteroid,astr,astra,astsb,astson,at,ata,ath,atlas,atm,atom,atos,atr,ats,atwo,auction,audd,audf,audio,audm,auki,aura,aurora,ausd,auto,ava,avaai,avail,avax,avc,avgob,avgoon,avgox,avici,avl,avnt,avt,avv,awe,awin,axis,axl,axs,axtib,azero,aznx,aztec,azur,b,b2,b3,b3x,babab,babaon,babi,baby,babydoge,babyshark,badger,baion,bake,bal,ban,banana,bananas31,band,bank,bar,bard,bas,basecat,based,basiscash,bat,batch,bay,bb,bbb,bbt,bcc,bccoin,bcd,bch,bchabc,bchdown,bchsv,bchup,bcn,bcut,bdca,bdg,bdt,bdx,bdxn,beam,beamx,bear,beat,beb,bee,bel,believe,bells,belong,benji,benqi,bera,bert,beta,beth,bf,bfc,bfg,bfusd,bgb,bgsc,bico,bid,bifi,bigtime,bill,bim,bio,birb,bitboard,bitcoin,bkn,bkrw,bld,blend,bless,blkdigon,blkgrwon,blkhion,blkon,bluai,blue,blum,blur,blz,bmnrb,bmnron,bmnrx,bmt,bmx,bnb,bnbbear,bnbbull,bnbdown,bnbtiger,bnbup,bnc,bnc4,bncb,bncold,bnkr,bnsol,bnt,bnx,bob,boba,bobo,bold,bome,bond,bone,boner,bonk,booe,boop,bora,borg,bos,boson,botb,bounty,box,bp,bpt,br,brainon,brett,brev,bri,bric,brise,brkbb,brkl,brl1,brn,broccoli,broccoli714,brtron,bsai,bsb,bspb,bst,bsv,bsw,btc,btcdown,btcst,btcup,btg,btgoon,btr,btrst,bts,btse,btt,bttc,btw,btx,bubble,bubi,buck,bull,bulla,burger,burn,busd,busy,buttcoin,buy,bxn,byn,bzrx,bzz,c,c98,ca,caga,cake,camp,cap,captainbnb,carat,cards,carv,cashcat,cat,cate,catecoin,catg,cati,cats,caw,cbk,cbrsb,cc,ccd,cel,cell,celo,celr,cent,cere,cess,cet,cetus,cfg,cfx,cgn,cgo,cgpt,chatai,check,cheel,cheems,cheq,chess,chex,chillguy,chip,chirp,cho,chr,chz,city,ckb,clanker,clash,clnd,clo,clore,cloud,clv,cmcsax,cnpy,coai,cocos,codex,cohrb,coin,coinb,coindepo,coinon,coinx,col,collect,cols,combo,common,comp,cookie,coq,core,coreum,corn,cos,coti,cow,cp,cpool,cpr,crcl,crclb,crclon,crclx,crdob,cre,cream,credi,creo,crepe,creta,crf,crmb,cro,cross,crown,crts,cru,crv,crvusd,crwdb,crwdx,crwvb,cscoon,cscox,cspr,cst,ct,ctc,ctk,ctm,ctp,ctr,ctsi,ctx,ctxc,cudis,cult,cummies,cusd,cvc,cvp,cvx,cvxon,cwar,cweb,cwif,cws,cxt,cyber,cyc,cyphb,cys,d,d2t,daddy,dag,dai,dao,dar,dash,data,dbc,dbr,dcr,debit,deep,deepseek,defi,degen,dego,delabs,dellb,dent,deod,dep,deso,desu,deus,dexe,dext,df,dfdvx,dfg,dgai,dgb,dgma,dhn,dhrx,dhv,dia,diam,diem,dimo,din,divi,djed,dji6930,djtb,dka,dl,dmc,dmd,dmtr,dn,dna,dnt,dock,dodo,dog,doge,dogelonmars,doginme,dogs,dolo,dome,dood,dora,dos,dot,dotdown,dotup,dpr,dramb,dramon,drb,drep,dress,drift,drv,dsync,dtec,duck,durev,dusd,dusk,dxi,dydx,dym,dyor,eat,edel,eden,edge,edgex,edu,eemon,efaon,egame,egl1,egld,eigen,el,ela,elf,elg,elizaos,elon,elp,elsa,elx,emc,emt,ena,enj,ens,enso,eos,eosbear,eosbull,eosdown,eosup,epic,eps,ept,epx,eqb,eqty,era,erd,erg,ern,es,ese,esim,esp,esports,etc,eth,ethbear,ethbull,ethdown,ethdydx,ethfi,ethup,ethw,etn,eul,eurc,eurcv,euri,eurq,eurr,eusd,eusx,ev,evaa,ever,ewt,ewyb,ewyx,f,fai,far,farm,fartboy,fartcoin,fb,fct,fdusd,fearnot,feg,fei,fely,fet,ff,fhe,fida,fidd,fight,fil,fildown,filup,fio,fir,fire,firo,fis,fishw,fiwa,flip,flm,flncb,flock,floki,flow,flr,flt,fluid,flux,fly,fogo,fold,folks,fone,for,forest,forex,form,fort,forth,fourcoin,fox,foxsy,foxy,frax,frong,front,frxusd,ft,ftm,ftrb,ftt,fuel,ful,fun,funtoken,fusd,fuse,fwdib,fwog,fxion,fxs,fyn,g,g3,gafi,gaib,gain,gal,gala,galeon,galo,game,games,gas,gat,gata,gato,gbyte,gcb,gcoin,gear,geg,gems,genius,geod,gevb,gf,gfal,gfi,gft,gho,ghst,ghx,giga,giggle,gitcoin,gldon,gldx,gleec,glm,glmr,glwb,gme,gmeb,gmee,gmmt,gmrx,gmt,gmwagmi,gmx,gnc,gno,gnot,gns,go4,goat,goated,goats,gods,gog,gohome,goldao,goldgr,gomining,googl,googlb,googlc,googlon,googlx,googon,gp,gprob,gps,gram,grass,griffain,grin,grnd,grok,grove,grow,grs,grt,grvt,gsb,gstock,gt,gtai,gtbtc,gtc,gteth,gua,gun,gusd,gwei,gxe,gxs,gyen,h,haedal,haha,hai,hamster,hana,hard,harold,hbar,hdg,hdn,hdx,heart,hegic,hei,hello,hemi,hero,hez,hft,hget,hgpt,hibs,hifi,high,himsb,himson,hint,hippo,hive,hln,hmnd,hmstr,hnb,hnt,hod,hold,holdstation,holo,home,honey,honx,hoodb,hoodon,hoodx,hook,hookr,hoppy,hopr,hord,hot,hp,hpeb,hpos10i,hpp,hsk,ht,htm,htr,htx,huma,hunt,hvlo,hype,hyper,iag,iauon,ibiton,ibmb,ibmon,ibs,icnt,icp,icx,id,idex,idia,idol,idos,idrt,iefaon,iemgon,ihc,ijhon,ika,ilv,ily,impt,imt,imu,imx,in,inc,index,init,inj,intcb,intcon,intcx,inter,intwb,inv,inx,io,iost,iota,iotx,iq,ir,irenb,iris,iron,irys,isikc,isk,island,islm,isp,ita,ithaca,itoton,ivvon,iwfon,iwmon,iwnon,ixs,izi,jager,janet,jasmy,jct,jeanphil,jellyjelly,jfi,jitosol,jlp,joc,joe,jpmb,jpmon,jsm,jst,jto,juc,jup,juv,kaia,kaio,kaito,kan,kas,kat,kava,kcs,kct,kda,kdk,keep,kekius,kernel,ket,key,keycat,kgen,kgst,kii,kilo,kishu,kite,kiteai,klay,klk,klv,kmd,kmno,knc,kntq,koge,koma,konet,koon,kor,korub,kox,kp3r,kpol,krl,ksm,kstrb,kt,kta,kton,kub,kyo,kyve,kzen,l3,la,lab,labubu,ladys,lair,laptop,lat,lava,layer,lazio,lbt,lcx,ldo,legion,lend,leo,lever,lf,light,ligo,like,lime,lina,linea,lingo,link,linkdown,linkup,lion,liquidium,lista,lisusd,lit,liteb,litex,ll,llyb,llyon,llyx,lm,lmton,lmts,lmwr,ln,lnq,loa,loan,lobo,locus,lofi,logt,logx,loka,lon,loom,lot,loulou,lpt,lq,lqr,lqty,lrc,lrds,lrn,lsk,ltc,ltcdown,ltcup,lto,luca,lucic,lumia,luna,lunc,lunrx,lusd,lv,lvly,lvva,lwp,lyn,lyp,lyx,m,m87,ma,mag7ssi,mag7xon,magic,magma,majo,major,mak,mamo,man,mana,mana3,manifest,manta,mantra,manyu,maon,mapo,marscoin,mart,mask,mat,match,math,matic,mav,mavia,max,may,mbg,mbl,mbox,mbx,mc,mcat,mcb,mcdon,mcdull,mcdx,mcm,mcn,mcoin,mctp,mdbb,mdf,mdt,mdx,me,med,mega,melania,meld,meme,mengo,mepad,merl,met,meta,metab,metac,metadao,metan,metaon,metax,metfi,metis,meto,mev,mew,mey,mezo,mf,mft,mgkl,mgo,mha,miladycult,milo,mim,min,mina,mir,mira,mith,mito,mkr,ml,mlc,mlk,mln,mmpro,mmt,mmui,mnde,mngo,mnsry,mnt,mntx,mob,mobile,moc,moca,mode,mog,mon,mona,moodeng,mooney,moov,mori,morpho,move,movr,mow,mpc,mplx,mrnab,mrvlb,mrvlon,mrvlx,msftb,msfton,msftx,msol,msp,msq,mstr,mstrb,mstron,mstrx,mtl,mtos,mtv,mtx,mu,mub,mubarak,mug,multi,muon,musd,musebook,muub,mux,mvc,mvl,mvllb,mwxt,mx,my,myro,myst,myx,naft,naka,nano,naoris,nap,natix,navi,navx,naws,nbisb,nbison,nblu,nbot,nbs,nbt,nc,ncn,nct,near,nebl,neet,neiro,neirocto,neko,neo,neon,nero,nes,ness,net,nett,netx,neural,neuro,newt,nex,nexa,nexi,nexo,nfe,nflxb,nflxon,nflxx,nfp,nft,nibi,night,niko,nil,nila,nim,niulai,niza,nkn,nmc,nmr,nock,node,nodl,nokb,nom,noot,nos,not,now,npc,npxs,ns,nsdx,nst,ntrn,nu,nuls,num,numi,nuts,nux,nvda,nvdab,nvdac,nvdaon,nvdax,nvoon,nxa,nxpc,nxt,nyan,nym,o,o4dx,oas,oax,obi,obol,obsr,obt,ocean,octa,ofc,og,ogn,ogpu,ogy,oho,okb,oksol,ol,olas,ole,om,omg,omi,omikami,omni,on,ondo,one,ong,ont,ooki,oort,op,open,openai,opg,opn,orai,orbio,orbr,orbs,orca,orclb,orclon,orclx,order,ordi,ore,orion,orn,oro,ort,osak,osmo,otk,ousd,ovl,ovo,ovr,owb,owl,own,oxt,ozo,p2p,paal,pace,pack,pact,pal,palm,pando,panwon,paparazzi,part,parti,pax,paxg,payai,pbron,pbtc35a,pci,pda,pddb,pddon,pdt,peaq,pearl,peipei,pell,pendle,pengb,pengu,penguin,people,peoplefb,pep,pepe,pepecoin,pepon,pepx,perp,pfeon,pgon,pgx,pha,phb,phnix,pi,pieverse,piggy,pika,pin,pine,pingo,pipe,pipedog,pippin,pirate,pit,pivx,pixel,pla,plai,planet,play,plspad,pltr,pltrb,pltron,pltrx,plume,pm,pmt,pmx,png,pnk,pnt,pnut,pod,pokt,pol,polis,pols,poly,polyx,pond,ponke,pons,pool,pop,popcat,popmtx,por,pork,pornrocket,port,port3,portal,porto,power,powr,ppc,ppoly,ppt,prai,prcl,predict,preopai,prespcx,prime,prl,pro,prom,prompt,propc,props,pros,prosper,prove,psg,psi,ptb,public,puffer,pump,pumpbtc,pundiai,pundix,pups,purr,puss,pybobo,pym,pyplb,pyr,pyth,pyusd,pzm,pzp,q,qait,qanx,qbx,qcomb,qcomon,qfi,qi,qie,qka,qkc,qnt,qntb,qorpo,qqq,qqqb,qqqon,qqqx,qtum,quai,qubic,quick,quid,r2,raca,rad,rai,rail,rain,rally,ramp,rare,rari,rats,rave,ray,rbc,rbnt,rcrcl,rddtb,rdnt,re,react,ready,real,recall,rect,red,redo,redstone,reef,ref,rei,reign,rekt,rektcoin,ren,render,rep,reppo,req,resolv,revu,rez,rfc,rfrm,rgoogl,rgt,rhea,rif,ring,rintc,rio,rion,rite,ritual,river,riz,rize,rjv,rklbb,rlb,rlc,rls,rlusd,rmrvl,rmu,rnbw,rndr,rnvda,roa,roam,robo,rog,roll,ron,ronin,roobee,root,rose,rpl,rqqq,rsc,rsndk,rsoxl,rspcx,rspy,rsr,rss3,rtf,rtqqq,rtsla,rtsm,rtx,rune,rvn,rvv,rwa,rwainc,rwusd,rzto,rzusd,s,safe,saga,sahara,sai,saito,sand,santos,sapien,saros,sats,sauber,sauce,save,sbd,sbeton,sbuxon,sc,scam,scarcity,scihub,scor,scr,scrt,sct,sd,sdex,seczb,sei,send,senso,sent,sentis,serv,sfi,sfp,sgovon,sgr,share,shazb,shdw,shell,shfl,shft,shib,shiro,shldx,shm,shping,shr,shx,si,sign,simonscat,sin,siren,sis,six,skate,skddb,skhy,skhyb,skhyg,skhyon,skhyx,skl,skop,skr,skuub,sky,skya,skyai,slc,slerf,slf,slp,slrs,slt,slvon,slx,smart,smb,smcib,smhb,smx,sn3,sn44,sn5,sn51,sn62,snc,sndkb,sndkc,sndkon,sndkx,snek,snpt,sns,snt,sntr,snx,snxxb,sofion,sogni,soil,sol,solv,somi,sonic,soon,soph,soso,soul,soxlb,soxlx,soxsb,spa,space,spacex,sparklet,spcm,spcx,spcxb,spcxc,spcxon,spcxx,spectre,spell,spellfire,spk,spo,sps,spurs,spx,spy,spyb,spyon,spyx,sqd,sqgrow,sqqqb,sqqqx,sqr,srm,srx,ssg,ssv,st,stable,star,stay,stbl,stc,steem,steth,stg,stik,stix,stmx,sto,stoc,stonk,stonkbroker,storj,storm,strax,strcon,strcx,stream,strike,strk,strm,strx,stt,stx,stxb,sui,suku,sun,sundog,supe,super,superform,supra,sure,susd,sushi,sushidown,sushiup,sut,svl,swan,swap,swarm,swarms,swash,sway,swch,swell,swftc,swgt,sxp,sxpdown,sxpup,sxt,symm,syn,syrup,sys,t,ta,tac,tag,tai,taiko,take,talent,tao,taobot,tapprotocol,tart,taur,tbc,tbk,tcentx,tcom,tct,tdrop,tea,ted,tel,tendies,tet,teva,tfuel,tgbp,tgc,the,theta,thq,tia,tibbir,tipon,tit,titn,tko,tlm,tlos,tlton,tmfb,tmon,tmx,tnk,tnsr,tokamak,toke,token,tolly,tomo,ton,torn,toshi,tower,town,towns,tpt,tqqqb,tqqqon,tqqqx,tra,trac,trade,tradoor,trb,trcl,treat,tree,tria,tribe,trio,troll,troy,tru,truf,trump,trust,truth,trvl,trwa,trx,trxdown,trxup,tsla,tslab,tslac,tslaon,tslax,tsmb,tsmon,tsmx,tst,tstbsc,tt,tune,turbo,turbos,turt,turtle,tusd,tut,tvk,twt,tx,txc,tycoon,u,u2u,uai,ub,ubt,ucn,udao,uds,ufd,uft,ultima,uma,umia,umxm,unfi,unhon,unhx,uni,unidown,union,unit0,uniup,unn,unp,uos,up,upc,uqc,uranus,us,usarb,usat,usd0,usd1,usdai,usdc,usdcv,usdd,usde,usdeb,usdf,usdg,usdgo,usdh,usdk,usdm,usdon,usdp,usdpt,usdq,usdr,usds,usdsb,usdsui,usdt,usdv,usdy,useless,usoon,ust,ustc,usual,usx,utk,uvxyb,uxlink,vai,val,vam,vana,vanry,vara,vatreni,vbusd,vc,vchf,vcnt,vdai,velo,velodrome,velvet,vemp,ven,venom,verem,verona,vert,vest,vet,vfy,vgx,vib,vic,vine,vinu,virtual,vlink,vltc,vlx,vnxau,void,von,vooi,vow,voxel,vpr,vr,vsn,vstb,vsx,vsys,vt,vtc,vtho,vtix,vvs,vvv,vxt,w,w3gg,wai,wal,wallet,wam,wan,ward,waves,waxp,wbai,wbeth,wbtc,wct,wdcb,we,wecan,weeth,wefi,well,well3,wemix,wen,wenb,wet,wfi,white,whuf,whypad,wif,wild,win,wkc,wl,wld,wlfi,wmton,wmtx,wncg,wnxm,wod,wojak,wolf,wom,woo,would,wpay,wrt,wrx,wsb,wspp,wusd,wxt,wxtm,wzrd,x,xaaoi,xaapl,xabbv,xacn,xadbe,xadi,xaehr,xai,xalab,xamat,xamc,xamd,xamgn,xamzn,xan,xapld,xapp,xarm,xasml,xasts,xaum,xaut,xaut0,xava,xavgo,xaxti,xbac,xbb,xbe,xbidu,xbmnr,xbx,xcbrs,xceg,xcgnx,xch,xcien,xcn,xcoin,xcost,xcp,xcrdo,xcrm,xcrwd,xcrwv,xcsco,xcvna,xcx,xdb,xdc,xddog,xdell,xdkng,xdp,xec,xels,xem,xewj,xewt,xewy,xewz,xfc,xflex,xflnc,xfly,xge,xgev,xgild,xglw,xgme,xgn,xgoogl,xgpro,xgs,xgtlb,xhims,xhood,xhpe,xhut,xibkr,xibm,xintc,xionq,xiren,xisrg,xiwm,xjnj,xjpm,xklac,xko,xl1,xlite,xlly,xlm,xlrcx,xlunr,xmara,xmcd,xmeta,xmn,xmp,xmpwr,xmr,xmrk,xmrna,xmsft,xmstr,xmu,xna,xnbis,xnet,xnflx,xnke,xnl,xno,xnow,xnvda,xny,xoklo,xokta,xon,xonds,xorcl,xoscr,xoust,xp,xpeng,xpin,xpl,xpla,xpltr,xpoet,xpr,xprt,xpypl,xqcom,xqqq,xr,xrd,xrddt,xrdw,xriot,xrivn,xrklb,xrok,xrp,xseed,xsgd,xshop,xsimo,xsmci,xsmh,xsndk,xsnow,xsony,xsoxl,xsoxs,xspcx,xspy,xsqqq,xstrc,xswap,xt,xtag,xteam,xtem,xter,xtmf,xtqqq,xtsem,xtsla,xtsll,xtsm,xtta,xttmi,xttwo,xtwlo,xtxn,xtz,xtzup,xu3o8,xunh,xurnm,xusar,xusd,xuso,xv,xvg,xvicr,xvrt,xvs,xwdc,xwen,xwmt,xxbi,xxle,xxom,xym,xyo,xzm,y8u,yala,yb,ybdbd,yct,yec,yee,yellow,yfi,yfidown,yfii,yfiup,ygg,yld5on,yld8on,yng,yom,yusd,yzy,zama,zano,zbcn,zbt,zcat,zchf,zcl,zec,zen,zent,zerebro,zest,zeta,zeum,zeus,zig,zil,zix,zk,zkc,zkj,zkl,zkp,zlw,zmb,zoon,zora,zpay,zrc,zro,zrx,zsc,ztc,zulu,zyra";
 const LOCAL_CRYPTO_EXTRA = {"aart":"/logos/crypto/aart.jpg","fxnw":"/logos/crypto/fxnw.jpg","xcv":"/logos/crypto/xcv.jpg"};
 const LOCAL_FLAG_CODES = new Set(["ae","af","am","au","az","bh","br","ca","ch","cn","dk","eu","gb","ge","hk","in","iq","ir","jp","kg","kr","kw","kz","my","no","nz","om","qa","ru","sa","se","sg","th","tj","tm","tr","us","uz"]);
 /* @LOCAL_ICONS_END */
@@ -5613,14 +5758,34 @@ window.cryptoIcons = cryptoIcons;
 function normalizeClientCryptoIconName(val) {
   return String(val || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 }
+let _clientCryptoSymCounts = null;
+let _clientCryptoSymCountsRef = null;
+let _clientCryptoSymCountsLen = -1;
+let _clientCryptoSymCountsDirty = true;
+function invalidateClientCryptoSymbolCounts() {
+  _clientCryptoSymCountsDirty = true;
+  _clientCryptoSymCounts = null;
+}
 function getClientCryptoSymbolCounts() {
+  if (!Array.isArray(assets)) return {};
+  if (
+    !_clientCryptoSymCountsDirty &&
+    _clientCryptoSymCounts &&
+    _clientCryptoSymCountsRef === assets &&
+    _clientCryptoSymCountsLen === assets.length
+  ) {
+    return _clientCryptoSymCounts;
+  }
   const counts = {};
-  if (!Array.isArray(assets)) return counts;
   for (const a of assets) {
     if (!a || a.cat !== 'crypto') continue;
     const sym = String(a.symbol || a.id || '').toLowerCase().trim();
     if (sym) counts[sym] = (counts[sym] || 0) + 1;
   }
+  _clientCryptoSymCounts = counts;
+  _clientCryptoSymCountsRef = assets;
+  _clientCryptoSymCountsLen = assets.length;
+  _clientCryptoSymCountsDirty = false;
   return counts;
 }
 function getCryptoIcon(assetOrId) {
@@ -5679,6 +5844,7 @@ function cryptoCoinBadge(sym, name, id = '') {
 }
 
 function hydrateLateCryptoIcons() {
+  const vh = (typeof window !== 'undefined' && window.innerHeight) ? window.innerHeight : 800;
   document.querySelectorAll('.asset-icon-badge[data-icon-sym], .asset-icon-badge[data-icon-id]').forEach((el) => {
     const rawId = String(el.dataset.iconId || el.dataset.iconSym || '').toLowerCase().trim();
     const rawSym = String(el.dataset.iconSym || '').toLowerCase().trim();
@@ -5688,9 +5854,14 @@ function hydrateLateCryptoIcons() {
     const fb = el.dataset.fb || el.textContent || '?';
     const c1 = safeColor(el.dataset.c1, '#3b82f6');
     const c2 = safeColor(el.dataset.c2, '#1d4ed8');
+    let loading = 'lazy';
+    if (!el.closest('.asset-picker-list') && typeof el.getBoundingClientRect === 'function') {
+      const r = el.getBoundingClientRect();
+      if (r.width > 0 && r.height > 0 && r.top >= -100 && r.top < vh + 150) loading = 'eager';
+    }
     el.className = 'asset-icon asset-icon-crypto';
     el.removeAttribute('style');
-    el.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(fb)}" class="crypto-logo-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-sym="${escapeHtml(rawSym || rawId)}" data-fb="${escapeHtml(fb)}" data-c1="${c1}" data-c2="${c2}">`;
+    el.innerHTML = `<img src="${escapeHtml(url)}" alt="${escapeHtml(fb)}" width="30" height="30" class="crypto-logo-img" referrerpolicy="no-referrer" loading="${loading}" decoding="async" data-sym="${escapeHtml(rawSym || rawId)}" data-fb="${escapeHtml(fb)}" data-c1="${c1}" data-c2="${c2}">`;
   });
 }
 
@@ -5859,10 +6030,11 @@ function euFlagSvg() {
   return `<svg width="30" height="30" viewBox="0 0 32 32" class="country-flag-img" style="border-radius:50%;display:block;flex:none" aria-label="پرچم اتحادیه اروپا"><circle cx="16" cy="16" r="16" fill="#003399"/><polygon points="16,4.9 16.38,5.97 17.52,6.01 16.62,6.7 16.94,7.79 16,7.15 15.06,7.79 15.38,6.7 14.48,6.01 15.62,5.97" fill="#ffcc00"/><polygon points="20.75,6.17 21.13,7.24 22.27,7.28 21.37,7.97 21.69,9.06 20.75,8.42 19.81,9.06 20.13,7.97 19.23,7.28 20.37,7.24" fill="#ffcc00"/><polygon points="24.23,9.65 24.61,10.72 25.75,10.76 24.85,11.45 25.17,12.54 24.23,11.9 23.29,12.54 23.61,11.45 22.71,10.76 23.85,10.72" fill="#ffcc00"/><polygon points="25.5,14.4 25.88,15.47 27.02,15.51 26.12,16.2 26.44,17.29 25.5,16.65 24.56,17.29 24.88,16.2 23.98,15.51 25.12,15.47" fill="#ffcc00"/><polygon points="24.23,19.15 24.61,20.22 25.75,20.26 24.85,20.95 25.17,22.04 24.23,21.4 23.29,22.04 23.61,20.95 22.71,20.26 23.85,20.22" fill="#ffcc00"/><polygon points="20.75,22.63 21.13,23.7 22.27,23.74 21.37,24.43 21.69,25.52 20.75,24.88 19.81,25.52 20.13,24.43 19.23,23.74 20.37,23.7" fill="#ffcc00"/><polygon points="16,23.9 16.38,24.97 17.52,25.01 16.62,25.7 16.94,26.79 16,26.15 15.06,26.79 15.38,25.7 14.48,25.01 15.62,24.97" fill="#ffcc00"/><polygon points="11.25,22.63 11.63,23.7 12.77,23.74 11.87,24.43 12.19,25.52 11.25,24.88 10.31,25.52 10.63,24.43 9.73,23.74 10.87,23.7" fill="#ffcc00"/><polygon points="7.77,19.15 8.15,20.22 9.29,20.26 8.39,20.95 8.71,22.04 7.77,21.4 6.83,22.04 7.15,20.95 6.25,20.26 7.39,20.22" fill="#ffcc00"/><polygon points="6.5,14.4 6.88,15.47 8.02,15.51 7.12,16.2 7.44,17.29 6.5,16.65 5.56,17.29 5.88,16.2 4.98,15.51 6.12,15.47" fill="#ffcc00"/><polygon points="7.77,9.65 8.15,10.72 9.29,10.76 8.39,11.45 8.71,12.54 7.77,11.9 6.83,12.54 7.15,11.45 6.25,10.76 7.39,10.72" fill="#ffcc00"/><polygon points="11.25,6.17 11.63,7.24 12.77,7.28 11.87,7.97 12.19,9.06 11.25,8.42 10.31,9.06 10.63,7.97 9.73,7.28 10.87,7.24" fill="#ffcc00"/></svg>`;
 }
 
-function assetIcon(a) {
+function assetIcon(a, opts = {}) {
   if (!a) return `<span class="asset-icon">?</span>`;
   const id = String(a.id || '').toLowerCase().trim();
   const sym = String(a.symbol || '').toLowerCase().trim();
+  const loading = opts && opts.loading === 'eager' ? 'eager' : 'lazy';
 
   // 1. European Union flag for Euro
   if (id === 'eur' || sym === 'eur' || id === 'euro') {
@@ -5900,7 +6072,7 @@ function assetIcon(a) {
   if (flagUrl || a.cat === 'currency' || a.cat === 'domestic') {
     if (flagUrl) {
       const fb = escapeHtml(a.icon || a.symbol || a.id);
-      return `<span class="asset-icon asset-icon-flag"><img src="${escapeHtml(flagUrl)}" alt="${escapeHtml(a.name)}" class="country-flag-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-fb="${fb}"></span>`;
+      return `<span class="asset-icon asset-icon-flag"><img src="${escapeHtml(flagUrl)}" alt="${escapeHtml(a.name)}" width="30" height="30" class="country-flag-img" referrerpolicy="no-referrer" loading="${loading}" decoding="async" data-fb="${fb}"></span>`;
     }
   }
 
@@ -5910,38 +6082,77 @@ function assetIcon(a) {
     const badgeText = (a.symbol || sym || a.name || '?').slice(0, 3).toUpperCase();
     const [c1, c2] = getBadgeColors(badgeText);
     if (iconUrl) {
-      return `<span class="asset-icon asset-icon-crypto"><img src="${escapeHtml(iconUrl)}" alt="${escapeHtml(a.symbol || a.name)}" class="crypto-logo-img" referrerpolicy="no-referrer" loading="eager" decoding="async" data-sym="${escapeHtml(sym || id)}" data-fb="${escapeHtml(badgeText)}" data-c1="${safeColor(c1,'#3b82f6')}" data-c2="${safeColor(c2,'#1d4ed8')}"></span>`;
+      return `<span class="asset-icon asset-icon-crypto"><img src="${escapeHtml(iconUrl)}" alt="${escapeHtml(a.symbol || a.name)}" width="30" height="30" class="crypto-logo-img" referrerpolicy="no-referrer" loading="${loading}" decoding="async" data-sym="${escapeHtml(sym || id)}" data-fb="${escapeHtml(badgeText)}" data-c1="${safeColor(c1,'#3b82f6')}" data-c2="${safeColor(c2,'#1d4ed8')}"></span>`;
     }
   }
 
   // 4. Default badge for any other item
   return cryptoCoinBadge(a.symbol || sym || a.id, a.name, id);
 }
-function ticker(a){
+function ticker(a, iconOpts){
   const t = assetTitles(a);
-  return `<article class="ticker" style="--ticker:${safeColor(a.color)}" data-detail="${escapeHtml(a.id)}"><div class="ticker-top">${assetIcon(a)}<div style="text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="ticker-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="ticker-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="ticker-price">${quote(a)}</div><div class="ticker-foot"><span class="change ${a.change>=0?'up':'down'}">${a.change>=0?'↗':'↘'} ${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div></article>`;
+  return `<article class="ticker" style="--ticker:${safeColor(a.color)}" data-detail="${escapeHtml(a.id)}"><div class="ticker-top">${assetIcon(a, iconOpts && typeof iconOpts === 'object' ? iconOpts : { loading: 'eager' })}<div style="text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="ticker-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="ticker-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="ticker-price">${quote(a)}</div><div class="ticker-foot"><span class="change ${a.change>=0?'up':'down'}">${a.change>=0?'↗':'↘'} ${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div></article>`;
 }
-function marketCard(a){
+function marketCard(a, iconOpts){
   const t = assetTitles(a);
   const srcHtml = isAdminUser() ? `<div class="source">${escapeHtml(srcLabel(a))}</div>` : '';
-  return `<article class="market-card" data-detail="${escapeHtml(a.id)}" style="--ticker:${safeColor(a.color)}"><div class="card-top">${assetIcon(a)}<div style="min-width:0;flex:1;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="asset-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="asset-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10.5px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="price">${quote(a)}</div><div class="card-bottom"><span class="change ${a.change>=0?'up':'down'}">${a.change>=0?'↗':'↘'} ${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div>${srcHtml}</article>`;
+  return `<article class="market-card" data-detail="${escapeHtml(a.id)}" style="--ticker:${safeColor(a.color)}"><div class="card-top">${assetIcon(a, iconOpts && typeof iconOpts === 'object' ? iconOpts : { loading: 'lazy' })}<div style="min-width:0;flex:1;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="asset-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="asset-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10.5px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="price">${quote(a)}</div><div class="card-bottom"><span class="change ${a.change>=0?'up':'down'}">${a.change>=0?'↗':'↘'} ${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div>${srcHtml}</article>`;
 }
 const srcLabel=a=>quality(a);
 
-function featCard(a){
+function featCard(a, iconOpts){
   const up=a.change>=0;
   const t = assetTitles(a);
   const srcHtml = isAdminUser() ? `<div class="source">${escapeHtml(srcLabel(a))}</div>` : '';
-  return `<article class="market-card" data-detail="${escapeHtml(a.id)}" style="--ticker:${safeColor(a.color)}"><div class="card-top">${assetIcon(a)}<div style="min-width:0;flex:1;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="asset-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="asset-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10.5px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="price">${quote(a)}</div><div class="card-bottom"><span class="change ${up?'up':'down'}">${up?'+':'−'}${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div>${srcHtml}</article>`;
+  return `<article class="market-card" data-detail="${escapeHtml(a.id)}" style="--ticker:${safeColor(a.color)}"><div class="card-top">${assetIcon(a, iconOpts && typeof iconOpts === 'object' ? iconOpts : { loading: 'eager' })}<div style="min-width:0;flex:1;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}"><div class="asset-name" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</div><div class="asset-symbol" style="text-align:right;${t.isCrypto ? 'direction:ltr;font-size:10.5px;color:var(--muted)' : 'direction:rtl'}">${escapeHtml(t.sub)}</div></div></div><div class="price">${quote(a)}</div><div class="card-bottom"><span class="change ${up?'up':'down'}">${up?'+':'−'}${pct.format(Math.abs(a.change))}٪</span><span class="spark">${spark(a)}</span></div>${srcHtml}</article>`;
 }
-function renderFeatured(){if(fd)return;$('#featuredGrid').innerHTML=state.featured.map(id=>assets.find(a=>a.id===id)).filter(Boolean).slice(0,24).map(a=>featCard(a)).join('')}
+function renderFeatured(){if(fd)return;$('#featuredGrid').innerHTML=state.featured.map(id=>assets.find(a=>a.id===id)).filter(Boolean).slice(0,24).map((a,i)=>featCard(a,{loading:i<12?'eager':'lazy'})).join('')}
+const PICKER_BATCH_SIZE=60;
+function pickerSearchKey(a){
+  return normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+(a.cat==='crypto'?getCryptoFullName(a):'')+' '+a.id);
+}
+function renderFeaturedPickerRow(a,isChecked){
+  const t=assetTitles(a);
+  return `<button type="button" class="asset-option" role="checkbox" aria-checked="${isChecked}" data-feat="${escapeHtml(a.id)}">${assetIcon(a,{loading:'lazy'})}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="check-box"></span></button>`;
+}
 function featuredPicker(){
   const MAX=24;
   let sel=state.featured.slice();
-  openModal('ارزهای منتخب',`<p class="muted" style="font-size:11.5px;margin:0 0 10px">هر ارزی را خواستی تیک بزن (تا ${fmt.format(MAX)} ارز). انتخاب‌شده: <b id="featCount"></b></p><div class="asset-picker"><input id="featSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی" style="margin-bottom:8px;height:40px"><div class="asset-picker-list" id="featList">${sortAssetsStandard(assets).map(a=>{const t=assetTitles(a);return `<button type="button" class="asset-option" role="checkbox" aria-checked="${sel.includes(a.id)}" data-feat="${escapeHtml(a.id)}" data-search="${escapeHtml(normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+getCryptoFullName(a)+' '+a.id))}">${assetIcon(a)}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="check-box"></span></button>`}).join('')}</div></div><div class="form-actions" style="margin-top:14px"><button class="btn btn-dark" type="button" id="featSave">ذخیره</button><button class="btn btn-soft" type="button" id="featCancel">انصراف</button></div>`);
+  const sorted=sortAssetsStandard(assets);
+  const searchEntries=sorted.map(a=>({a,s:pickerSearchKey(a)}));
+  let filtered=sorted;
+  let renderedCount=0;
+  openModal('ارزهای منتخب',`<p class="muted" style="font-size:11.5px;margin:0 0 10px">هر ارزی را خواستی تیک بزن (تا ${fmt.format(MAX)} ارز). انتخاب‌شده: <b id="featCount"></b></p><div class="asset-picker"><input id="featSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی" style="margin-bottom:8px;height:40px"><div class="asset-picker-list" id="featList"></div></div><div class="form-actions" style="margin-top:14px"><button class="btn btn-dark" type="button" id="featSave">ذخیره</button><button class="btn btn-soft" type="button" id="featCancel">انصراف</button></div>`);
+  const listEl=$('#featList');
+  const appendBatch=()=>{
+    if(!listEl||renderedCount>=filtered.length)return;
+    const next=filtered.slice(renderedCount,renderedCount+PICKER_BATCH_SIZE);
+    renderedCount+=next.length;
+    if(!next.length)return;
+    const html=next.map(a=>renderFeaturedPickerRow(a,sel.includes(a.id))).join('');
+    listEl.insertAdjacentHTML('beforeend',html);
+  };
+  const resetList=(qRaw)=>{
+    if(!listEl)return;
+    const q=normFa(String(qRaw||'').trim());
+    const words=q.split(/\s+/).filter(Boolean);
+    filtered=words.length?searchEntries.filter(e=>words.every(w=>e.s.includes(w))).map(e=>e.a):sorted;
+    renderedCount=0;
+    listEl.innerHTML='';
+    listEl.scrollTop=0;
+    if(!filtered.length){
+      listEl.innerHTML='<div class="muted" style="font-size:11.5px;padding:12px;text-align:center">موردی یافت نشد</div>';
+      return;
+    }
+    appendBatch();
+  };
+  resetList('');
   const count=()=>{$('#featCount').textContent=fmt.format(sel.length)+' از '+fmt.format(MAX)};
   count();
-  $('#featList').onclick=e=>{
+  listEl.addEventListener('scroll',()=>{
+    if(renderedCount<filtered.length&&listEl.scrollTop+listEl.clientHeight>=listEl.scrollHeight-180)appendBatch();
+  },{passive:true});
+  listEl.onclick=e=>{
     const b=e.target.closest('[data-feat]');
     if(!b)return;
     const id=b.dataset.feat;
@@ -5953,16 +6164,7 @@ function featuredPicker(){
     b.setAttribute('aria-checked',String(sel.includes(id)));
     count();
   };
-  $('#featSearch').oninput=e=>{
-    const q=normFa(e.target.value.trim());
-    $$('#featList [data-feat]').forEach(r=>{
-      const s=r.dataset.search||normFa(r.textContent+' '+(r.dataset.feat||''));
-      const match=!q||s.includes(q);
-      r.hidden=!match;
-      r.classList.toggle('is-hidden',!match);
-      r.style.setProperty('display',match?'flex':'none','important');
-    });
-  };
+  $('#featSearch').oninput=e=>resetList(e.target.value);
   $('#featCancel').onclick=closeModal;
   $('#featSave').onclick=()=>{
     if(!sel.length){toast('حداقل یک ارز انتخاب کن');return}
@@ -7025,7 +7227,10 @@ function applyPrices(items){let n=0,added=0,sig=0;const now=Math.floor(Date.now(
       }
     }
   }
-  if (added) assets = sortAssetsStandard(assets);
+  if (added) {
+    assets = sortAssetsStandard(assets);
+    invalidateClientCryptoSymbolCounts();
+  }
   return {n,added,sig};
 }
 function savePriceCache(items){
@@ -7159,7 +7364,7 @@ function validateClientHistory(rawPoints, range, a) {
   const span = CLIENT_RANGES[range];
   if (!span || !Array.isArray(rawPoints) || rawPoints.length < 2) return [];
   const now = Math.floor(Date.now() / 1000);
-  const isDomestic = Boolean(a && a.cat !== 'crypto' && a.id !== 'usdt');
+  const isDomestic = isDomesticMarketAsset(a);
 
   const cleaned = [];
   for (const p of rawPoints) {
@@ -7248,7 +7453,7 @@ function formatChartResolutionLabel(res, range, isDomestic) {
 function renderDetailSourceMeta(a, range, pts, meta = null) {
   const box = $('#detailSourceMeta');
   if (!box) return;
-  const isDomestic = Boolean(a && a.cat !== 'crypto' && a.id !== 'usdt');
+  const isDomestic = isDomesticMarketAsset(a, meta);
   const srcRaw = meta?.priceSource || a?.source || meta?.source || '';
   const srcText = srcRaw ? formatApiSourceName(srcRaw) : 'نامشخص';
   const lastPtTs = Array.isArray(pts) && pts.length ? Number(pts[pts.length - 1]?.[0] || 0) : 0;
@@ -7322,7 +7527,7 @@ function formatAxisTime(ts, range, isDomestic) {
 }
 function drawDetail(){
   if(!detailState||!$('#detailChart'))return;
-  const a=asset(detailState.id),range=detailState.range,isDomestic=(a.cat!=='crypto'&&a.id!=='usdt');
+  const a=asset(detailState.id),range=detailState.range,isDomestic=isDomesticMarketAsset(a,detailState.meta||null);
   const pts=withCurrent(detailState.points,a,range);
   const box=$('#detailChart');
   const hdrChange=$('#detailHeaderChange');
@@ -7343,7 +7548,7 @@ function drawDetail(){
   const rangePct=firstPrice>0?((lastPrice-firstPrice)/firstPrice)*100:0;
   const chartColor=rangePct>=0?'#16865b':'#d84b55';
   const isDailyTooltip = range === '1M' || range === '1Y' || (isDomestic && range !== '1D' && range !== '1H');
-  paintChart(box,pts,chartColor,n=>quote(a,n),{isDaily:isDailyTooltip,range,isDomestic});
+  paintChart(box,pts,chartColor,(n,dec)=>quote(a,n,dec),{isDaily:isDailyTooltip,range,isDomestic});
   if(hdrChange){
     hdrChange.textContent=(rangePct>=0?'↗ +':'↘ ')+pct.format(Math.abs(rangePct))+'٪ ('+(RANGE_LABEL[range]||range)+')';
     hdrChange.className='change '+(rangePct>=0?'up':'down');
@@ -7379,7 +7584,9 @@ async function getHistory(id,range='1D'){
         priceSource:j.priceSource||j.source||null,
         lastDataAt:Number(j.lastDataAt)>0?Number(j.lastDataAt):null,
         resolution:j.resolution||null,
-        dataStatus:j.dataStatus||null
+        dataStatus:j.dataStatus||null,
+        isDomestic:typeof j.isDomestic==='boolean'?j.isDomestic:undefined,
+        currency:j.currency||null
       };
       histories.set(key,{at:Date.now(),points,meta});
       const curA=asset(id);
@@ -7443,7 +7650,7 @@ function drainSparks(){
     scheduleDrainSparks(sparkBackoffUntil-now+100);
     return;
   }
-  while(sparkActive<2&&sparkQueue.length){
+  while(sparkActive<3&&sparkQueue.length){
     if(detailChartInFlight>0||Date.now()<sparkBackoffUntil)return;
     const id=sparkQueue.shift();
     sparkActive++;
@@ -7473,7 +7680,7 @@ function drainSparks(){
       sparkActive--;
       sparkSeen.delete(id);
       if(sparkQueue.length){
-        scheduleDrainSparks(Date.now()<sparkBackoffUntil?(sparkBackoffUntil-Date.now()+100):75);
+        scheduleDrainSparks(Date.now()<sparkBackoffUntil?(sparkBackoffUntil-Date.now()+100):35);
       }
     });
   }
@@ -7481,7 +7688,7 @@ function drainSparks(){
 const sparkObserver=new IntersectionObserver(entries=>{
   for(const e of entries)if(e.isIntersecting){sparkObserver.unobserve(e.target);enqueueSpark(e.target.dataset.spark);}
   drainSparks();
-},{rootMargin:'220px 0px'});
+},{rootMargin:'900px 0px'});
 const preloadedIconUrls = new Set();
 const iconPreloadQueue = [];
 let iconPreloadActive = 0;
@@ -7525,17 +7732,25 @@ function prefetchUpcomingAssets() {
     const id = el.dataset.spark;
     if (!id || sparkSvgCache.has(id) || sparkSeen.has(id)) return;
     const r = el.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0 && r.top < vh + 240 && r.bottom > -200) {
+    if (r.width > 0 && r.height > 0 && r.top < vh + 950 && r.bottom > -300) {
       sparkObserver.unobserve(el);
       enqueueSpark(id);
     }
   });
   activeScope.querySelectorAll('[data-detail]').forEach(card => {
     const r = card.getBoundingClientRect();
-    if (r.width > 0 && r.height > 0 && r.top < vh + 600 && r.bottom > -200) {
-      const a = asset(card.dataset.detail);
-      const u = assetIconUrl(a);
-      if (u) enqueuePreloadIcon(u);
+    if (r.width > 0 && r.height > 0 && r.top < vh + 950 && r.bottom > -300) {
+      const existingImg = card.querySelector('img');
+      if (existingImg && existingImg.complete && existingImg.naturalWidth > 0) {
+        const curSrc = existingImg.getAttribute('src');
+        if (curSrc) preloadedIconUrls.add(curSrc);
+        return;
+      }
+      if (r.top >= vh - 50) {
+        const a = asset(card.dataset.detail);
+        const u = assetIconUrl(a);
+        if (u) enqueuePreloadIcon(u);
+      }
     }
   });
   if (Array.isArray(lastFilteredMarket) && lastFilteredMarket.length > marketLimit) {
@@ -7544,6 +7759,7 @@ function prefetchUpcomingAssets() {
       if (!a?.id) continue;
       const u = assetIconUrl(a);
       if (u) enqueuePreloadIcon(u);
+      if (sparkQueue.length < 18) enqueueSpark(a.id);
     }
   }
   drainSparks();
@@ -7676,23 +7892,48 @@ let marketViewMode = 'grid'; // 'grid' | 'list'
 let convFromId = 'usdt';
 let convToId = 'toman';
 
-function convAssetData(id) {
+function convDisplayName(id, aObj = null) {
+  if (id === 'toman') return 'تومان';
+  if (id === 'rial') return 'ریال';
+  const meta = (typeof PORTFOLIO_UNIT_NAMES !== 'undefined' && PORTFOLIO_UNIT_NAMES[id]) || null;
+  if (meta?.label) return meta.label;
+  const a = aObj || assets.find(x => x.id === id);
+  if (a) {
+    if (a.cat === 'crypto') {
+      const sym = String(a.symbol || a.id || '').toUpperCase().trim();
+      if (typeof FA_COIN !== 'undefined' && FA_COIN[sym]) return FA_COIN[sym];
+      const full = getCryptoFullName(a);
+      const cleaned = cleanDisplayName(sym, full).replace(/\s*\([^)]*\)\s*/g, '').trim();
+      if (cleaned) return cleaned;
+    }
+    const cleanedName = String(a.name || a.symbol || id).replace(/\s*\([^)]*\)\s*/g, '').trim();
+    if (cleanedName) return cleanedName;
+  }
+  return String(id).toUpperCase();
+}
+
+function convAssetData(id, iconOpts = {}) {
+  const loading = iconOpts && iconOpts.loading === 'eager' ? 'eager' : 'lazy';
   if (id === 'toman') {
+    const flagUrl = safeImgUrl(getCountryFlag('toman')) || '/logos/flags/ir.svg';
     return {
       id: 'toman',
       name: 'تومان ایران',
+      displayName: 'تومان',
       symbol: 'تومان',
       cat: 'domestic',
-      iconHtml: `<span class="asset-icon asset-icon-flag"><img src="/logos/flags/ir.svg" alt="تومان ایران" class="country-flag-img" data-fb="تومان"></span>`
+      iconHtml: `<span class="asset-icon asset-icon-flag"><img src="${escapeHtml(flagUrl)}" alt="تومان ایران" width="30" height="30" class="country-flag-img" referrerpolicy="no-referrer" loading="${loading}" decoding="async" data-fb="تومان"></span>`
     };
   }
   if (id === 'rial') {
+    const flagUrl = safeImgUrl(getCountryFlag('rial')) || '/logos/flags/ir.svg';
     return {
       id: 'rial',
       name: 'ریال ایران',
+      displayName: 'ریال',
       symbol: 'ریال',
       cat: 'domestic',
-      iconHtml: `<span class="asset-icon asset-icon-flag"><img src="/logos/flags/ir.svg" alt="ریال ایران" class="country-flag-img" data-fb="ریال"></span>`
+      iconHtml: `<span class="asset-icon asset-icon-flag"><img src="${escapeHtml(flagUrl)}" alt="ریال ایران" width="30" height="30" class="country-flag-img" referrerpolicy="no-referrer" loading="${loading}" decoding="async" data-fb="ریال"></span>`
     };
   }
   const found = assets.find(x => x.id === id);
@@ -7708,25 +7949,26 @@ function convAssetData(id) {
   return {
     id: a.id,
     name: meta ? (meta.sub || meta.label || a.name) : a.name,
+    displayName: convDisplayName(a.id, a),
     symbol: a.symbol,
     cat: a.cat,
-    iconHtml: assetIcon(a)
+    iconHtml: assetIcon(a, { loading })
   };
 }
 
 function updateConverterButtonsUI() {
-  const fromData = convAssetData(convFromId);
-  const toData = convAssetData(convToId);
+  const fromData = convAssetData(convFromId, { loading: 'eager' });
+  const toData = convAssetData(convToId, { loading: 'eager' });
 
   const fromIcon = $('#convFromIcon');
   const fromSym = $('#convFromSymbol');
   if (fromIcon) fromIcon.innerHTML = fromData.iconHtml;
-  if (fromSym) fromSym.textContent = fromData.symbol;
+  if (fromSym) fromSym.textContent = fromData.displayName || fromData.name || fromData.symbol;
 
   const toIcon = $('#convToIcon');
   const toSym = $('#convToSymbol');
   if (toIcon) toIcon.innerHTML = toData.iconHtml;
-  if (toSym) toSym.textContent = toData.symbol;
+  if (toSym) toSym.textContent = toData.displayName || toData.name || toData.symbol;
 
   calculateConversion();
 }
@@ -7738,6 +7980,14 @@ function openConverterAssetModal(side) {
     { id: 'rial', name: 'ریال ایران', symbol: 'IRR / ریال', cat: 'domestic' },
     ...sortAssetsStandard(assets)
   ];
+  const searchEntries = listItems.map(it => ({
+    it,
+    s: normFa(
+      it.name + ' ' + it.symbol + ' ' + (it.en || '') + ' ' +
+      (it.cat === 'crypto' ? (getCryptoFullName(it) + ' ' + (typeof FA_COIN !== 'undefined' ? (FA_COIN[String(it.symbol).toUpperCase()] || '') : '')) : '') +
+      ' ' + it.id
+    )
+  }));
 
   openModal(side === 'from' ? 'انتخاب ارز مبدأ' : 'انتخاب ارز مقصد', `
     <div class="asset-picker" style="border:0;padding:0;background:transparent">
@@ -7751,46 +8001,68 @@ function openConverterAssetModal(side) {
         <button class="filter" data-cp-cat="domestic">ریالی و تومان</button>
       </div>
 
-      <div class="asset-picker-list" id="convPickerList" role="radiogroup" style="max-height:340px;gap:5px">
-        ${listItems.map(it => {
-          const isSelected = it.id === currentSelected;
-          const aData = convAssetData(it.id);
-          const pr = (it.id === 'toman' || it.id === 'rial') ? '' : quote(it);
-          const t = assetTitles(it);
-          return `
-            <button type="button" class="asset-option" role="radio" aria-checked="${isSelected}" data-pick-conv="${escapeHtml(it.id)}" data-search="${escapeHtml(normFa(it.name + ' ' + it.symbol + ' ' + (it.en || '') + ' ' + (it.cat === 'crypto' ? (getCryptoFullName(it) + ' ' + (typeof FA_COIN !== 'undefined' ? (FA_COIN[String(it.symbol).toUpperCase()] || '') : '')) : '') + ' ' + it.id))}">
-              ${aData.iconHtml}
-              <span class="option-copy" style="text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">
-                <strong style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</strong>
-                <small style="text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">${escapeHtml(t.sub)}</small>
-              </span>
-              ${pr ? `<span style="font-weight:800;font-size:11px;color:var(--muted);direction:ltr;margin-inline-end:8px">${pr}</span>` : ''}
-              <span class="radio-dot"></span>
-            </button>
-          `;
-        }).join('')}
-      </div>
+      <div class="asset-picker-list" id="convPickerList" role="radiogroup" style="max-height:340px;gap:5px"></div>
     </div>
   `);
 
+  const listEl = $('#convPickerList');
   let currentCat = 'all';
+  let filtered = listItems;
+  let renderedCount = 0;
+
+  const renderConvRow = (it) => {
+    const isSelected = it.id === currentSelected;
+    const aData = convAssetData(it.id, { loading: 'lazy' });
+    const pr = (it.id === 'toman' || it.id === 'rial') ? '' : quote(it);
+    const t = assetTitles(it);
+    return `
+      <button type="button" class="asset-option" role="radio" aria-checked="${isSelected}" data-pick-conv="${escapeHtml(it.id)}">
+        ${aData.iconHtml}
+        <span class="option-copy" style="text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">
+          <strong style="text-align:right;${t.isCrypto ? 'direction:ltr;font-weight:900' : 'direction:rtl'}">${escapeHtml(t.title)}</strong>
+          <small style="text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">${escapeHtml(t.sub)}</small>
+        </span>
+        ${pr ? `<span style="font-weight:800;font-size:11px;color:var(--muted);direction:ltr;margin-inline-end:8px">${pr}</span>` : ''}
+        <span class="radio-dot"></span>
+      </button>
+    `;
+  };
+
+  const appendBatch = () => {
+    if (!listEl || renderedCount >= filtered.length) return;
+    const slice = filtered.slice(renderedCount, renderedCount + PICKER_BATCH_SIZE);
+    renderedCount += slice.length;
+    if (slice.length) listEl.insertAdjacentHTML('beforeend', slice.map(renderConvRow).join(''));
+  };
+
   const filterList = () => {
+    if (!listEl) return;
     const rawVal = ($('#convPickerSearch')?.value || '').trim();
     const q = normFa(rawVal);
     const words = q.split(/\s+/).filter(Boolean);
-    $$('#convPickerList [data-pick-conv]').forEach(btn => {
-      const id = btn.dataset.pickConv;
-      const it = listItems.find(x => x.id === id);
-      if (!it) return;
-      const matchCat = words.length ? true : (currentCat === 'all' || it.cat === currentCat);
-      const s = btn.dataset.search || normFa(it.name + ' ' + it.symbol + ' ' + (it.en || '') + ' ' + it.id);
-      const matchQ = !words.length || words.every(w => s.includes(w));
-      const match = matchCat && matchQ;
-      btn.hidden = !match;
-      btn.classList.toggle('is-hidden', !match);
-      btn.style.setProperty('display', match ? 'flex' : 'none', 'important');
-    });
+    filtered = (words.length || currentCat !== 'all')
+      ? searchEntries.filter(e => {
+          const matchCat = words.length ? true : (currentCat === 'all' || e.it.cat === currentCat);
+          const matchQ = !words.length || words.every(w => e.s.includes(w));
+          return matchCat && matchQ;
+        }).map(e => e.it)
+      : listItems;
+    renderedCount = 0;
+    listEl.innerHTML = '';
+    listEl.scrollTop = 0;
+    if (!filtered.length) {
+      listEl.innerHTML = '<div class="muted" style="font-size:11.5px;padding:12px;text-align:center">موردی یافت نشد</div>';
+      return;
+    }
+    appendBatch();
   };
+
+  filterList();
+  listEl?.addEventListener('scroll', () => {
+    if (renderedCount < filtered.length && listEl.scrollTop + listEl.clientHeight >= listEl.scrollHeight - 180) {
+      appendBatch();
+    }
+  }, { passive: true });
 
   $('#convPickerSearch')?.addEventListener('input', filterList);
   setTimeout(() => $('#convPickerSearch')?.focus(), 80);
@@ -7803,17 +8075,17 @@ function openConverterAssetModal(side) {
     filterList();
   });
 
-  $$('#convPickerList [data-pick-conv]').forEach(btn => {
-    btn.onclick = () => {
-      const selectedId = btn.dataset.pickConv;
-      if (side === 'from') {
-        convFromId = selectedId;
-      } else {
-        convToId = selectedId;
-      }
-      closeModal();
-      updateConverterButtonsUI();
-    };
+  listEl?.addEventListener('click', e => {
+    const btn = e.target.closest('[data-pick-conv]');
+    if (!btn) return;
+    const selectedId = btn.dataset.pickConv;
+    if (side === 'from') {
+      convFromId = selectedId;
+    } else {
+      convToId = selectedId;
+    }
+    closeModal();
+    updateConverterButtonsUI();
   });
 }
 
@@ -7855,24 +8127,26 @@ function calculateConversion() {
   const formulaEl = $('#convFormula');
   const valEl = $('#convValue');
   const isDomesticTarget = toId === 'toman' || toId === 'rial';
+  const toData = convAssetData(toId);
+  const toFormulaUnit = isDomesticTarget ? targetUnit : (toData.displayName || targetUnit);
   if (valEl) {
-    valEl.textContent = formatEnPrice(targetVal, isDomesticTarget ? 0 : undefined) + ' ' + targetUnit;
+    valEl.textContent = formatEnPrice(targetVal, isDomesticTarget ? 0 : undefined);
   }
   if (formulaEl) {
     formulaEl.textContent = unitRateVal > 0
-      ? `1 ${fromA.symbol} = ${formatEnPrice(unitRateVal, isDomesticTarget ? 0 : undefined)} ${targetUnit}`
-      : `1 ${fromA.symbol} = —`;
+      ? `1 ${fromA.displayName || fromA.symbol} = ${formatEnPrice(unitRateVal, isDomesticTarget ? 0 : undefined)} ${toFormulaUnit}`
+      : `1 ${fromA.displayName || fromA.symbol} = —`;
   }
 }
 
-function marketListRow(a) {
+function marketListRow(a, iconOpts) {
   const up = (a.change || 0) >= 0;
   const t = assetTitles(a);
   const srcHtml = isAdminUser() ? `<div class="source" style="font-size:8.5px;color:var(--muted);margin-top:2px;border-top:0;padding-top:0">${escapeHtml(srcLabel(a))}</div>` : '';
   return `
     <article class="market-list-row" data-detail="${escapeHtml(a.id)}">
       <div style="display:flex;align-items:center;gap:10px;min-width:0">
-        ${assetIcon(a)}
+        ${assetIcon(a, iconOpts && typeof iconOpts === 'object' ? iconOpts : { loading: 'lazy' })}
         <div style="min-width:0;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">
           <div style="font-weight:900;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">${escapeHtml(t.title)}</div>
           <div class="asset-symbol" style="font-size:10px;color:var(--muted);text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">${escapeHtml(t.sub)} · ${escapeHtml(catName(a.cat))}</div>
@@ -7925,8 +8199,8 @@ function loadMoreMarket() {
   const nextSlice = lastFilteredMarket.slice(prevLimit, marketLimit);
   if (nextSlice.length) {
     const html = marketViewMode === 'list'
-      ? nextSlice.map(marketListRow).join('')
-      : nextSlice.map(marketCard).join('');
+      ? nextSlice.map(a => marketListRow(a, { loading: 'lazy' })).join('')
+      : nextSlice.map(a => marketCard(a, { loading: 'lazy' })).join('');
     sentinel.insertAdjacentHTML('beforebegin', html);
   }
   if (marketLimit >= lastFilteredMarket.length) {
@@ -8006,12 +8280,12 @@ function renderMarket(){
     if (marketViewMode === 'list') {
       grid.className = 'market-list-mode';
       grid.innerHTML = list.length
-        ? list.map(marketListRow).join('') + sentinelHtml
+        ? list.map((a, i) => marketListRow(a, { loading: i < 12 ? 'eager' : 'lazy' })).join('') + sentinelHtml
         : `<div class="empty"><b>چیزی پیدا نشد</b>عبارت دیگه‌ای جست‌وجو کن یا فیلتر را تغییر بده.</div>`;
     } else {
       grid.className = 'market-grid';
       grid.innerHTML = list.length
-        ? list.map(marketCard).join('') + sentinelHtml
+        ? list.map((a, i) => marketCard(a, { loading: i < 12 ? 'eager' : 'lazy' })).join('') + sentinelHtml
         : `<div class="empty" style="grid-column:1/-1"><b>چیزی پیدا نشد</b>عبارت دیگه‌ای جست‌وجو کن یا فیلتر را تغییر بده.</div>`;
     }
     const sentinel = $('#marketLoadSentinel');
@@ -8040,7 +8314,7 @@ function renderMarketMovers(){
     const el = $(sel);
     if (!el) return;
     if (sig !== lastMoversSig || !el.children.length) {
-      el.innerHTML = arr.length ? arr.map(ticker).join('') : `<div class="empty" style="flex:1">${escapeHtml(msg)}</div>`;
+      el.innerHTML = arr.length ? arr.map((a, i) => ticker(a, { loading: i < 4 ? 'eager' : 'lazy' })).join('') : `<div class="empty" style="flex:1">${escapeHtml(msg)}</div>`;
     } else {
       arr.forEach(a => {
         const card = el.querySelector(`[data-detail="${CSS.escape(String(a.id))}"]`);
@@ -8381,13 +8655,18 @@ async function renderAdmin() {
         if ($('#kpiMemory')) $('#kpiMemory').textContent = st.memoryMb != null ? (st.memoryMb + ' MB') : '—';
         if ($('#kpiUptime')) $('#kpiUptime').textContent = st.uptimeSeconds != null ? ('آپتایم: ' + Math.floor(st.uptimeSeconds / 60) + ' دقیقه') : '—';
       }
+      const formatFeedPing = (f) => {
+        if (Number(f?.pingMs) > 0) return escapeHtml(String(f.pingMs)) + ' ms';
+        if (f?.timerLimited) return '&lt; 1 ms';
+        return '—';
+      };
       if (Array.isArray(data?.feeds)) {
         if ($('#adminFeedsTableBody')) {
           $('#adminFeedsTableBody').innerHTML = data.feeds.map(f => `
             <tr>
               <td><strong>${escapeHtml(f.name)}</strong></td>
               <td><span class="role-badge user">${escapeHtml(f.protocol || f.type || 'api')}</span></td>
-              <td style="direction:ltr;text-align:right">${f.pingMs ? escapeHtml(String(f.pingMs)) + ' ms' : '—'}</td>
+              <td style="direction:ltr;text-align:right">${formatFeedPing(f)}</td>
               <td>${escapeHtml(f.reliability || '100%')}</td>
               <td><span class="status-pill active">آنلاین و فعال</span></td>
             </tr>
@@ -8404,7 +8683,7 @@ async function renderAdmin() {
                 <span class="status-pill active">آنلاین</span>
               </div>
               <div class="admin-card-item-footer" style="padding-top:6px">
-                <span class="muted" style="font-size:11px">تأخیر: <strong style="direction:ltr;color:var(--ink)">${f.pingMs ? escapeHtml(String(f.pingMs)) + ' ms' : '—'}</strong></span>
+                <span class="muted" style="font-size:11px">تأخیر: <strong style="direction:ltr;color:var(--ink)">${formatFeedPing(f)}</strong></span>
                 <span class="muted" style="font-size:11px">پایداری: <strong style="color:var(--ink)">${escapeHtml(f.reliability || '100%')}</strong></span>
               </div>
             </div>
@@ -8416,9 +8695,13 @@ async function renderAdmin() {
   } else if (activeAdminTab === 'api_feeds') {
     container.innerHTML = '<div class="muted" style="padding:20px;text-align:center">در حال بارگذاری لیست APIها و فیدهای سیستم…</div>';
     try {
-      const renderApiFeeds = async () => {
-        const data = await api('/api/admin/feeds');
-        const feeds = data.feeds || [];
+      const formatFeedPing = (f) => {
+        if (Number(f?.pingMs) > 0) return escapeHtml(String(f.pingMs)) + ' ms';
+        if (f?.timerLimited) return '&lt; 1 ms';
+        return '—';
+      };
+      const renderApiFeeds = async (prefetchedFeeds = null) => {
+        const feeds = Array.isArray(prefetchedFeeds) ? prefetchedFeeds : ((await api('/api/admin/feeds')).feeds || []);
         const activeCount = feeds.filter(f => f.active).length;
 
         container.innerHTML = `
@@ -8471,7 +8754,7 @@ async function renderAdmin() {
                     </td>
                     <td><span class="role-badge ${proto === 'crypto' ? 'user' : 'admin'}">${escapeHtml(proto)}</span></td>
                     <td style="direction:ltr;text-align:right;font-size:11px;color:var(--muted);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(f.url || 'Internal / Socket')}</td>
-                    <td data-ping-cell="${escapeHtml(f.id)}" style="direction:ltr;text-align:right;font-weight:800">${f.pingMs ? f.pingMs + ' ms' : '—'}</td>
+                    <td data-ping-cell="${escapeHtml(f.id)}" style="direction:ltr;text-align:right;font-weight:800">${formatFeedPing(f)}</td>
                     <td style="text-align:center">
                       <button class="switch ${isActive ? 'on' : ''}" data-feed-toggle="${escapeHtml(f.id)}" type="button" title="${isActive ? 'غیرفعال‌سازی' : 'فعال‌سازی'}"></button>
                     </td>
@@ -8520,7 +8803,7 @@ async function renderAdmin() {
                 <div class="admin-card-item-footer">
                   <div style="display:flex;align-items:center;gap:6px">
                     <span class="muted" style="font-size:11px">تأخیر:</span>
-                    <strong data-ping-cell="${escapeHtml(f.id)}" style="direction:ltr;font-size:12px;color:var(--ink)">${f.pingMs ? f.pingMs + ' ms' : '—'}</strong>
+                    <strong data-ping-cell="${escapeHtml(f.id)}" style="direction:ltr;font-size:12px;color:var(--ink)">${formatFeedPing(f)}</strong>
                   </div>
                   <div style="display:flex;align-items:center;gap:6px">
                     <button class="btn btn-soft" data-feed-test="${escapeHtml(f.id)}" type="button" style="height:32px;padding:0 12px;font-size:11px;border-radius:9px">تست پینگ</button>
@@ -8536,9 +8819,9 @@ async function renderAdmin() {
           b.onclick = async () => {
             b.disabled = true;
             try {
-              await api(`/api/admin/feeds/${encodeURIComponent(b.dataset.feedUp)}/move-up`, { method: 'POST' });
+              const res = await api(`/api/admin/feeds/${encodeURIComponent(b.dataset.feedUp)}/move-up`, { method: 'POST' });
               toast('اولویت API افزایش یافت');
-              await renderApiFeeds();
+              await renderApiFeeds(Array.isArray(res?.feeds) ? res.feeds : null);
             } catch (err) {
               toast('خطا: ' + err.message);
             }
@@ -8549,9 +8832,9 @@ async function renderAdmin() {
           b.onclick = async () => {
             b.disabled = true;
             try {
-              await api(`/api/admin/feeds/${encodeURIComponent(b.dataset.feedDown)}/move-down`, { method: 'POST' });
+              const res = await api(`/api/admin/feeds/${encodeURIComponent(b.dataset.feedDown)}/move-down`, { method: 'POST' });
               toast('اولویت API کاهش یافت');
-              await renderApiFeeds();
+              await renderApiFeeds(Array.isArray(res?.feeds) ? res.feeds : null);
             } catch (err) {
               toast('خطا: ' + err.message);
             }
@@ -8561,9 +8844,9 @@ async function renderAdmin() {
         container.querySelectorAll('[data-feed-toggle]').forEach(b => {
           b.onclick = async () => {
             try {
-              await api(`/api/admin/feeds/${encodeURIComponent(b.dataset.feedToggle)}/toggle`, { method: 'POST' });
+              const res = await api(`/api/admin/feeds/${encodeURIComponent(b.dataset.feedToggle)}/toggle`, { method: 'POST' });
               toast('وضعیت فعال‌بودن فید به‌روز شد');
-              await renderApiFeeds();
+              await renderApiFeeds(Array.isArray(res?.feeds) ? res.feeds : null);
             } catch (err) {
               toast('خطا: ' + err.message);
             }
@@ -8577,8 +8860,17 @@ async function renderAdmin() {
             cells.forEach(c => c.textContent = '…');
             try {
               const res = await api(`/api/admin/feeds/${encodeURIComponent(id)}/test`, { method: 'POST' });
-              cells.forEach(c => c.textContent = res.pingMs + ' ms');
-              toast(`پینگ با موفقیت انجام شد (${res.pingMs} میلی‌ثانیه)`);
+              if (res.pingMs != null && Number(res.pingMs) > 0) {
+                cells.forEach(c => { c.textContent = `${res.pingMs} ms`; });
+                toast(res.ok ? `پینگ با موفقیت انجام شد (${res.pingMs} میلی‌ثانیه)` : `پاسخ خطا از سرور (${res.httpStatus || 0} · ${res.pingMs} ms)`);
+              } else if (res.timerLimited) {
+                const label = res.ok ? '< 1 ms (پاسخ‌گو)' : `خطا (${res.httpStatus || 0})`;
+                cells.forEach(c => { c.textContent = label; });
+                toast(res.ok ? 'اتصال برقرار شد (< 1 میلی‌ثانیه · محدودیت دقت تایمر سرور)' : `فید پاسخ نداد (کد ${res.httpStatus || 0})`);
+              } else {
+                cells.forEach(c => { c.textContent = res.ok ? 'پاسخ‌گو' : 'ناموفق'; });
+                toast(res.ok ? 'فید در دسترس است' : 'خطا در اتصال به فید');
+              }
             } catch (err) {
               cells.forEach(c => c.textContent = 'ناموفق');
               toast('خطا در تست پینگ: ' + err.message);
@@ -8591,9 +8883,9 @@ async function renderAdmin() {
             const id = b.dataset.feedDelete;
             askConfirm('این API از فهرست استعلام سیستم حذف شود؟', async () => {
               try {
-                await api(`/api/admin/feeds/${encodeURIComponent(id)}`, { method: 'DELETE' });
+                const res = await api(`/api/admin/feeds/${encodeURIComponent(id)}`, { method: 'DELETE' });
                 toast('API با موفقیت حذف شد');
-                await renderApiFeeds();
+                await renderApiFeeds(Array.isArray(res?.feeds) ? res.feeds : null);
               } catch (err) {
                 toast('خطا: ' + err.message);
               }
@@ -8659,13 +8951,13 @@ async function renderAdmin() {
               return;
             }
             try {
-              await api('/api/admin/feeds/add', {
+              const res = await api('/api/admin/feeds/add', {
                 method: 'POST',
                 body: JSON.stringify({ name, url, protocol })
               });
               closeModal();
               toast('API جدید با موفقیت ثبت و به فیدها افزوده شد');
-              await renderApiFeeds();
+              await renderApiFeeds(Array.isArray(res?.feeds) ? res.feeds : null);
             } catch (err) {
               toast('خطا: ' + err.message);
             }
@@ -9565,21 +9857,55 @@ function setupDragToScroll() {
     }, { passive: true });
   });
 }
+function renderAssetPickerRow(a, selectedId) {
+  const t = assetTitles(a);
+  return `<button type="button" class="asset-option" role="radio" aria-checked="${a.id===selectedId}" data-pick-asset="${escapeHtml(a.id)}">${assetIcon(a,{loading:'lazy'})}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="radio-dot"></span></button>`;
+}
 function assetPicker(selected='gold18',hid='buyAsset'){
-  return `<div class="asset-picker"><input id="assetSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی"><div class="asset-picker-list" id="assetPickerList" role="radiogroup" aria-label="انتخاب دارایی">${sortAssetsStandard(assets).map(a=>{const t=assetTitles(a);return `<button type="button" class="asset-option" role="radio" aria-checked="${a.id===selected}" data-pick-asset="${escapeHtml(a.id)}" data-search="${escapeHtml(normFa(a.name+' '+a.symbol+' '+(a.en||'')+' '+getCryptoFullName(a)+' '+a.id))}">${assetIcon(a)}<span class="option-copy" style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}"><strong style="text-align:right;${t.isCrypto?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(t.title)}</strong><small style="text-align:right;${t.isCrypto?'direction:ltr':'direction:rtl'}">${escapeHtml(t.sub)}</small></span><span class="radio-dot"></span></button>`}).join('')}</div><input id="${escapeHtml(hid)}" type="hidden" value="${escapeHtml(selected)}"></div>`;
+  const sorted=sortAssetsStandard(assets);
+  const initial=sorted.slice(0,PICKER_BATCH_SIZE);
+  if(selected&&!initial.some(a=>a.id===selected)){
+    const selObj=sorted.find(a=>a.id===selected);
+    if(selObj)initial.push(selObj);
+  }
+  return `<div class="asset-picker"><input id="assetSearch" class="asset-picker-search" type="search" placeholder="جست‌وجوی ارز، طلا یا رمزارز…" autocomplete="off" aria-label="جست‌وجوی دارایی"><div class="asset-picker-list" id="assetPickerList" role="radiogroup" aria-label="انتخاب دارایی">${initial.map(a=>renderAssetPickerRow(a,selected)).join('')}</div><input id="${escapeHtml(hid)}" type="hidden" value="${escapeHtml(selected)}"></div>`;
 }
 function wireAssetPicker(){
   const search=$('#assetSearch'),list=$('#assetPickerList');
   if(!search||!list)return;
+  const sorted=sortAssetsStandard(assets);
+  const searchEntries=sorted.map(a=>({a,s:pickerSearchKey(a)}));
+  const getHiddenVal=()=>list.closest('.asset-picker')?.querySelector('input[type=hidden]')?.value||'';
+  let filtered=sorted;
+  let renderedIds=new Set([...list.querySelectorAll('[data-pick-asset]')].map(el=>el.dataset.pickAsset));
+  let cursor=0;
+  const appendBatch=()=>{
+    const selId=getHiddenVal();
+    const out=[];
+    while(cursor<filtered.length&&out.length<PICKER_BATCH_SIZE){
+      const a=filtered[cursor++];
+      if(renderedIds.has(a.id))continue;
+      renderedIds.add(a.id);
+      out.push(renderAssetPickerRow(a,selId));
+    }
+    if(out.length)list.insertAdjacentHTML('beforeend',out.join(''));
+  };
+  list.addEventListener('scroll',()=>{
+    if(cursor<filtered.length&&list.scrollTop+list.clientHeight>=list.scrollHeight-180)appendBatch();
+  },{passive:true});
   search.addEventListener('input',()=>{
     const q=normFa(search.value.trim());
-    list.querySelectorAll('[data-pick-asset]').forEach(row=>{
-      const s=row.dataset.search||normFa(row.textContent+' '+(row.dataset.pickAsset||''));
-      const match=!q||s.includes(q);
-      row.hidden=!match;
-      row.classList.toggle('is-hidden',!match);
-      row.style.setProperty('display',match?'flex':'none','important');
-    });
+    const words=q.split(/\s+/).filter(Boolean);
+    filtered=words.length?searchEntries.filter(e=>words.every(w=>e.s.includes(w))).map(e=>e.a):sorted;
+    renderedIds=new Set();
+    cursor=0;
+    list.innerHTML='';
+    list.scrollTop=0;
+    if(!filtered.length){
+      list.innerHTML='<div class="muted" style="font-size:11.5px;padding:12px;text-align:center">موردی یافت نشد</div>';
+      return;
+    }
+    appendBatch();
   });
 }
 function buyForm(edit=null,presetId=null){
@@ -9602,7 +9928,7 @@ function buyForm(edit=null,presetId=null){
   }
   const headerAssetHtml=h?`
     <div class="edit-asset-badge" style="display:flex;align-items:center;gap:8px;padding:7px 11px;border:1px solid var(--line);border-radius:12px;background:var(--bg);margin-bottom:6px">
-      ${assetIcon(a)}
+      ${assetIcon(a,{loading:'eager'})}
       <div style="flex:1;min-width:0;text-align:right;${a.cat==='crypto'?'direction:ltr':'direction:rtl'}">
         <strong style="font-size:13px;display:block;text-align:right;${a.cat==='crypto'?'direction:ltr;font-weight:900':'direction:rtl'}">${escapeHtml(assetTitles(a).title)}</strong>
         <span class="muted" style="font-size:10px;text-align:right;display:block;${a.cat==='crypto'?'direction:ltr':'direction:rtl'}">${escapeHtml(assetTitles(a).sub)}</span>
@@ -9894,7 +10220,7 @@ function detail(id) {
   openModal(modalTitle, `
     <div class="detail-hero">
       <div style="display:flex;align-items:center;gap:10px">
-        ${assetIcon(a)}
+        ${assetIcon(a,{loading:'eager'})}
         <div style="text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">
           <div style="font-size:16px;font-weight:900;text-align:right;${t.isCrypto ? 'direction:ltr' : 'direction:rtl'}">${escapeHtml(heroPrimary)}</div>
           <div class="detail-price">${quote(a)}</div>
