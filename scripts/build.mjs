@@ -67,6 +67,19 @@ const facePngPath = path.join(rootDir, 'public', 'coin-face.png');
 const splashJsContent = fs.existsSync(splashJsPath) ? fs.readFileSync(splashJsPath, 'utf8') : '';
 const facePngBase64 = fs.existsSync(facePngPath) ? fs.readFileSync(facePngPath).toString('base64') : '';
 
+const flagsDir = path.join(rootDir, 'public', 'logos', 'flags');
+const flagSvgs = {};
+if (fs.existsSync(flagsDir)) {
+  for (const entry of fs.readdirSync(flagsDir).sort()) {
+    if (!entry.endsWith('.svg')) continue;
+    const code = entry.slice(0, -4).toLowerCase();
+    if (/^[a-z]{2,4}$/.test(code)) {
+      flagSvgs[code] = fs.readFileSync(path.join(flagsDir, entry), 'utf8');
+    }
+  }
+}
+console.log(`Bundled ${Object.keys(flagSvgs).length} fiat SVG flags into worker bundle.`);
+
 const inlineScripts = extractInlineScriptBodies(htmlContent);
 if (inlineScripts.length === 0) {
   throw new Error('No inline <script> blocks found in src/index.html');
@@ -82,6 +95,7 @@ const APP_HTML = ${JSON.stringify(htmlContent)};
 const APP_SCRIPT_HASHES = ${JSON.stringify(appScriptHashes)};
 const COIN_SPLASH_JS = ${JSON.stringify(splashJsContent)};
 const COIN_FACE_PNG = ${JSON.stringify(facePngBase64)};
+const FLAG_SVGS = ${JSON.stringify(flagSvgs)};
 
 ${workerContent}
 `;

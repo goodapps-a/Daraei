@@ -1,5 +1,5 @@
 // Service Worker for Darayi PWA
-const CACHE_NAME = 'darayi-shell-v14';
+const CACHE_NAME = 'darayi-shell-v16';
 const STATIC_ASSETS = [
   '/',
   '/manifest.webmanifest',
@@ -39,8 +39,8 @@ self.addEventListener('message', (event) => {
 
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
-  // Always bypass cache for API requests and non-GET
-  if (url.pathname.startsWith('/api/') || url.pathname.startsWith('/v1/') || event.request.method !== 'GET') {
+  // Always bypass cache for cross-origin, API requests, and non-GET
+  if (event.request.method !== 'GET' || url.origin !== self.location.origin || url.pathname.startsWith('/api/') || url.pathname.startsWith('/v1/')) {
     return;
   }
 
@@ -53,21 +53,26 @@ self.addEventListener('fetch', (event) => {
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
         }
         return response;
-      }).catch(() => caches.match(event.request).then((m) => m || caches.match('/')))
+      }).catch(() =>
+        caches.match(event.request)
+          .then((m) => m || caches.match('/'))
+          .then((m) => m || new Response('Offline', { status: 503, headers: { 'content-type': 'text/plain; charset=utf-8' } }))
+      )
     );
     return;
   }
 
-  // Stale-while-revalidate for static assets (icons, splash, fonts)
+  // Stale-while-revalidate for static assets (icons, flags, splash, fonts) — never cache HTML SPA fallback as an image/asset
   event.respondWith(
     caches.match(event.request).then((cached) => {
       const fetchPromise = fetch(event.request).then((response) => {
-        if (response && response.status === 200) {
+        const ct = (response && response.headers && response.headers.get('content-type')) || '';
+        if (response && response.status === 200 && !ct.toLowerCase().includes('text/html')) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
         }
         return response;
-      }).catch(() => cached);
+      }).catch(() => cached || new Response('', { status: 503 }));
       return cached || fetchPromise;
     })
   );

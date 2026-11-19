@@ -1538,9 +1538,8 @@ test('src/index.html has 6 inline scripts covered by hash-based CSP, narrow conn
 
   const connectSrcMatch = /connect-src\s+([^;]+)/.exec(csp);
   assert.ok(connectSrcMatch);
-  assert.equal(connectSrcMatch[1].trim(), "'self'");
-  assert.match(PROD_CSP, /connect-src\s+'self';/);
-  assert.equal(/new\s+WebSocket\s*\(/.test(html), false, 'src/index.html must not open direct browser WebSockets');
+  assert.equal(connectSrcMatch[1].trim(), "'self' wss://ws.nobitex.ir wss://ws.bitpin.ir");
+  assert.match(PROD_CSP, /connect-src\s+'self' wss:\/\/ws\.nobitex\.ir wss:\/\/ws\.bitpin\.ir;/);
   assert.equal(/stream\.binance\.com|data-stream\.binance\.vision/.test(html), false, 'src/index.html must not reference Binance WebSocket endpoints');
 
   // Exactly one escapeHtml definition (using ??'')
@@ -2057,15 +2056,18 @@ test('wrangler.toml sets keep_vars = true and dark mode viewport styling + SW v1
   assert.match(wrangler, /^\s*keep_vars\s*=\s*true\b/m);
 
   const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
-  assert.ok(html.includes('<meta name="color-scheme" id="colorSchemeMeta" content="light">'));
+  assert.ok(html.includes('<meta name="color-scheme" id="colorSchemeMeta" content="light dark">'));
   assert.ok(html.includes(':root[data-theme=dark],html[data-theme=dark]'));
   assert.ok(html.includes('document.body.style.backgroundColor'));
-  assert.ok(html.includes('/sw.js?v=14'));
+  assert.ok(html.includes('/sw.js?v=16'));
 
   const swFile = fs.readFileSync(new URL('./public/sw.js', import.meta.url), 'utf8');
-  assert.ok(swFile.includes("darayi-shell-v14"));
+  assert.ok(swFile.includes("darayi-shell-v16"));
+  assert.ok(swFile.includes('url.origin !== self.location.origin'), 'public/sw.js must never cache cross-origin responses');
+  assert.ok(swFile.includes("status: 503"), 'public/sw.js must return clean 503 Response on offline cache miss instead of undefined');
   const workerSrc = fs.readFileSync(new URL('./src/worker.js', import.meta.url), 'utf8');
-  assert.ok(workerSrc.includes("darayi-shell-v14"));
+  assert.ok(workerSrc.includes("darayi-shell-v16"));
+  assert.ok(workerSrc.includes("status:503"), 'worker SW_JS must return clean 503 Response on offline cache miss');
 });
 
 test('shared Promises eliminated in worker.js while concurrent refreshPrices still coalesces without cross-request Promise sharing', async () => {
@@ -3522,5 +3524,197 @@ test('Logo system: cached symbol counts, lazy-by-default 30x30 icons, progressiv
   assert.ok(pickerHtml.includes('aria-checked="true" data-pick-asset="doge"'));
   assert.equal(pickerHtml.includes('loading="eager"'), false, 'Picker rows must never use eager image loading');
 });
+
+test('security audit regressions: suspended user cannot bypass lock via password reset, and pre-selected secondary admin can verify registration when registrations are closed', async () => {
+  __resetWorkerStateForTests();
+  const db = new DatabaseSync(':memory:');
+  db.exec(fs.readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+  const { DB } = createSqliteD1Wrapper(db);
+
+  const env = {
+    DB,
+    ADMIN_EMAIL: 'chief@example.com',
+    ADMIN_PASSWORD: 'ChiefMasterPassword!1',
+    AUTH_SECRET: 'test-auth-secret-key-minimum-32-chars!!'
+  };
+
+  const callApi = (path, { method = 'GET', body, token } = {}) =>
+    worker.fetch(
+      new Request(`https://darayi.example${path}`, {
+        method,
+        headers: {
+          origin: 'https://darayi.example',
+          ...(body ? { 'content-type': 'application/json' } : {}),
+          'x-requested-with': 'XMLHttpRequest',
+          ...(token ? { authorization: `Bearer ${token}` } : {})
+        },
+        ...(body ? { body: JSON.stringify(body) } : {})
+      }),
+      env
+    );
+
+  const chiefLogin = await (await callApi('/api/auth/login', {
+    method: 'POST',
+    body: { email: 'chief@example.com', password: 'ChiefMasterPassword!1' }
+  })).json();
+  assert.equal(chiefLogin.user.isPrimaryAdmin, true);
+
+  // 1. Create a normal user and then suspend them
+  const addRes = await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: chiefLogin.token,
+    body: { email: 'locked@example.com', name: 'Locked User', password: 'InitialPassword!1', role: 'user' }
+  });
+  assert.equal(addRes.status, 200);
+  const lockedUser = (await addRes.json()).user;
+
+  const suspRes = await callApi(`/api/admin/users/${encodeURIComponent(lockedUser.id)}/toggle`, {
+    method: 'POST',
+    token: chiefLogin.token,
+    body: { status: 'suspended' }
+  });
+  assert.equal(suspRes.status, 200);
+
+  // 1a. reset/start must silently return ok:true WITHOUT creating an OTP row for suspended user
+  const rsRes = await callApi('/api/auth/reset/start', { method: 'POST', body: { email: 'locked@example.com' } });
+  assert.equal(rsRes.status, 200);
+  const otpCount = db.prepare("SELECT COUNT(*) AS c FROM otp_codes WHERE email='locked@example.com'").get().c;
+  assert.equal(otpCount, 0, 'Suspended user must not receive reset OTP');
+
+  const sha256B64u = async (val) => {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(String(val)));
+    return Buffer.from(buf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  };
+
+  // 1b. Even if a resetToken existed before suspension, reset/finish MUST reject with 403 and NOT issue a session
+  const rawToken = 'preexisting_reset_token_123456';
+  const tokenHash = await sha256B64u(rawToken);
+  const nowSec = Math.floor(Date.now() / 1000);
+  db.prepare("INSERT INTO otp_codes(email,purpose,code_hash,expires_at,created_at) VALUES('locked@example.com','reset_ok',?,?,?)").run(tokenHash, nowSec + 600, nowSec);
+
+  const rfRes = await callApi('/api/auth/reset/finish', {
+    method: 'POST',
+    body: { email: 'locked@example.com', resetToken: rawToken, password: 'NewAttemptedPassword!2' }
+  });
+  assert.equal(rfRes.status, 403, 'Suspended user must be blocked at reset/finish');
+  assert.equal(rfRes.headers.get('set-cookie'), null, 'Suspended user must never receive a session cookie');
+
+  // 2. Disable public registrations, pre-select a secondary admin, and verify they can complete register/verify while regular users get 403
+  const settingsRes = await callApi('/api/admin/settings', {
+    method: 'POST',
+    token: chiefLogin.token,
+    body: { allowNewRegistrations: false }
+  });
+  assert.equal(settingsRes.status, 200);
+
+  const preSelRes = await callApi('/api/admin/users/add', {
+    method: 'POST',
+    token: chiefLogin.token,
+    body: { email: 'vip.admin@example.com', role: 'admin' }
+  });
+  assert.equal(preSelRes.status, 200);
+
+  // Regular user must get 403 at register/verify when registrations are disabled
+  const regUserRes = await callApi('/api/auth/register/verify', {
+    method: 'POST',
+    body: { email: 'random.user@example.com', code: '123456' }
+  });
+  assert.equal(regUserRes.status, 403);
+
+  // Pre-selected secondary admin passes the registration policy gate and completes register/verify
+  const regCode = '654321';
+  const hmacKey = await crypto.subtle.importKey('raw', new TextEncoder().encode(env.AUTH_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const sigBuf = await crypto.subtle.sign('HMAC', hmacKey, new TextEncoder().encode(`vip.admin@example.com:register:${regCode}`));
+  const regCodeHash = Buffer.from(sigBuf).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  db.prepare("INSERT INTO otp_codes(email,purpose,code_hash,payload,expires_at,created_at) VALUES('vip.admin@example.com','register',?,?,?,?)").run(
+    regCodeHash,
+    JSON.stringify({ name: 'VIP Admin', hash: 'pbkdf2$100000$abcd$ef01' }),
+    nowSec + 600,
+    nowSec
+  );
+
+  const regAdminRes = await callApi('/api/auth/register/verify', {
+    method: 'POST',
+    body: { email: 'vip.admin@example.com', code: regCode }
+  });
+  assert.equal(regAdminRes.status, 200, 'Pre-selected secondary admin must complete register/verify even when registrations are closed');
+  const regAdminBody = await regAdminRes.json();
+  assert.equal(regAdminBody.user.isAdmin, true);
+  assert.equal(regAdminBody.user.adminTier, 'secondary');
+});
+
+test('chart & UI audit regressions: overnight gap bridges, domestic 1D cache-skew grace, BiDi isolation, portfolio empty CTA, and admin feeds search focus preservation', () => {
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+
+  // Extract chart functions and validateDomesticArchivePoints
+  const chartStart = html.indexOf('function normalizeChartPoints(');
+  const chartEnd = html.indexOf('function paintChart(');
+  const valStart = html.indexOf('function validateDomesticArchivePoints(');
+  const valEnd = html.indexOf('function validateClientHistory(');
+  assert.ok(chartStart > 0 && chartEnd > chartStart && valStart > 0 && valEnd > valStart);
+
+  const ctx = { Math, Number, Array, isFinite, uid: () => 't1' };
+  vm.createContext(ctx);
+  vm.runInContext(html.slice(chartStart, chartEnd) + '\n' + html.slice(valStart, valEnd), ctx);
+
+  // 1. Domestic 1D overnight closures stay continuous (no broken floating stumps and no dashed diagonal bridges)
+  const baseTs = 1775000000;
+  const gbpOvernight = [
+    [baseTs, 351000],
+    [baseTs + 19 * 3600, 355000],
+    [baseTs + 19 * 3600 + 300, 355700]
+  ];
+  assert.equal(ctx.splitClientChartGapSegments(gbpOvernight, '1D', true).length, 1);
+
+  const sparkSvg = ctx.chartSVG(gbpOvernight, '#16865b', true, true, '1D', true);
+  assert.equal(sparkSvg.includes('data-chart-gap="1"'), false, 'Sparkline must not render artificial dashed gap bridges');
+  assert.equal(sparkSvg.includes('stroke-dasharray'), false, 'Sparkline must render one clean continuous line');
+
+  const detailSvg = ctx.chartSVG(gbpOvernight, '#16865b', true, false, '1D', true);
+  assert.equal(detailSvg.includes('data-chart-gap="1"'), false, 'Detail chart must not render artificial dashed gap bridges');
+
+  // 2. validateDomesticArchivePoints keeps server-cached 1D anchor up to 120s old while rejecting points strictly outside range (>120s)
+  const now = 1775086400;
+  const domesticPts = [
+    [now - 86400 - 300, 340000], // 5m outside window -> must be rejected
+    [now - 86400 - 45, 351000],  // 45s cached windowStart anchor -> must be preserved
+    [now - 600, 355000],
+    [now - 30, 355700]
+  ];
+  const validated = ctx.validateDomesticArchivePoints(domesticPts, '1D', now, 86400, 355700);
+  assert.equal(validated.length, 3, 'Should keep 45s-cached anchor and drop 300s-old out-of-range point');
+  assert.equal(validated[0][0], now - 86400 - 45);
+
+  // 3. Converter x=y formula removed, zero arrows in percentages, Grid/List toggle in Home 3-dot picker, live USDT WS, and PWA dark safe-area
+  assert.equal(html.includes('id="convFormula"'), false, 'Converter x=y formula must be removed');
+  assert.equal(/[↗↘]/.test(html), false, 'UI must not use ↗/↘ arrows anywhere in percentage displays');
+  assert.ok(html.includes('function fmtPctSign(val)'), 'fmtPctSign helper must exist');
+  assert.ok(html.includes('id="featViewToggle"'), 'Home 3-dot modal must contain Grid/List view toggle');
+  assert.ok(html.includes('data-home-view="grid"') && html.includes('data-home-view="list"'));
+  assert.ok(html.includes('function startUsdtWebSocket()'), 'Live USDT WebSocket client must exist');
+  assert.ok(html.includes('wss://ws.nobitex.ir/connection/websocket') && html.includes('wss://ws.bitpin.ir/'));
+  assert.ok(html.includes('body::after{content:\'\';position:fixed;left:0;right:0;bottom:0;height:env(safe-area-inset-bottom,0px);background:var(--bg)'));
+  assert.ok(html.includes('<div style="margin-top:12px"><button class="btn btn-lime" data-open-buy="1">＋ ثبت خرید</button></div>'));
+  assert.ok(html.includes('<tbody id="adminFeedsTableBody"></tbody>'));
+  assert.ok(html.includes("$('#feedSearchInput')?.addEventListener('input', () => renderFeedsResults())"));
+
+  // 4. Worker admin ping must NOT pass cache: 'no-store' (unsupported in Cloudflare Workers runtime -> causes خطا (۰))
+  const workerSrc = fs.readFileSync(new URL('./src/worker.js', import.meta.url), 'utf8');
+  const pingStart = workerSrc.indexOf("if (p.startsWith('/api/admin/feeds/') && p.endsWith('/test') && m === 'POST')");
+  const pingEnd = workerSrc.indexOf("if (p.startsWith('/api/admin/feeds/') && p.endsWith('/toggle') && m === 'POST')", pingStart);
+  const pingSection = workerSrc.slice(pingStart, pingEnd);
+  assert.equal(/cache\s*:\s*['"]no-store['"]/.test(pingSection), false, 'Cloudflare Worker ping fetch must not use unsupported cache: no-store');
+  assert.ok(pingSection.includes("redirect: 'manual'"), 'Worker ping must handle safe redirects manually');
+
+  // 5. dist/worker.js bundles all 38 fiat SVG flags inline and serves them with image/svg+xml
+  const distWorkerPath = new URL('./dist/worker.js', import.meta.url);
+  assert.ok(fs.existsSync(distWorkerPath), 'dist/worker.js must exist after build');
+  const distWorker = fs.readFileSync(distWorkerPath, 'utf8');
+  assert.ok(distWorker.includes('const FLAG_SVGS = '), 'dist/worker.js must embed FLAG_SVGS');
+  for (const code of ['us', 'eu', 'gb', 'tr', 'ir', 'ae', 'ca', 'iq']) {
+    assert.ok(distWorker.includes(`"${code}":"<svg`), `FLAG_SVGS must embed ${code}.svg`);
+  }
+});
+
 
 

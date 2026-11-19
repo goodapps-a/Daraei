@@ -393,13 +393,14 @@ export interface SystemFeed {
 
 let systemFeeds: SystemFeed[] = [
   { id: 'f_kucoin', name: 'KuCoin Tickers API', url: 'https://api.kucoin.com/api/v1/market/allTickers', type: 'crypto', status: 'active', pingMs: 48, reliability: '100%', priority: 1 },
-  { id: 'f_okx', name: 'OKX Market Feed', url: 'https://www.okx.com/api/v5/market/tickers', type: 'crypto', status: 'active', pingMs: 62, reliability: '99.8%', priority: 2 },
+  { id: 'f_okx', name: 'OKX Market Feed', url: 'https://www.okx.com/api/v5/market/tickers?instType=SPOT', type: 'crypto', status: 'active', pingMs: 62, reliability: '99.8%', priority: 2 },
   { id: 'f_gate', name: 'Gate.io Engine', url: 'https://api.gateio.ws/api/v4/spot/tickers', type: 'crypto', status: 'active', pingMs: 55, reliability: '100%', priority: 3 },
   { id: 'f_binance_rest', name: 'Binance Public REST API', url: 'https://data-api.binance.vision/api/v3/ticker/24hr', type: 'crypto', status: 'active', pingMs: 44, reliability: '99.9%', priority: 4 },
   { id: 'f_nerkhara', name: 'NerkhAra Validated Feed', url: 'https://nerkhara.com/api/v1/latest.json', type: 'domestic', status: 'active', pingMs: 34, reliability: '99.9%', priority: 5 },
   { id: 'f_bonbast', name: 'Bonbast Market Rate', url: 'https://www.bonbast.com', type: 'domestic', status: 'active', pingMs: 42, reliability: '99.7%', priority: 6 },
   { id: 'f_nerkh', name: 'TGJU / IranMarket Rate', url: 'https://iran-market.github.io/data/latest-toman.json', type: 'domestic', status: 'active', pingMs: 38, reliability: '99.6%', priority: 7 },
-  { id: 'f_wallex', name: 'Wallex USDT/TMN Bridge', url: 'https://api.wallex.ir/v1/markets', type: 'tether', status: 'active', pingMs: 32, reliability: '100%', priority: 8 }
+  { id: 'f_wallex', name: 'Wallex USDT/TMN Bridge', url: 'https://api.wallex.ir/v1/markets', type: 'tether', status: 'active', pingMs: 32, reliability: '100%', priority: 8 },
+  { id: 'f_nobitex_ws', name: 'Nobitex USDT/IRT WebSocket', url: 'wss://ws.nobitex.ir/connection/websocket', type: 'tether', status: 'active', pingMs: 24, reliability: '99.9%', priority: 9 }
 ];
 
 let domesticPrevCloseCache: Record<string, number[]> | null = null;
@@ -2324,25 +2325,59 @@ app.post('/api/admin/feeds/:id/test', async (req, res) => {
     return res.status(400).json({ error: 'آدرس فید نامعتبر یا غیرمجاز است.' });
   }
   const start = performance.now();
-  let ok = true;
-  let status = 200;
+  let ok = false;
+  let status = 0;
+  const pingUrlSafe = async (targetUrl: string) => {
+    let cur = targetUrl;
+    for (let hop = 0; hop < 4; hop++) {
+      if (!isSafePublicUrl(cur)) return { ok: false, status: 0 };
+      const ctrl = new AbortController();
+      const tid = setTimeout(() => ctrl.abort(), 5000);
+      try {
+        const resp = await fetch(cur, {
+          method: 'GET',
+          headers: {
+            'cache-control': 'no-cache',
+            'pragma': 'no-cache',
+            'user-agent': 'Mozilla/5.0 (compatible; Darayi/1.0)',
+            'accept': 'application/json, text/plain, text/html;q=0.9, */*;q=0.8'
+          },
+          redirect: 'manual',
+          signal: ctrl.signal
+        });
+        if (resp.status >= 300 && resp.status < 400) {
+          const loc = resp.headers.get('location');
+          try { await resp.body?.cancel?.(); } catch {}
+          if (!loc) return { ok: false, status: resp.status };
+          cur = new URL(loc, cur).href;
+          continue;
+        }
+        const st = resp.status;
+        const isOk = resp.ok;
+        try {
+          const reader = resp.body?.getReader?.();
+          if (reader) {
+            await reader.read();
+            await reader.cancel().catch(() => {});
+          }
+        } catch {}
+        return { ok: isOk, status: st };
+      } finally {
+        clearTimeout(tid);
+      }
+    }
+    return { ok: false, status: 0 };
+  };
   try {
     if (f.url.startsWith('https://')) {
-      const resp = await fetch(f.url, {
-        cache: 'no-store',
-        headers: { 'cache-control': 'no-cache', 'pragma': 'no-cache' },
-        redirect: 'error',
-        signal: AbortSignal.timeout(4500)
-      });
-      status = resp.status;
-      ok = resp.ok;
-      try {
-        const reader = resp.body?.getReader?.();
-        if (reader) {
-          await reader.read();
-          await reader.cancel().catch(() => {});
-        }
-      } catch {}
+      const r = await pingUrlSafe(f.url);
+      ok = r.ok;
+      status = r.status;
+    } else if (f.url.startsWith('wss://')) {
+      const probeHttps = 'https://' + new URL(f.url).host + '/';
+      const r = await pingUrlSafe(probeHttps);
+      status = r.status > 0 ? r.status : 101;
+      ok = r.status > 0 && r.status < 500;
     }
   } catch {
     ok = false;
@@ -2912,15 +2947,17 @@ app.post('/api/auth/register/start', async (req, res) => {
   if (systemSettings.maintenance) {
     return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
   }
-  if (!systemSettings.allowNewRegistrations) {
-    return res.status(403).json({ error: 'ثبت‌نام کاربران جدید موقتاً توسط مدیریت غیرفعال شده است.' });
-  }
   const ip = getClientIp(req);
   const { email, name, password } = req.body || {};
   if (!email || !name || !password) return res.status(400).json({ error: 'نام، ایمیل و رمز عبور را کامل وارد کنید.' });
   const normalizedEmail = cleanEmail(email);
   if (!isEmail(normalizedEmail) || normalizedEmail.length > 120) {
     return res.status(400).json({ error: 'ایمیل معتبر نیست.' });
+  }
+  const existingPre = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
+  const isPreSelectedAdmin = isEmailAdmin(normalizedEmail) || (existingPre?.role === 'admin' && !existingPre?.passwordHash);
+  if (!systemSettings.allowNewRegistrations && !isPreSelectedAdmin) {
+    return res.status(403).json({ error: 'ثبت‌نام کاربران جدید موقتاً توسط مدیریت غیرفعال شده است.' });
   }
   const cleanName = String(name).trim().slice(0, 80);
   const passStr = String(password);
@@ -2932,7 +2969,7 @@ app.post('/api/auth/register/start', async (req, res) => {
   if (!checkRateLimit(`reg_start:${ip}:${normalizedEmail}`, 5, 900) || !checkRateLimit(`reg_ip:${ip}`, 15, 900) || !checkRateLimit(`otp_hour:${normalizedEmail}`, 5, 3600)) {
     return res.status(429).json({ error: 'تعداد درخواست‌های ثبت‌نام بیش از حد مجاز است. کمی صبر کنید.' });
   }
-  if (systemUsers.some(u => u.email.toLowerCase() === normalizedEmail)) {
+  if (existingPre && existingPre.passwordHash) {
     return res.json({ ok: true });
   }
 
@@ -2959,13 +2996,15 @@ app.post('/api/auth/register/verify', async (req, res) => {
   if (systemSettings.maintenance) {
     return res.status(503).json({ error: 'سامانه موقتاً در حال بروزرسانی و نگهداری است.' });
   }
-  if (!systemSettings.allowNewRegistrations) {
-    return res.status(403).json({ error: 'ثبت‌نام کاربران جدید موقتاً توسط مدیریت غیرفعال شده است.' });
-  }
   const ip = getClientIp(req);
   const { email, code } = req.body || {};
   if (!email || !code) return res.status(400).json({ error: 'اطلاعات ناقص است.' });
   const normalizedEmail = cleanEmail(email);
+  const existingPre = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
+  const isPreSelectedAdmin = isEmailAdmin(normalizedEmail) || (existingPre?.role === 'admin' && !existingPre?.passwordHash);
+  if (!systemSettings.allowNewRegistrations && !isPreSelectedAdmin) {
+    return res.status(403).json({ error: 'ثبت‌نام کاربران جدید موقتاً توسط مدیریت غیرفعال شده است.' });
+  }
   const cleanCode = normCode(code);
   if (!checkRateLimit(`reg_verify:${ip}:${normalizedEmail}`, 8, 900)) {
     return res.status(429).json({ error: 'تلاش‌های ناموفق بیش از حد مجاز است. لطفاً کمی صبر کنید.' });
@@ -3030,8 +3069,9 @@ app.post('/api/auth/reset/start', async (req, res) => {
   if (!checkRateLimit(`reset_start:${ip}:${normalizedEmail}`, 5, 900) || !checkRateLimit(`reset_ip:${ip}`, 15, 900) || !checkRateLimit(`otp_hour:${normalizedEmail}`, 5, 3600)) {
     return res.status(429).json({ error: 'تعداد درخواست‌های بازیابی بیش از حد مجاز است. کمی صبر کنید.' });
   }
-  const exists = systemUsers.some(u => u.email.toLowerCase() === normalizedEmail) || !!userStore[normalizedEmail];
-  if (!exists) {
+  const existingUser = systemUsers.find(u => u.email.toLowerCase() === normalizedEmail);
+  const exists = !!existingUser || !!userStore[normalizedEmail];
+  if (!exists || existingUser?.status === 'suspended') {
     return res.json({ ok: true });
   }
   const code = String(crypto.randomInt(100000, 1000000));
@@ -3079,6 +3119,10 @@ app.post('/api/auth/reset/verify', async (req, res) => {
   }
 
   delete pendingOtps[`reset:${normalizedEmail}`];
+  const resetUser = systemUsers.find(x => x.email.toLowerCase() === normalizedEmail);
+  if (resetUser?.status === 'suspended') {
+    return res.status(403).json({ error: 'حساب کاربری شما مسدود شده است.' });
+  }
   const rawResetToken = 'rst_' + crypto.randomBytes(24).toString('hex');
   pendingResets[normalizedEmail] = {
     tokenHash: await sha256Hex(rawResetToken),
@@ -3117,6 +3161,9 @@ app.post('/api/auth/reset/finish', async (req, res) => {
   const u = systemUsers.find(x => x.email.toLowerCase() === normalizedEmail);
   if (!u) {
     return res.status(404).json({ error: 'کاربر یافت نشد.' });
+  }
+  if (u.status === 'suspended') {
+    return res.status(403).json({ error: 'حساب کاربری شما مسدود شده است.' });
   }
 
   u.passwordHash = await hashPassword(passStr, process.env);
