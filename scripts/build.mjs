@@ -74,13 +74,26 @@ if (fs.existsSync(flagsDir)) {
     if (!entry.endsWith('.svg')) continue;
     const code = entry.slice(0, -4).toLowerCase();
     if (/^[a-z]{2,4}$/.test(code)) {
-      flagSvgs[code] = fs.readFileSync(path.join(flagsDir, entry), 'utf8');
+      flagSvgs[code] = fs.readFileSync(path.join(flagsDir, entry), 'utf8').trim();
     }
   }
 }
-console.log(`Bundled ${Object.keys(flagSvgs).length} fiat SVG flags into worker bundle.`);
+const flagCodes = Object.keys(flagSvgs).sort();
+console.log(`Bundled ${flagCodes.length} fiat SVG flags into worker & HTML bundle.`);
 
-const inlineScripts = extractInlineScriptBodies(htmlContent);
+let builtHtmlContent = htmlContent;
+builtHtmlContent = builtHtmlContent.replace(
+  /(\/\* @LOCAL_ICONS_START \*\/[\s\S]*?)(?:\r?\n)?(?:const LOCAL_FLAG_CODES =[^\r\n]*;)?(?:\r?\n)?(?:const LOCAL_FLAG_SVGS =[^\r\n]*;)?(\r?\n\/\* @LOCAL_ICONS_END \*\/)/,
+  (_m, head, tail) => {
+    const cleanHead = head.replace(/\r?\n(?:const LOCAL_FLAG_CODES =[^\r\n]*;|const LOCAL_FLAG_SVGS =[^\r\n]*;)/g, '');
+    return `${cleanHead}\nconst LOCAL_FLAG_CODES = new Set(${JSON.stringify(flagCodes)});\nconst LOCAL_FLAG_SVGS = ${JSON.stringify(flagSvgs)};${tail}`;
+  }
+);
+if (builtHtmlContent !== htmlContent) {
+  fs.writeFileSync(indexHtmlPath, builtHtmlContent, 'utf8');
+}
+
+const inlineScripts = extractInlineScriptBodies(builtHtmlContent);
 if (inlineScripts.length === 0) {
   throw new Error('No inline <script> blocks found in src/index.html');
 }
@@ -91,7 +104,7 @@ console.log(`Computed CSP hashes for ${appScriptHashes.length} inline <script> b
 
 const bundled = `// دارایی من (Darayi) — Cloudflare Worker Full Single-File Bundle
 // Build generated: ${new Date().toISOString()}
-const APP_HTML = ${JSON.stringify(htmlContent)};
+const APP_HTML = ${JSON.stringify(builtHtmlContent)};
 const APP_SCRIPT_HASHES = ${JSON.stringify(appScriptHashes)};
 const COIN_SPLASH_JS = ${JSON.stringify(splashJsContent)};
 const COIN_FACE_PNG = ${JSON.stringify(facePngBase64)};
@@ -153,8 +166,8 @@ for (const p of leakedInDist) {
 const autoHeader = '<!-- AUTO-GENERATED FROM src/index.html BY scripts/build.mjs — DO NOT EDIT MANUALLY -->\n';
 const rootIndexHtmlPath = path.join(rootDir, 'index.html');
 const distIndexHtmlPath = path.join(distDir, 'index.html');
-fs.writeFileSync(rootIndexHtmlPath, autoHeader + htmlContent, 'utf8');
-fs.writeFileSync(distIndexHtmlPath, htmlContent, 'utf8');
+fs.writeFileSync(rootIndexHtmlPath, autoHeader + builtHtmlContent, 'utf8');
+fs.writeFileSync(distIndexHtmlPath, builtHtmlContent, 'utf8');
 
 fs.writeFileSync(distWorkerPath, bundled, 'utf8');
 console.log(`Successfully built ${distWorkerPath} (${(bundled.length / 1024).toFixed(1)} KB)`);

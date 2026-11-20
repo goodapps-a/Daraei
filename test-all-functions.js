@@ -2059,14 +2059,14 @@ test('wrangler.toml sets keep_vars = true and dark mode viewport styling + SW v1
   assert.ok(html.includes('<meta name="color-scheme" id="colorSchemeMeta" content="light dark">'));
   assert.ok(html.includes(':root[data-theme=dark],html[data-theme=dark]'));
   assert.ok(html.includes('document.body.style.backgroundColor'));
-  assert.ok(html.includes('/sw.js?v=16'));
+  assert.ok(html.includes('/sw.js?v=17'));
 
   const swFile = fs.readFileSync(new URL('./public/sw.js', import.meta.url), 'utf8');
-  assert.ok(swFile.includes("darayi-shell-v16"));
+  assert.ok(swFile.includes("darayi-shell-v17"));
   assert.ok(swFile.includes('url.origin !== self.location.origin'), 'public/sw.js must never cache cross-origin responses');
   assert.ok(swFile.includes("status: 503"), 'public/sw.js must return clean 503 Response on offline cache miss instead of undefined');
   const workerSrc = fs.readFileSync(new URL('./src/worker.js', import.meta.url), 'utf8');
-  assert.ok(workerSrc.includes("darayi-shell-v16"));
+  assert.ok(workerSrc.includes("darayi-shell-v17"));
   assert.ok(workerSrc.includes("status:503"), 'worker SW_JS must return clean 503 Response on offline cache miss');
 });
 
@@ -3715,6 +3715,116 @@ test('chart & UI audit regressions: overnight gap bridges, domestic 1D cache-ske
     assert.ok(distWorker.includes(`"${code}":"<svg`), `FLAG_SVGS must embed ${code}.svg`);
   }
 });
+
+test('all fiat currency flags resolve strictly from local public/logos/flags/*.svg with offline LOCAL_FLAG_SVGS recovery and clean unknown fallback', () => {
+  const html = fs.readFileSync(new URL('./src/index.html', import.meta.url), 'utf8');
+  const wrangler = fs.readFileSync(new URL('./wrangler.toml', import.meta.url), 'utf8');
+
+  // 1. wrangler.toml intercepts /logos/flags/* in Worker first and client has zero external circle-flags CDN dependency
+  assert.ok(wrangler.includes('/logos/flags/*'), 'wrangler.toml run_worker_first must route /logos/flags/* via Worker first');
+  assert.equal(html.includes('circle-flags@gh-pages'), false, 'Client must never fall back to external circle-flags CDN');
+  assert.ok(html.includes('const LOCAL_FLAG_SVGS = '), 'src/index.html must embed LOCAL_FLAG_SVGS from public/logos/flags/*.svg');
+
+  // 2. Evaluate flag resolution & error recovery inside VM
+  const errStart = html.indexOf('window.handleFlagImgError=function(');
+  const errEnd = html.indexOf("document.addEventListener('error',", errStart);
+  const localIconsStart = html.indexOf('/* @LOCAL_ICONS_START */');
+  const localIconsEnd = html.indexOf('/* @LOCAL_ICONS_END */') + '/* @LOCAL_ICONS_END */'.length;
+  const flagStart = html.indexOf('const COUNTRY_FLAGS = {');
+  const flagEnd = html.indexOf('function ticker(', flagStart);
+  const badgeStart = html.indexOf('function cryptoCoinBadge(');
+  const badgeEnd = html.indexOf('function hydrateLateCryptoIcons(');
+  assert.ok(errStart > 0 && errEnd > errStart && localIconsStart > 0 && flagStart > 0 && flagEnd > flagStart && badgeStart > 0 && badgeEnd > badgeStart);
+
+  const ctx = {
+    window: {},
+    document: {},
+    Set, Map, Object, Array, String, Number, Boolean, encodeURIComponent,
+    escapeHtml: (s) => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])),
+    safeImgUrl: (u) => (/^https:\/\//i.test(String(u || '')) || String(u || '').startsWith('/')) ? String(u) : '',
+    safeColor: (c, def = '#7357ff') => String(c || def),
+    getBadgeColors: () => ['#3b82f6', '#1d4ed8'],
+    getCryptoIcon: (a) => `/logos/crypto/${String(a.id || a.symbol || '').toLowerCase()}.png`,
+    cryptoCoinBadge: (sym) => `<span class="asset-icon asset-icon-badge">${String(sym || '?').slice(0, 3).toUpperCase()}</span>`
+  };
+  vm.createContext(ctx);
+  vm.runInContext(
+    html.slice(localIconsStart, localIconsEnd) + '\n' +
+    html.slice(errStart, errEnd) + '\n' +
+    html.slice(flagStart, flagEnd),
+    ctx
+  );
+
+  // 3. Every fiat currency in app maps to a local /logos/flags/<code>.svg and never falls back to text when SVG exists
+  const criticalChecks = [
+    ['usd', 'USD', '/logos/flags/us.svg'],
+    ['eur', 'EUR', '/logos/flags/eu.svg'],
+    ['gbp', 'GBP', '/logos/flags/gb.svg'],
+    ['try', 'TRY', '/logos/flags/tr.svg'],
+    ['aed', 'AED', '/logos/flags/ae.svg'],
+    ['cad', 'CAD', '/logos/flags/ca.svg'],
+    ['aud', 'AUD', '/logos/flags/au.svg'],
+    ['chf', 'CHF', '/logos/flags/ch.svg'],
+    ['cny', 'CNY', '/logos/flags/cn.svg'],
+    ['sar', 'SAR', '/logos/flags/sa.svg'],
+    ['qar', 'QAR', '/logos/flags/qa.svg'],
+    ['kwd', 'KWD', '/logos/flags/kw.svg'],
+    ['omr', 'OMR', '/logos/flags/om.svg'],
+    ['iqd', 'IQD', '/logos/flags/iq.svg'],
+    ['afn', 'AFN', '/logos/flags/af.svg'],
+    ['rub', 'RUB', '/logos/flags/ru.svg'],
+    ['inr', 'INR', '/logos/flags/in.svg'],
+    ['jpy', 'JPY', '/logos/flags/jp.svg'],
+    ['irr', 'IRR', '/logos/flags/ir.svg'],
+    ['toman', 'تومان', '/logos/flags/ir.svg'],
+    ['rial', 'ریال', '/logos/flags/ir.svg'],
+    ['bhd', 'BHD', '/logos/flags/bh.svg'],
+    ['myr', 'MYR', '/logos/flags/my.svg'],
+    ['sgd', 'SGD', '/logos/flags/sg.svg'],
+    ['thb', 'THB', '/logos/flags/th.svg'],
+    ['krw', 'KRW', '/logos/flags/kr.svg'],
+    ['sek', 'SEK', '/logos/flags/se.svg'],
+    ['nok', 'NOK', '/logos/flags/no.svg'],
+    ['dkk', 'DKK', '/logos/flags/dk.svg'],
+    ['nzd', 'NZD', '/logos/flags/nz.svg'],
+    ['hkd', 'HKD', '/logos/flags/hk.svg'],
+    ['brl', 'BRL', '/logos/flags/br.svg'],
+    ['azn', 'AZN', '/logos/flags/az.svg'],
+    ['amd', 'AMD', '/logos/flags/am.svg'],
+    ['gel', 'GEL', '/logos/flags/ge.svg'],
+    ['kzt', 'KZT', '/logos/flags/kz.svg'],
+    ['uzs', 'UZS', '/logos/flags/uz.svg'],
+    ['tmt', 'TMT', '/logos/flags/tm.svg'],
+    ['tjs', 'TJS', '/logos/flags/tj.svg'],
+    ['kgs', 'KGS', '/logos/flags/kg.svg']
+  ];
+  for (const [id, sym, expectedSrc] of criticalChecks) {
+    const out = ctx.assetIcon({ id, symbol: sym, name: sym, cat: 'currency', icon: sym[0] });
+    assert.ok(out.includes(`src="${expectedSrc}"`), `Expected ${id} (${sym}) to render ${expectedSrc}, got ${out}`);
+    assert.ok(out.includes('class="country-flag-img"'));
+  }
+
+  // 4. Simulate failed HTTP image load for USD/GBP/TRY/EUR -> handleFlagImgError MUST recover with data:image/svg+xml (NOT text!)
+  for (const code of ['us', 'gb', 'tr', 'eu', 'ir']) {
+    const fakeParent = { className: 'asset-icon asset-icon-flag', style: {}, textContent: '' };
+    const fakeImg = {
+      src: `/logos/flags/${code}.svg`,
+      getAttribute: (k) => (k === 'src' ? `/logos/flags/${code}.svg` : null),
+      dataset: { flag: code, fb: code.toUpperCase() },
+      parentElement: fakeParent,
+      onerror: () => {}
+    };
+    ctx.window.handleFlagImgError(fakeImg);
+    assert.ok(fakeImg.src.startsWith('data:image/svg+xml;charset=utf-8,'), `Expected local SVG data URI recovery for ${code}, got ${fakeImg.src}`);
+    assert.equal(fakeParent.textContent, '', `Must NOT fall back to text symbol while local SVG exists for ${code}`);
+  }
+
+  // 5. Unknown fiat currency with no flag file cleanly falls back to badge instead of broken/empty <img>
+  const unknownOut = ctx.assetIcon({ id: 'egp', symbol: 'EGP', name: 'پوند مصر', cat: 'currency' });
+  assert.ok(unknownOut.includes('asset-icon-badge') && unknownOut.includes('EGP'));
+  assert.equal(unknownOut.includes('<img'), false);
+});
+
 
 
 

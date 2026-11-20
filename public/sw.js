@@ -1,5 +1,5 @@
 // Service Worker for Darayi PWA
-const CACHE_NAME = 'darayi-shell-v16';
+const CACHE_NAME = 'darayi-shell-v17';
 const STATIC_ASSETS = [
   '/',
   '/manifest.webmanifest',

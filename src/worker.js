@@ -5942,7 +5942,7 @@ const MANIFEST = {
     { src: '/icons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' }
   ]
 };
-const SW_JS = `const V='darayi-shell-v16';
+const SW_JS = `const V='darayi-shell-v17';
 self.addEventListener('install',e=>{self.skipWaiting();e.waitUntil(caches.open(V).then(c=>c.addAll(['/','/manifest.webmanifest','/icons/icon-192.png','/icons/icon-512.png','/coin-face.png','/coin-splash.js'])).catch(()=>{}))});
 self.addEventListener('activate',e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x!==V).map(x=>caches.delete(x)))).then(()=>self.clients.claim()))});
 self.addEventListener('message',e=>{if(e.data&&(e.data.type==='SKIP_WAITING'||e.data==='skipWaiting')){self.skipWaiting()}else if(e.data&&e.data.type==='CLEAR_RUNTIME_CACHE'){e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(x=>x.startsWith('darayi-shell-')).map(x=>caches.delete(x)))).catch(()=>{}))}});
